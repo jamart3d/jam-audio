@@ -1,0 +1,28 @@
+[package]
+name = "jam_audio_engine"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+js-sys = "0.3"
+symphonia = { version = "0.5", features = ["mp3", "ogg", "flac"] }
+symphonia-core = "0.5"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+symphonia-adapter-libopus = "0.2.7"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+unopus = "0.0.1"
+opus-rs = "0.1.16"
+
+[dev-dependencies]
+unopus = "0.0.1"
+opus-rs = "0.1.16"
+
+[patch.crates-io]
+opus-rs = { path = "../../third_party/opus-rs" }

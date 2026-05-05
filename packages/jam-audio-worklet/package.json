@@ -1,0 +1,18 @@
+{
+  "name": "jam_audio_worklet",
+  "version": "0.1.0",
+  "description": "Generic audio worklet and bridge for Jam Audio Pipeline",
+  "type": "module",
+  "main": "src/audio_bridge.js",
+  "scripts": {
+    "test": "node --check src/audio_bridge.js && node --check src/audio_processor.js"
+  },
+  "keywords": [
+    "audio",
+    "worklet",
+    "bridge",
+    "web-audio"
+  ],
+  "author": "",
+  "license": "ISC"
+}

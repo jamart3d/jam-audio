@@ -1,0 +1,21 @@
+# Rust
+**/target/
+**/Cargo.lock
+
+# Flutter/Dart
+**/.dart_tool/
+**/pubspec.lock
+**/.packages
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+
+# JavaScript/Node
+**/node_modules/
+**/package-lock.json
+**/pkg/
+
+# OS/IDE
+.DS_Store
+.vscode/
+*.swp
+*.bak
