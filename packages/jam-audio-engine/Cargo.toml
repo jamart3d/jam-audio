@@ -6,6 +6,9 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+console_error_panic_hook = ["dep:console_error_panic_hook"]
+
 [dependencies]
 js-sys = "0.3"
 symphonia = { version = "0.5", features = ["mp3", "ogg", "flac"] }
@@ -19,10 +22,11 @@ symphonia-adapter-libopus = "0.2.7"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 unopus = "0.0.1"
 opus-rs = "0.1.16"
+console_error_panic_hook = { version = "0.1", optional = true }
 
 [dev-dependencies]
 unopus = "0.0.1"
 opus-rs = "0.1.16"
 
 [patch.crates-io]
-opus-rs = { path = "../../third_party/opus-rs" }
+opus-rs = { path = "../../third_party/opus-rs-upstream" }

@@ -111,8 +111,8 @@ impl SharedWindowedMediaSource {
     }
 }
 
-unsafe impl Send for SharedWindowedMediaSource {}
-unsafe impl Sync for SharedWindowedMediaSource {}
+unsafe impl Send for SharedWindowedMediaSource { }
+unsafe impl Sync for SharedWindowedMediaSource { }
 
 impl Read for SharedWindowedMediaSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -127,6 +127,42 @@ impl Seek for SharedWindowedMediaSource {
 }
 
 impl MediaSource for SharedWindowedMediaSource {
+    fn is_seekable(&self) -> bool {
+        self.inner.borrow().is_seekable()
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        self.inner.borrow().byte_len()
+    }
+}
+
+// Internal bridge between AppendableMediaSource and Symphonia
+struct SharedAppendableMediaSource {
+    inner: Rc<RefCell<AppendableMediaSource>>,
+}
+
+impl SharedAppendableMediaSource {
+    fn new(inner: Rc<RefCell<AppendableMediaSource>>) -> Self {
+        Self { inner }
+    }
+}
+
+unsafe impl Send for SharedAppendableMediaSource { }
+unsafe impl Sync for SharedAppendableMediaSource { }
+
+impl Read for SharedAppendableMediaSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.borrow_mut().read(buf)
+    }
+}
+
+impl Seek for SharedAppendableMediaSource {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.inner.borrow_mut().seek(pos)
+    }
+}
+
+impl MediaSource for SharedAppendableMediaSource {
     fn is_seekable(&self) -> bool {
         self.inner.borrow().is_seekable()
     }
@@ -331,7 +367,7 @@ impl WindowedStreamingPlayer {
         let _ = self.core.append_chunk(chunk);
     }
 
-    #[wasm_bindgen(js_name = finalizeStream)]
+    #[wasm_bindgen(js_name = finalize)]
     pub fn finalize_stream(&mut self) {
         self.core.finalize();
     }
@@ -366,6 +402,76 @@ impl WindowedStreamingPlayer {
     }
 }
 
+#[wasm_bindgen]
+pub struct StreamingPlayer {
+    core: StreamingPlayerCore,
+    output_buffer: Vec<f32>,
+}
+
+#[wasm_bindgen]
+impl StreamingPlayer {
+    #[wasm_bindgen(constructor)]
+    pub fn new(target_sample_rate: Option<u32>) -> Self {
+        Self {
+            core: StreamingPlayerCore::new(target_sample_rate.unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE)),
+            output_buffer: Vec::with_capacity(2048),
+        }
+    }
+
+    #[wasm_bindgen(js_name = appendChunk)]
+    pub fn append_chunk(&mut self, chunk: &[u8]) -> Result<bool, JsValue> {
+        self.core.append_chunk(chunk).map_err(decode_error_to_js)
+    }
+
+    #[wasm_bindgen(js_name = finalize)]
+    pub fn finalize_stream(&mut self) {
+        self.core.finalize();
+    }
+
+    #[wasm_bindgen(js_name = seekToMs)]
+    pub fn seek_to_ms(&mut self, ms: f64) -> Result<(), JsValue> {
+        self.core.seek_to_ms(ms).map_err(decode_error_to_js)
+    }
+
+    #[wasm_bindgen(js_name = isReady)]
+    pub fn is_ready(&self) -> bool {
+        self.core.is_ready()
+    }
+
+    #[wasm_bindgen(js_name = isFinalized)]
+    pub fn is_finalized(&self) -> bool {
+        self.core.is_finalized()
+    }
+
+    #[wasm_bindgen(js_name = durationMs)]
+    pub fn duration_ms(&self) -> f64 {
+        if let Some(decoder) = self.core.decoder.as_ref() {
+            decoder.duration_ms()
+        } else {
+            0.0
+        }
+    }
+
+    #[wasm_bindgen(js_name = positionMs)]
+    pub fn position_ms(&self) -> f64 {
+        self.core.frames_decoded as f64 * 1000.0 / self.core.target_sample_rate as f64
+    }
+
+    #[wasm_bindgen(js_name = bufferedBytes)]
+    pub fn buffered_bytes(&self) -> usize {
+        self.core.buffered_bytes()
+    }
+
+    #[wasm_bindgen(js_name = decodeFrames)]
+    pub fn decode_frames(&mut self, n: u32) -> Result<JsValue, JsValue> {
+        match self.core.decode_frames_into(n, &mut self.output_buffer).map_err(decode_error_to_js)? {
+            StreamingFrameResult::Waiting => Ok(JsValue::NULL),
+            StreamingFrameResult::EndOfStream => Err(js_string("end-of-stream")),
+            StreamingFrameResult::Success => Ok(Float32Array::from(self.output_buffer.as_slice()).into()),
+        }
+    }
+}
+
 fn decode_error_to_js(e: DecodeError) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
@@ -375,27 +481,33 @@ fn js_string(s: &str) -> JsValue {
 }
 
 struct StreamingPlayerCore {
-    source: AppendableMediaSource,
+    source: Rc<RefCell<AppendableMediaSource>>,
     decoder: Option<StreamingDecoder>,
+    frames_decoded: u64,
+    residual: Vec<f32>,
+    scratch: Vec<f32>,
     target_sample_rate: u32,
 }
 
 impl StreamingPlayerCore {
     fn new(target_sample_rate: u32) -> Self {
         Self {
-            source: AppendableMediaSource::new(),
+            source: Rc::new(RefCell::new(AppendableMediaSource::new())),
             decoder: None,
+            frames_decoded: 0,
+            residual: Vec::new(),
+            scratch: Vec::with_capacity(2048),
             target_sample_rate,
         }
     }
 
     fn append_chunk(&mut self, chunk: &[u8]) -> Result<bool, DecodeError> {
-        self.source.append(chunk);
+        self.source.borrow_mut().append(chunk);
         self.try_initialize_decoder()
     }
 
     fn finalize(&mut self) {
-        self.source.finalize();
+        self.source.borrow_mut().finalize();
         let _ = self.try_initialize_decoder();
     }
 
@@ -405,33 +517,80 @@ impl StreamingPlayerCore {
 
     fn seek_to_ms(&mut self, ms: f64) -> Result<(), DecodeError> {
         if let Some(decoder) = self.decoder.as_mut() {
-            decoder.seek_to_ms(ms)
-        } else {
-            Err(DecodeError::Symphonia("not ready".to_string()))
+            decoder.seek_to_ms(ms)?;
         }
+
+        self.frames_decoded = (ms * self.target_sample_rate as f64 / 1000.0) as u64;
+        self.residual.clear();
+        Ok(())
     }
 
     fn buffered_bytes(&self) -> usize {
-        self.source.buffered_len()
+        self.source.borrow().buffered_len()
     }
 
+    #[allow(dead_code)]
     fn decode_frames(&mut self, n: u32) -> Result<StreamingFrameResult, DecodeError> {
-        if let Some(decoder) = self.decoder.as_mut() {
-            let mut out = Vec::new();
-            match decoder.decode_chunk_into(n as usize, &mut out) {
-                Ok(true) => Ok(StreamingFrameResult::Success),
-                Ok(false) => {
-                    if self.source.is_finalized() {
-                        Ok(StreamingFrameResult::EndOfStream)
+        let mut out = Vec::new();
+        self.decode_frames_into(n, &mut out)
+    }
+
+    fn decode_frames_into(
+        &mut self,
+        target_frames: u32,
+        out: &mut Vec<f32>,
+    ) -> Result<StreamingFrameResult, DecodeError> {
+        out.clear();
+
+        if self.decoder.is_none() {
+            let ready = self.try_initialize_decoder()?;
+            if !ready {
+                return Ok(if self.is_finalized() { StreamingFrameResult::EndOfStream } else { StreamingFrameResult::Waiting });
+            }
+        }
+
+        let target_samples = target_frames as usize * 2;
+
+        if self.residual.len() >= target_samples {
+            out.extend(self.residual.drain(..target_samples));
+            self.frames_decoded += (out.len() / 2) as u64;
+            return Ok(StreamingFrameResult::Success);
+        }
+
+        if !self.residual.is_empty() {
+            out.extend(std::mem::take(&mut self.residual));
+        }
+
+        while out.len() < target_samples {
+            let need_frames = (target_samples - out.len()) / 2;
+            self.scratch.clear();
+
+            let decode_res = self.decoder.as_mut().expect("decoder").decode_chunk_into(need_frames, &mut self.scratch);
+            match decode_res {
+                Ok(true) => {
+                    let need_samples = target_samples - out.len();
+                    if self.scratch.len() <= need_samples {
+                        out.extend_from_slice(&self.scratch);
                     } else {
-                        Ok(StreamingFrameResult::Waiting)
+                        out.extend_from_slice(&self.scratch[..need_samples]);
+                        self.residual.extend_from_slice(&self.scratch[need_samples..]);
                     }
                 }
-                Err(e) => Err(e),
+                Ok(false) => {
+                    if out.is_empty() {
+                        return Ok(if self.is_finalized() { StreamingFrameResult::EndOfStream } else { StreamingFrameResult::Waiting });
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    return Err(e);
+                }
             }
-        } else {
-            Ok(StreamingFrameResult::Waiting)
         }
+
+        self.frames_decoded += (out.len() / 2) as u64;
+        Ok(StreamingFrameResult::Success)
     }
 
     fn try_initialize_decoder(&mut self) -> Result<bool, DecodeError> {
@@ -439,24 +598,29 @@ impl StreamingPlayerCore {
             return Ok(true);
         }
 
-        let should_probe = self.source.buffered_len() >= STREAMING_PROBE_THRESHOLD_BYTES || self.source.is_finalized();
+        let should_probe = self.source.borrow().buffered_len() >= STREAMING_PROBE_THRESHOLD_BYTES || self.source.borrow().is_finalized();
         if !should_probe {
             return Ok(false);
         }
 
-        match StreamingDecoder::from_media_source(self.source.clone(), self.target_sample_rate) {
+        let shared_source = SharedAppendableMediaSource::new(Rc::clone(&self.source));
+        match StreamingDecoder::from_media_source(shared_source, self.target_sample_rate) {
             Ok(decoder) => {
                 self.decoder = Some(decoder);
                 Ok(true)
             }
             Err(e) => {
-                if self.source.is_finalized() {
+                if self.source.borrow().is_finalized() {
                     Err(e)
                 } else {
                     Ok(false)
                 }
             }
         }
+    }
+
+    fn is_finalized(&self) -> bool {
+        self.source.borrow().is_finalized()
     }
 }
 

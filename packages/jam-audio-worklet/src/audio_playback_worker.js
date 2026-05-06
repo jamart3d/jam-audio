@@ -3,6 +3,7 @@ import { RangeFetchController } from './range_fetch_controller.js';
 
 export function initPlaybackWorker({
   wasmModuleLoader,
+  initializePanicHook = () => {},
   GaplessPlayerClass,
   StreamingPlayerClass,
   WindowedStreamingPlayerClass,
@@ -11,9 +12,24 @@ export function initPlaybackWorker({
 
   function ensureWasm() {
     if (!wasmReadyPromise) {
-      wasmReadyPromise = wasmModuleLoader();
+      wasmReadyPromise = wasmModuleLoader().then(() => {
+        initializePanicHook();
+      });
     }
     return wasmReadyPromise;
+  }
+
+  function formatUnhandledWorkerReason(reason) {
+    if (reason instanceof Error) {
+      return reason.message;
+    }
+    if (typeof reason === 'string') {
+      return reason;
+    }
+    if (reason && typeof reason.message === 'string') {
+      return reason.message;
+    }
+    return String(reason ?? 'Playback worker failed.');
   }
 
   const controller = createPlaybackWorkerController({
@@ -28,6 +44,20 @@ export function initPlaybackWorker({
     clearIntervalFn: (timerId) => self.clearInterval(timerId),
     performanceNow: () => performance.now(),
     nowMs: () => Math.round(performance.now()),
+  });
+
+  self.addEventListener('error', (event) => {
+    self.postMessage({
+      type: 'playback-error',
+      message: formatUnhandledWorkerReason(event.error ?? event.message),
+    });
+  });
+
+  self.addEventListener('unhandledrejection', (event) => {
+    self.postMessage({
+      type: 'playback-error',
+      message: formatUnhandledWorkerReason(event.reason),
+    });
   });
 
   self.onmessage = async (event) => {

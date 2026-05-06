@@ -360,7 +360,7 @@ pub fn unquant_coarse_energy(
                 let prob_idx = 2 * i.min(20);
                 let fs = (prob_model[prob_idx] as u32) << 7;
                 let decay = (prob_model[prob_idx + 1] as i32) << 6;
-                let tell_before = dec.tell_frac();
+                let _tell_before = dec.tell_frac();
                 qi = dec.laplace_decode(fs, decay);
             } else if budget - tell >= 2 {
                 let s = dec.decode_icdf(&SMALL_ENERGY_ICDF, 2);

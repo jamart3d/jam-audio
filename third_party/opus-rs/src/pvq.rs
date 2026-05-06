@@ -220,7 +220,7 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
         if j == 0 { break; }
         j -= 1;
         let j1 = (j + 1) as u32;
-        let p = celt_pvq_u_lookup(j1, k as u32);
+        let _p = celt_pvq_u_lookup(j1, k as u32);
         let q = celt_pvq_u_lookup(j1, (k + 1) as u32);
         let s: i32 = if i >= q && k > 0 { -1 } else { 0 };
         if s != 0 { i -= q; }

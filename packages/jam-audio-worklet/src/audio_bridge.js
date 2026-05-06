@@ -323,16 +323,22 @@ export function createJamAudioBridge({
     playbackWorker = new Worker(playbackWorkerModuleUrl, { type: 'module' });
     playbackWorker.addEventListener('message', handlePlaybackWorkerMessage);
     playbackWorker.addEventListener('error', (event) => {
+      const workerErrorMessage =
+        event.error?.message ?? event.message ?? 'Playback worker failed.';
+      for (const pending of pendingWorkerRequests.values()) {
+        pending.reject(new Error(workerErrorMessage));
+      }
+      pendingWorkerRequests.clear();
       setWorkerState('error');
       emitDiagnosticsEvent({
         type: 'playback-worker-error',
         label: 'Playback worker error',
         timestampMs: nowMs(),
         severity: 'error',
-        message: event.message ?? 'Playback worker failed.',
+        message: workerErrorMessage,
       });
       if (typeof onPlaybackErrorCallback === 'function') {
-        onPlaybackErrorCallback(event.message ?? 'Playback worker failed.');
+        onPlaybackErrorCallback(workerErrorMessage);
       }
     });
     return playbackWorker;
