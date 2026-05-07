@@ -7,6 +7,7 @@ const CHANNELS = 2;
 const REFILL_CHUNK_FRAMES = 1024;
 const REFILL_INTERVAL_MS = 15;
 const PLAYBACK_START_FRAMES = 88200;
+const STEADY_STATE_TARGET_FRAMES = 264600; // ~5.5s at 48kHz
 const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
@@ -39,6 +40,8 @@ function createPlaybackWorkerController({
   let transitionMonitorUntilMs = 0;
   let transitionFloorCandidate = Infinity;
   let endedEmitted = false;
+  let lastChunkReceivedAt = 0;
+  let isStalled = false;
   let diagnostics = createWorkerDiagnostics();
 
   function emitDiagnosticsEvent(event) {
@@ -63,6 +66,12 @@ function createPlaybackWorkerController({
         movingAverageDecodeMs: diagnostics.movingAverageDecodeMs,
         transitionGapMs: diagnostics.transitionGapMs,
         lastTransitionFloorPercent: diagnostics.lastTransitionFloorPercent,
+        lowWaterMarkCount: diagnostics.lowWaterMarkCount,
+        activeBoundedWindowSize: diagnostics.activeBoundedWindowSize,
+        retainedBytes: diagnostics.retainedBytes,
+        pendingSeekDistanceMs: diagnostics.pendingSeekDistanceMs,
+        fetchToDecodeLagMs: diagnostics.fetchToDecodeLagMs,
+        resumeAfterStallLatencyMs: diagnostics.resumeAfterStallLatencyMs,
         historyPoint,
         startupTimingsMs,
       },
@@ -73,6 +82,8 @@ function createPlaybackWorkerController({
     return windowedPlayer ?? streamingPlayer ?? player;
   }
 
+  let isBelowLowWaterMark = false;
+
   function updateBufferMetrics() {
     const framesAvailable = sharedState
       ? Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX)
@@ -82,6 +93,17 @@ function createPlaybackWorkerController({
       frameCapacity > 0
         ? Number(((framesAvailable / frameCapacity) * 100).toFixed(1))
         : 0;
+
+    if (diagnostics.bufferFillPercent < 10 && !isBelowLowWaterMark) {
+      isBelowLowWaterMark = true;
+      diagnostics.lowWaterMarkCount += 1;
+    } else if (diagnostics.bufferFillPercent >= 15) {
+      isBelowLowWaterMark = false;
+    }
+
+    if (windowedPlayer) {
+      diagnostics.retainedBytes = windowedPlayer.bufferedBytes();
+    }
 
     const currentTime = nowMs();
     if (currentTime <= transitionMonitorUntilMs) {
@@ -161,6 +183,15 @@ function createPlaybackWorkerController({
           timestampMs: nowMs(),
           gapMs: Math.round(gap),
         });
+        if (diagnostics.bufferFillPercent < 15) {
+          emitDiagnosticsEvent({
+            type: 'refill-delayed-headroom-low',
+            label: 'Refill delayed while headroom low',
+            severity: 'critical',
+            timestampMs: nowMs(),
+            bufferFillPercent: diagnostics.bufferFillPercent,
+          });
+        }
       }
       refillRingBuffer();
     }, REFILL_INTERVAL_MS);
@@ -267,8 +298,9 @@ function createPlaybackWorkerController({
 
     while (true) {
       const framesAvailable = Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX);
+      const currentTargetFrames = startupCompleted ? STEADY_STATE_TARGET_FRAMES : frameCapacity;
       const writableFrames = Math.min(
-        frameCapacity - framesAvailable,
+        currentTargetFrames - framesAvailable,
         REFILL_CHUNK_FRAMES,
       );
 
@@ -289,6 +321,19 @@ function createPlaybackWorkerController({
       }
 
       updateDecodeMetrics(Number((performanceNow() - decodeStartedAt).toFixed(2)));
+
+      if (result instanceof Float32Array && result.length > 0) {
+        diagnostics.pendingSeekDistanceMs = 0;
+        if (lastChunkReceivedAt > 0) {
+          const lag = performanceNow() - lastChunkReceivedAt;
+          diagnostics.fetchToDecodeLagMs = Number(lag.toFixed(2));
+          if (isStalled) {
+            diagnostics.resumeAfterStallLatencyMs = Number(lag.toFixed(2));
+            isStalled = false;
+          }
+          lastChunkReceivedAt = 0;
+        }
+      }
 
       if (activePlayer === windowedPlayer) {
         if (activePlayer.hasPendingSeek()) {
@@ -321,6 +366,15 @@ function createPlaybackWorkerController({
 
       if (result === null) {
         if (isStreaming) {
+          if (!streamingFinalized) {
+            isStalled = true;
+            emitDiagnosticsEvent({
+              type: 'decode-waiting',
+              label: 'Waiting for stream data',
+              severity: 'info',
+              timestampMs: nowMs(),
+            });
+          }
           if (streamingFinalized) {
             handleEndOfStream();
           }
@@ -440,6 +494,12 @@ function createPlaybackWorkerController({
         workerState: 'running',
         decoderOwner: 'worker',
       });
+      emitDiagnosticsEvent({
+        type: 'decoder-reinitialized',
+        label: 'Decoder reinitialized (gapless)',
+        timestampMs: nowMs(),
+        severity: 'info',
+      });
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
       player = createGaplessPlayer(audioBytes, buffers.sampleRate ?? 48000);
@@ -456,15 +516,24 @@ function createPlaybackWorkerController({
     playTrackBounded(url, totalSize, sampleRate, buffers) {
       stopRefillLoop();
       resetPlaybackState();
+      const maxWindowMb = 64;
       diagnostics = createWorkerDiagnostics({
         workerState: 'running',
         decoderOwner: 'worker',
+        activeBoundedWindowSize: maxWindowMb,
+      });
+      emitDiagnosticsEvent({
+        type: 'decoder-reinitialized',
+        label: 'Decoder reinitialized (bounded)',
+        timestampMs: nowMs(),
+        severity: 'info',
       });
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
       
-      const wasmPlayer = createWindowedStreamingPlayer(totalSize != null ? BigInt(totalSize) : undefined, 64);
+      const wasmPlayer = createWindowedStreamingPlayer(totalSize != null ? BigInt(totalSize) : undefined, maxWindowMb);
       let framesDecoded = 0;
+      let lastWindowStart = 0;
       
       windowedPlayer = {
         free: () => wasmPlayer.free(),
@@ -492,6 +561,8 @@ function createPlaybackWorkerController({
         hasPendingSeek: () => wasmPlayer.hasPendingSeek(),
         pendingSeekOffset: () => wasmPlayer.pendingSeekOffset(),
         clearPendingSeek: () => wasmPlayer.clearPendingSeek(),
+        windowStart: () => wasmPlayer.windowStart(),
+        bufferedBytes: () => wasmPlayer.bufferedBytes(),
         finalizeStream: () => wasmPlayer.finalizeStream(),
         appendChunk: (chunk) => wasmPlayer.appendChunk(chunk),
         bufferedAhead: () => {
@@ -512,8 +583,21 @@ function createPlaybackWorkerController({
 
       fetchController = createRangeFetchController(url, {
         onChunk: (chunk) => {
+          lastChunkReceivedAt = performanceNow();
           if (windowedPlayer) {
             windowedPlayer.appendChunk(chunk);
+            const currentWindowStart = windowedPlayer.windowStart();
+            if (currentWindowStart > lastWindowStart) {
+              emitDiagnosticsEvent({
+                type: 'bounded-window-slide',
+                label: 'Bounded window slide',
+                timestampMs: nowMs(),
+                severity: 'info',
+                oldStart: lastWindowStart,
+                newStart: currentWindowStart,
+              });
+              lastWindowStart = currentWindowStart;
+            }
             kickRefillLoopIfNeeded();
           }
         },
@@ -539,6 +623,12 @@ function createPlaybackWorkerController({
       diagnostics = createWorkerDiagnostics({
         workerState: 'running',
         decoderOwner: 'worker',
+      });
+      emitDiagnosticsEvent({
+        type: 'decoder-reinitialized',
+        label: 'Decoder reinitialized (streaming)',
+        timestampMs: nowMs(),
+        severity: 'info',
       });
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
@@ -618,6 +708,9 @@ function createPlaybackWorkerController({
       stopRefillLoop();
       diagnostics.transitionGapMs = null;
       
+      const currentPos = (activePlayer.positionMs() - trackStartPositionMs);
+      diagnostics.pendingSeekDistanceMs = Math.abs(positionMs - currentPos);
+
       let seekError = null;
       try {
         activePlayer.seekToMs(positionMs);
@@ -681,6 +774,34 @@ function createPlaybackWorkerController({
       diagnostics = createWorkerDiagnostics();
       emitDiagnosticsSync();
     },
+
+    nudge() {
+      emitDiagnosticsEvent({
+        type: 'worker-nudge',
+        label: 'Worker nudged',
+        timestampMs: nowMs(),
+        severity: 'info',
+      });
+      kickRefillLoopIfNeeded();
+      return this.getHealthStatus();
+    },
+
+    getHealthStatus() {
+      const framesAvailable = sharedState
+        ? Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX)
+        : 0;
+      const endOfStream = sharedState
+        ? Atomics.load(sharedState, END_OF_STREAM_INDEX) === 1
+        : false;
+      const pendingSeek = (windowedPlayer?.hasPendingSeek()) ?? false;
+
+      return {
+        framesAvailable,
+        decoderReady: !!(windowedPlayer || streamingPlayer || player),
+        endOfStream,
+        pendingSeek,
+      };
+    },
   };
 }
 
@@ -699,6 +820,12 @@ function createWorkerDiagnostics(overrides = {}) {
     movingAverageDecodeMs: 0,
     transitionGapMs: null,
     lastTransitionFloorPercent: null,
+    lowWaterMarkCount: 0,
+    activeBoundedWindowSize: 0,
+    retainedBytes: 0,
+    pendingSeekDistanceMs: 0,
+    fetchToDecodeLagMs: 0,
+    resumeAfterStallLatencyMs: 0,
     ...overrides,
   };
 }

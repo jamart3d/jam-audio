@@ -82,8 +82,29 @@ export function createJamAudioBridge({
     const blob = new Blob([bytes], { type: 'audio/mpeg' });
     currentTrackBlobUrl = URL.createObjectURL(blob);
     silentAudioEl.src = currentTrackBlobUrl;
+    silentAudioEl.muted = true;
     silentAudioEl.volume = 0;
     silentAudioEl.play().catch(() => {});
+  }
+
+  function setBoundedTrackAudioOnSilentElement(url) {
+    ensureSilentAudio();
+    if (currentTrackBlobUrl) {
+      URL.revokeObjectURL(currentTrackBlobUrl);
+      currentTrackBlobUrl = null;
+    }
+    silentAudioEl.src = url;
+    silentAudioEl.muted = true;
+    silentAudioEl.volume = 0;
+    silentAudioEl.play().catch((err) => {
+      emitDiagnosticsEvent({
+        type: 'hidden-media-play-failed',
+        label: 'Hidden bounded media play failed',
+        timestampMs: nowMs(),
+        severity: 'warn',
+        message: err?.message,
+      });
+    });
   }
 
   function clampVolume(value) {
@@ -294,6 +315,12 @@ export function createJamAudioBridge({
     if (payload.lastTransitionFloorPercent !== undefined) {
       diagnosticsState.lastTransitionFloorPercent = payload.lastTransitionFloorPercent;
     }
+    if (payload.lowWaterMarkCount !== undefined) diagnosticsState.lowWaterMarkCount = payload.lowWaterMarkCount;
+    if (payload.activeBoundedWindowSize !== undefined) diagnosticsState.activeBoundedWindowSize = payload.activeBoundedWindowSize;
+    if (payload.retainedBytes !== undefined) diagnosticsState.retainedBytes = payload.retainedBytes;
+    if (payload.pendingSeekDistanceMs !== undefined) diagnosticsState.pendingSeekDistanceMs = payload.pendingSeekDistanceMs;
+    if (payload.fetchToDecodeLagMs !== undefined) diagnosticsState.fetchToDecodeLagMs = payload.fetchToDecodeLagMs;
+    if (payload.resumeAfterStallLatencyMs !== undefined) diagnosticsState.resumeAfterStallLatencyMs = payload.resumeAfterStallLatencyMs;
     if (payload.startupTimingsMs) {
       diagnosticsState.startupTimingsMs = {
         ...diagnosticsState.startupTimingsMs,
@@ -307,7 +334,7 @@ export function createJamAudioBridge({
 
   function createSharedBuffers() {
     const wasm = window.wasm_bindgen;
-    frameCapacity = (wasm && wasm.defaultRingBufferFrames) ? wasm.defaultRingBufferFrames() : 8192;
+    frameCapacity = (wasm && wasm.defaultRingBufferFrames) ? wasm.defaultRingBufferFrames() : 524288;
     sharedPcmBuffer = new SharedArrayBuffer(
       frameCapacity * CHANNELS * Float32Array.BYTES_PER_ELEMENT,
     );
@@ -547,6 +574,7 @@ export function createJamAudioBridge({
 
   async function playTrackBounded(url, totalSize) {
     beginPlaybackSession();
+    setBoundedTrackAudioOnSilentElement(url);
     try {
       ensureCrossOriginIsolation();
       await ensureWasm();
@@ -655,8 +683,21 @@ export function createJamAudioBridge({
         isAppOwnedResumeInFlight = false;
       }
       markPlaybackState('playing');
+      if (playbackWorker) void sendPlaybackWorkerCommand('nudge').catch(() => {});
       emitDiagnosticsEvent({ type: 'resume', label: 'Resumed', timestampMs: nowMs(), severity: 'info' });
     }
+  }
+
+  async function getWorkerHealthStatus() {
+    if (!playbackWorker) {
+      return {
+        framesAvailable: 0,
+        decoderReady: false,
+        endOfStream: false,
+        pendingSeek: false,
+      };
+    }
+    return await sendPlaybackWorkerCommand('getHealthStatus');
   }
 
   function stop(options = {}) {
@@ -667,17 +708,17 @@ export function createJamAudioBridge({
       URL.revokeObjectURL(currentTrackBlobUrl);
       currentTrackBlobUrl = null;
     }
-    if (silentAudioEl) silentAudioEl.src = '';
-    if (silentAudioEl && !preserveMediaSession) {
-      silentAudioEl.pause();
-      silentAudioEl.currentTime = 0;
+    if (silentAudioEl) {
+      silentAudioEl.src = preserveMediaSession ? silentWavUrl : '';
+      if (!preserveMediaSession) {
+        silentAudioEl.pause();
+        silentAudioEl.currentTime = 0;
+      } else if (silentAudioEl.paused) {
+        silentAudioEl.play().catch(() => {});
+      }
     }
     if ('mediaSession' in navigator && !preserveMediaSession) {
       navigator.mediaSession.playbackState = 'none';
-      if (silentAudioEl) {
-        silentAudioEl.pause();
-        silentAudioEl.currentTime = 0;
-      }
     }
     sharedPcmBuffer = null;
     sharedStateBuffer = null;
@@ -827,12 +868,54 @@ export function createJamAudioBridge({
     });
   }
 
+  async function ensureMediaAlive() {
+    ensureSilentAudio();
+    let hiddenMediaPlaying = false;
+    let hiddenMediaError = null;
+    let audioContextState = audioContext?.state ?? 'missing';
+
+    try {
+      if (silentAudioEl.paused) {
+        await silentAudioEl.play();
+      }
+      hiddenMediaPlaying = !silentAudioEl.paused;
+    } catch (err) {
+      hiddenMediaError = err?.message ?? String(err);
+      emitDiagnosticsEvent({
+        type: 'hidden-media-ensure-failed',
+        label: 'Hidden media ensure failed',
+        timestampMs: nowMs(),
+        severity: 'warn',
+        message: hiddenMediaError,
+      });
+    }
+
+    if (audioContext && audioContext.state === 'suspended') {
+      try {
+        await audioContext.resume();
+      } catch (err) {
+        emitDiagnosticsEvent({
+          type: 'audio-context-ensure-resume-failed',
+          label: 'Audio context ensure resume failed',
+          timestampMs: nowMs(),
+          severity: 'warn',
+          message: err?.message ?? String(err),
+        });
+      }
+    }
+
+    audioContextState = audioContext?.state ?? 'missing';
+    return { hiddenMediaPlaying, audioContextState, hiddenMediaError };
+  }
+
   const bridgeApi = {
     playTrack,
     playTrackStreaming,
     playTrackBounded,
+    ensureMediaAlive,
     appendChunk,
     finalizeStream,
+
     preloadNext,
     preloadNextBounded,
     seek,

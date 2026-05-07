@@ -15,6 +15,8 @@ impl std::fmt::Display for GaplessError {
     }
 }
 
+impl std::error::Error for GaplessError {}
+
 pub struct GaplessPlayer {
     active: StreamingDecoder,
     next: Option<StreamingDecoder>,
@@ -47,7 +49,6 @@ impl GaplessPlayer {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn decode_frames(&mut self, n: usize) -> Result<Vec<f32>, GaplessError> {
         let mut out = Vec::with_capacity(n * 2);
         self.decode_frames_into(&mut out, n)?;
@@ -267,5 +268,11 @@ mod tests {
             }
         }
         assert!(player.has_ended());
+    }
+
+    #[test]
+    fn gapless_error_implements_std_error() {
+        let err = GaplessError::Corrupted("bad".into());
+        let _: &dyn std::error::Error = &err; // fails to compile if Error not impl'd
     }
 }

@@ -92,6 +92,11 @@ pub struct StreamingDecoder {
     duration_ms: f64,
     is_ogg_family: bool,
     has_known_byte_len: bool,
+    intermediate_samples: Vec<f32>,
+    stereo_scratch: Vec<f32>,
+    sample_buffer: Option<SampleBuffer<f32>>,
+    sample_buffer_rate: u32,
+    sample_buffer_channels: u32,
 }
 
 fn codec_supported_on_target(
@@ -178,6 +183,11 @@ impl StreamingDecoder {
             duration_ms,
             is_ogg_family,
             has_known_byte_len,
+            intermediate_samples: Vec::with_capacity(8192),
+            stereo_scratch: Vec::with_capacity(8192),
+            sample_buffer: None,
+            sample_buffer_rate: 0,
+            sample_buffer_channels: 0,
         })
     }
 
@@ -243,7 +253,7 @@ impl StreamingDecoder {
         target_frames: usize,
         out: &mut Vec<f32>,
     ) -> Result<bool, DecodeError> {
-        let mut samples = Vec::new();
+        self.intermediate_samples.clear();
         let target_samples_stereo = target_frames * 2;
 
         loop {
@@ -266,22 +276,29 @@ impl StreamingDecoder {
             self.source_sample_rate = spec.rate;
             self.source_channels = spec.channels.count() as u32;
 
-            append_interleaved_samples(&mut samples, decoded);
+            append_interleaved_samples(
+                &mut self.intermediate_samples,
+                decoded,
+                &mut self.sample_buffer,
+                &mut self.sample_buffer_rate,
+                &mut self.sample_buffer_channels,
+            );
 
-            if samples.len() >= target_samples_stereo {
+            if self.intermediate_samples.len() >= target_samples_stereo {
                 break;
             }
         }
 
-        if samples.is_empty() {
+        if self.intermediate_samples.is_empty() {
             return Ok(false);
         }
 
         normalize_to_stereo_output_into(
-            &samples,
+            &self.intermediate_samples,
             self.source_sample_rate,
             self.source_channels,
             self.target_sample_rate,
+            &mut self.stereo_scratch,
             out,
         );
         Ok(true)
@@ -315,12 +332,32 @@ pub fn decode_audio_bytes(
     ))
 }
 
-fn append_interleaved_samples(samples: &mut Vec<f32>, decoded: AudioBufferRef<'_>) {
-    let capacity = decoded.capacity() as u64;
+fn append_interleaved_samples(
+    samples: &mut Vec<f32>,
+    decoded: AudioBufferRef<'_>,
+    sample_buffer_opt: &mut Option<SampleBuffer<f32>>,
+    sb_rate: &mut u32,
+    sb_channels: &mut u32,
+) {
     let spec = *decoded.spec();
-    let mut converted = SampleBuffer::<f32>::new(capacity, spec);
-    converted.copy_interleaved_ref(decoded);
-    samples.extend_from_slice(converted.samples());
+    let capacity = decoded.capacity() as u64;
+
+    if let Some(sb) = sample_buffer_opt {
+        if *sb_rate != spec.rate || *sb_channels != spec.channels.count() as u32 || sb.capacity() < capacity as usize {
+            *sample_buffer_opt = Some(SampleBuffer::<f32>::new(capacity, spec));
+            *sb_rate = spec.rate;
+            *sb_channels = spec.channels.count() as u32;
+        }
+    } else {
+        *sample_buffer_opt = Some(SampleBuffer::<f32>::new(capacity, spec));
+        *sb_rate = spec.rate;
+        *sb_channels = spec.channels.count() as u32;
+    }
+
+    if let Some(sb) = sample_buffer_opt {
+        sb.copy_interleaved_ref(decoded);
+        samples.extend_from_slice(sb.samples());
+    }
 }
 
 fn normalize_to_stereo_output_into(
@@ -328,35 +365,41 @@ fn normalize_to_stereo_output_into(
     source_sample_rate: u32,
     source_channels: u32,
     target_sample_rate: u32,
+    stereo_scratch: &mut Vec<f32>,
     out: &mut Vec<f32>,
 ) {
-    let stereo = match source_channels {
-        0 => Vec::new(),
-        1 => samples
-            .iter()
-            .flat_map(|sample| [*sample, *sample])
-            .collect(),
-        2 => samples.to_vec(),
-        _ => {
-            let mut collapsed = Vec::with_capacity((samples.len() / source_channels as usize) * 2);
-            for frame in samples.chunks_exact(source_channels as usize) {
-                collapsed.push(frame[0]);
-                collapsed.push(frame[1]);
+    stereo_scratch.clear();
+    match source_channels {
+        0 => return,
+        1 => {
+            stereo_scratch.reserve(samples.len() * 2);
+            for &sample in samples {
+                stereo_scratch.push(sample);
+                stereo_scratch.push(sample);
             }
-            collapsed
+        }
+        2 => {
+            stereo_scratch.extend_from_slice(samples);
+        }
+        _ => {
+            stereo_scratch.reserve((samples.len() / source_channels as usize) * 2);
+            for frame in samples.chunks_exact(source_channels as usize) {
+                stereo_scratch.push(frame[0]);
+                stereo_scratch.push(frame[1]);
+            }
         }
     };
 
-    if stereo.is_empty() {
+    if stereo_scratch.is_empty() {
         return;
     }
 
     if source_sample_rate == target_sample_rate {
-        out.extend_from_slice(&stereo);
+        out.extend_from_slice(stereo_scratch);
         return;
     }
 
-    let source_frames = stereo.len() / 2;
+    let source_frames = stereo_scratch.len() / 2;
     let target_frames = ((source_frames as f64 * target_sample_rate as f64) / source_sample_rate as f64)
         .round()
         .max(1.0) as usize;
@@ -373,8 +416,8 @@ fn normalize_to_stereo_output_into(
         let blend = (source_position - start_frame as f64) as f32;
 
         for channel in 0..2 {
-            let start_sample = stereo[start_frame * 2 + channel];
-            let end_sample = stereo[end_frame * 2 + channel];
+            let start_sample = stereo_scratch[start_frame * 2 + channel];
+            let end_sample = stereo_scratch[end_frame * 2 + channel];
             target_slice[target_frame * 2 + channel] =
                 start_sample + ((end_sample - start_sample) * blend);
         }
@@ -386,6 +429,12 @@ pub struct AppendableMediaSource {
     buffer: Vec<u8>,
     position: u64,
     finalized: bool,
+}
+
+impl Default for AppendableMediaSource {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AppendableMediaSource {
@@ -492,10 +541,11 @@ pub struct WindowedMediaSource {
     finalized: bool,
     pending_seek: Option<u64>,
     header_reserve_bytes: usize,
+    keep_behind: usize,
 }
 
 impl WindowedMediaSource {
-    pub fn new(max_window_bytes: usize, header_reserve_bytes: usize) -> Self {
+    pub fn new(max_window_bytes: usize, header_reserve_bytes: usize, keep_behind: usize) -> Self {
         Self {
             buffer: Vec::new(),
             window_start: 0,
@@ -505,6 +555,7 @@ impl WindowedMediaSource {
             finalized: false,
             pending_seek: None,
             header_reserve_bytes,
+            keep_behind,
         }
     }
 
@@ -551,7 +602,7 @@ impl WindowedMediaSource {
         }
 
         let read_pos_in_window = self.position.saturating_sub(self.window_start) as usize;
-        let keep_behind = 1024 * 1024;
+        let keep_behind = self.keep_behind;
         let evict_from_window = read_pos_in_window.saturating_sub(keep_behind);
 
         if evict_from_window > 0 {
@@ -662,7 +713,9 @@ impl Seek for WindowedMediaSource {
             (self.buffer.len() - self.header_reserve_bytes) as u64
         };
 
-        let in_window = target_u64 >= self.window_start && target_u64 <= self.window_start + window_len;
+        let near_margin = 16 * 1024;
+        let in_window = (target_u64 >= self.window_start && target_u64 <= self.window_start + window_len)
+            || (target_u64 >= self.window_start.saturating_sub(near_margin) && target_u64 < self.window_start);
 
         if in_header || in_window {
             self.position = target_u64;
@@ -735,7 +788,7 @@ mod tests {
 
     #[test]
     fn windowed_append_read() {
-        let mut src = WindowedMediaSource::new(1024, 0);
+        let mut src = WindowedMediaSource::new(1024, 0, 1024 * 1024);
         src.append(&[1, 2, 3, 4]);
         let mut buf = [0u8; 2];
         assert_eq!(src.read(&mut buf).unwrap(), 2);
@@ -747,7 +800,7 @@ mod tests {
 
     #[test]
     fn windowed_eviction() {
-        let mut src = WindowedMediaSource::new(200, 50);
+        let mut src = WindowedMediaSource::new(200, 50, 1024 * 1024);
         let pad = vec![0u8; 1024 * 1024];
         src.append(&pad);
         src.seek(SeekFrom::Start(1024 * 1024)).unwrap();
@@ -760,7 +813,7 @@ mod tests {
 
     #[test]
     fn windowed_header_survives() {
-        let mut src = WindowedMediaSource::new(200, 50);
+        let mut src = WindowedMediaSource::new(200, 50, 1024 * 1024);
         let mut data = vec![0u8; 1024 * 1024 + 500];
         for i in 0..50 { data[i] = i as u8; } // header
         src.append(&data);
@@ -775,10 +828,28 @@ mod tests {
 
     #[test]
     fn windowed_seek_outside_sets_pending() {
-        let mut src = WindowedMediaSource::new(1024, 50);
+        let mut src = WindowedMediaSource::new(1024, 50, 1024 * 1024);
         src.append(&[0u8; 100]);
         assert!(src.seek(SeekFrom::Start(200)).is_err());
         assert_eq!(src.pending_seek_offset(), Some(200));
+    }
+
+    #[test]
+    fn test_near_window_seek_margin() {
+        let mut src = WindowedMediaSource::new(1024 * 1024, 50, 16 * 1024);
+        let data = vec![0u8; 100 * 1024];
+        src.append(&data);
+        
+        // Manually move window_start to simulate eviction
+        src.window_start = 20 * 1024;
+        
+        // Seek to 19KB (just outside 20KB window)
+        // near_margin is 16KB, so 19KB is within margin (20KB - 16KB = 4KB)
+        assert!(src.seek(SeekFrom::Start(19 * 1024)).is_ok());
+        assert_eq!(src.position, 19 * 1024);
+        
+        // Seek to 3KB (outside margin)
+        assert!(src.seek(SeekFrom::Start(3 * 1024)).is_err());
     }
 
     impl fmt::Debug for StreamingDecoder {
@@ -788,6 +859,8 @@ mod tests {
                 .field("source_sample_rate", &self.source_sample_rate)
                 .field("source_channels", &self.source_channels)
                 .field("duration_ms", &self.duration_ms)
+                .field("intermediate_samples_cap", &self.intermediate_samples.capacity())
+                .field("stereo_scratch_cap", &self.stereo_scratch.capacity())
                 .finish()
         }
     }

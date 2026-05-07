@@ -22,6 +22,12 @@ function createDiagnosticsState() {
     transitionGapMs: null,
     // Lowest buffer fill % seen in the 500 ms after a gapless handoff.
     lastTransitionFloorPercent: null,
+    lowWaterMarkCount: 0,
+    activeBoundedWindowSize: 0,
+    retainedBytes: 0,
+    pendingSeekDistanceMs: 0,
+    fetchToDecodeLagMs: 0,
+    resumeAfterStallLatencyMs: 0,
     history: [],
     events: [],
   };
@@ -63,6 +69,12 @@ function buildSnapshot(state, capturedAtMs) {
     startupTimingsMs: { ...state.startupTimingsMs },
     transitionGapMs: state.transitionGapMs,
     lastTransitionFloorPercent: state.lastTransitionFloorPercent,
+    lowWaterMarkCount: state.lowWaterMarkCount,
+    activeBoundedWindowSize: state.activeBoundedWindowSize,
+    retainedBytes: state.retainedBytes,
+    pendingSeekDistanceMs: state.pendingSeekDistanceMs,
+    fetchToDecodeLagMs: state.fetchToDecodeLagMs,
+    resumeAfterStallLatencyMs: state.resumeAfterStallLatencyMs,
     history: [...state.history],
   };
 }

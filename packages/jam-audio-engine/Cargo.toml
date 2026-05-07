@@ -1,7 +1,8 @@
 [package]
-name = "jam_audio_engine"
+name = "jam-audio-engine"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -29,4 +30,4 @@ unopus = "0.0.1"
 opus-rs = "0.1.16"
 
 [patch.crates-io]
-opus-rs = { path = "../../third_party/opus-rs-upstream" }
+opus-rs = { path = "../../third_party/opus-rs" }

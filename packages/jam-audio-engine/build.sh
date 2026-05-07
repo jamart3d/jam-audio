@@ -13,11 +13,11 @@ fi
 
 # 1. Build Wasm
 echo "Building jam_audio_engine..."
-wasm-pack build --target web --release
+wasm-pack build --target web --release --out-name jam_audio_engine
 
 # 2. Sync artifacts to the web app
 PKG_DIR="$SCRIPT_DIR/pkg"
-WEB_PKG_DIR="$SCRIPT_DIR/../../../../apps/jamdisc_web/web/pkg"
+WEB_PKG_DIR="$SCRIPT_DIR/../../apps/jamdisc_web/web/pkg"
 
 echo "Syncing artifacts to $WEB_PKG_DIR..."
 mkdir -p "$WEB_PKG_DIR"

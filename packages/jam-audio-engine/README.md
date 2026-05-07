@@ -1,6 +1,9 @@
-# jam_audio_engine
+# jam-audio-engine
 
 The core Rust audio engine for the Jam Audio Pipeline.
+
+Cargo package name: `jam-audio-engine`
+Rust crate/import name: `jam_audio_engine`
 
 ## Features
 

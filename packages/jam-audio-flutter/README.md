@@ -4,7 +4,7 @@ Flutter bridge for the Jam Audio Pipeline.
 
 ## Overview
 
-This package provides the `flutter_rust_bridge` (FRB) bindings for the `jam_audio_engine`. It acts as the glue between Flutter's Dart code and the high-performance Rust audio engine.
+This package provides the `flutter_rust_bridge` (FRB) bindings for the `jam_audio_engine` Rust crate from the `jam-audio-engine` Cargo package. It acts as the glue between Flutter's Dart code and the high-performance Rust audio engine.
 
 ## Responsibilities
 

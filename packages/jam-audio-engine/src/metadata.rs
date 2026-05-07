@@ -78,10 +78,8 @@ pub fn extract_metadata_internal(data: &[u8]) -> AudioMetadata {
                 Some(StandardTagKey::TrackTitle) => result.title = Some(tag.value.to_string()),
                 Some(StandardTagKey::Artist) => result.artist = Some(tag.value.to_string()),
                 Some(StandardTagKey::Album) => result.album = Some(tag.value.to_string()),
-                Some(StandardTagKey::TrackNumber) => {
-                    if result.track_number.is_none() {
-                        result.track_number = tag.value.to_string().parse::<u32>().ok();
-                    }
+                Some(StandardTagKey::TrackNumber) if result.track_number.is_none() => {
+                    result.track_number = tag.value.to_string().parse::<u32>().ok();
                 }
                 _ => {}
             }

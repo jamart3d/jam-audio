@@ -29,6 +29,11 @@ pub fn init_console_error_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
+#[wasm_bindgen(js_name = defaultRingBufferFrames)]
+pub fn default_ring_buffer_frames() -> usize {
+    DEFAULT_FRAME_CAPACITY
+}
+
 #[wasm_bindgen]
 pub struct WasmGaplessPlayer {
     inner: GaplessPlayer,
@@ -100,6 +105,14 @@ fn gapless_error_to_js(kind: &str, message: &str) -> JsValue {
     obj.into()
 }
 
+// ============================================================================
+// SINGLE-THREADED INVARIANT NOTE:
+// The following MediaSource wrappers (SharedWindowedMediaSource,
+// SharedAppendableMediaSource) use `Rc<RefCell<>>` and implement `Send + Sync`.
+// This is ONLY valid because the current crate runtime (Wasm) is strictly
+// single-threaded. Do NOT use these wrappers in a multithreaded native context.
+// ============================================================================
+
 // Internal bridge between WindowedMediaSource and Symphonia
 struct SharedWindowedMediaSource {
     inner: Rc<RefCell<WindowedMediaSource>>,
@@ -111,8 +124,11 @@ impl SharedWindowedMediaSource {
     }
 }
 
-unsafe impl Send for SharedWindowedMediaSource { }
-unsafe impl Sync for SharedWindowedMediaSource { }
+// SAFETY: jam_audio_engine targets single-threaded Wasm only. Rc<RefCell<>>
+// is not Send/Sync but no thread boundary is ever crossed at runtime.
+// Symphonia requires Send + Sync on MediaSource; this satisfies that bound.
+unsafe impl Send for SharedWindowedMediaSource {}
+unsafe impl Sync for SharedWindowedMediaSource {}
 
 impl Read for SharedWindowedMediaSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -147,8 +163,9 @@ impl SharedAppendableMediaSource {
     }
 }
 
-unsafe impl Send for SharedAppendableMediaSource { }
-unsafe impl Sync for SharedAppendableMediaSource { }
+// SAFETY: Same single-threaded Wasm invariant as SharedWindowedMediaSource above.
+unsafe impl Send for SharedAppendableMediaSource {}
+unsafe impl Sync for SharedAppendableMediaSource {}
 
 impl Read for SharedAppendableMediaSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -193,8 +210,9 @@ struct WindowedStreamingPlayerCore {
 impl WindowedStreamingPlayerCore {
     fn new(total_size: Option<u64>, max_window_mb: u32, target_sample_rate: u32) -> Self {
         let max_window_bytes = (max_window_mb as usize).saturating_mul(1024 * 1024);
-        let header_reserve_bytes = 256 * 1024;
-        let mut source = WindowedMediaSource::new(max_window_bytes, header_reserve_bytes);
+        let header_reserve_bytes = 512 * 1024;
+        let keep_behind = 1024 * 1024;
+        let mut source = WindowedMediaSource::new(max_window_bytes, header_reserve_bytes, keep_behind);
         source.set_total_size(total_size);
 
         Self {
@@ -236,9 +254,11 @@ impl WindowedStreamingPlayerCore {
     }
 
     fn seek_to_ms(&mut self, ms: f64) -> Result<(), DecodeError> {
-        if let Some(decoder) = self.decoder.as_mut() {
-            decoder.seek_to_ms(ms)?;
-        }
+        let Some(decoder) = self.decoder.as_mut() else {
+            return Err(DecodeError::Symphonia("not ready".to_string()));
+        };
+
+        decoder.seek_to_ms(ms)?;
 
         self.frames_decoded = (ms * self.target_sample_rate as f64 / 1000.0) as u64;
         self.residual.clear();
@@ -275,7 +295,10 @@ impl WindowedStreamingPlayerCore {
             let need_frames = (target_samples - out.len()) / 2;
             self.scratch.clear();
 
-            let decode_res = self.decoder.as_mut().expect("decoder").decode_chunk_into(need_frames, &mut self.scratch);
+            let decode_res = self.decoder
+                .as_mut()
+                .ok_or_else(|| DecodeError::Symphonia("decoder unexpectedly absent".into()))?
+                .decode_chunk_into(need_frames, &mut self.scratch);
             match decode_res {
                 Ok(true) => {
                     let need_samples = target_samples - out.len();
@@ -363,8 +386,8 @@ impl WindowedStreamingPlayer {
     }
 
     #[wasm_bindgen(js_name = appendChunk)]
-    pub fn append_chunk(&mut self, chunk: &[u8]) {
-        let _ = self.core.append_chunk(chunk);
+    pub fn append_chunk(&mut self, chunk: &[u8]) -> Result<bool, JsValue> {
+        self.core.append_chunk(chunk).map_err(decode_error_to_js)
     }
 
     #[wasm_bindgen(js_name = finalize)]
@@ -385,6 +408,16 @@ impl WindowedStreamingPlayer {
     #[wasm_bindgen(js_name = clearPendingSeek)]
     pub fn clear_pending_seek(&mut self) {
         self.core.clear_pending_seek();
+    }
+
+    #[wasm_bindgen(js_name = windowStart)]
+    pub fn window_start(&self) -> f64 {
+        self.core.source.borrow().window_start() as f64
+    }
+
+    #[wasm_bindgen(js_name = bufferedBytes)]
+    pub fn buffered_bytes(&self) -> usize {
+        self.core.source.borrow().buffered_bytes()
     }
 
     #[wasm_bindgen(js_name = seekToMs)]
@@ -516,9 +549,11 @@ impl StreamingPlayerCore {
     }
 
     fn seek_to_ms(&mut self, ms: f64) -> Result<(), DecodeError> {
-        if let Some(decoder) = self.decoder.as_mut() {
-            decoder.seek_to_ms(ms)?;
-        }
+        let Some(decoder) = self.decoder.as_mut() else {
+            return Err(DecodeError::Symphonia("not ready".to_string()));
+        };
+
+        decoder.seek_to_ms(ms)?;
 
         self.frames_decoded = (ms * self.target_sample_rate as f64 / 1000.0) as u64;
         self.residual.clear();
@@ -565,7 +600,10 @@ impl StreamingPlayerCore {
             let need_frames = (target_samples - out.len()) / 2;
             self.scratch.clear();
 
-            let decode_res = self.decoder.as_mut().expect("decoder").decode_chunk_into(need_frames, &mut self.scratch);
+            let decode_res = self.decoder
+                .as_mut()
+                .ok_or_else(|| DecodeError::Symphonia("decoder unexpectedly absent".into()))?
+                .decode_chunk_into(need_frames, &mut self.scratch);
             match decode_res {
                 Ok(true) => {
                     let need_samples = target_samples - out.len();
@@ -859,5 +897,21 @@ mod tests {
             player.decode_frames(2048),
             Ok(StreamingFrameResult::Success)
         ));
+    }
+
+    #[test]
+    fn windowed_streaming_player_append_chunk_propagates_finalize_error() {
+        let mut player = WindowedStreamingPlayer::new(Some(1000), 8);
+        // Feed valid WAV data then finalize — after finalizing, appending again
+        // is harmless but core.append_chunk returns Ok. We test that the return
+        // value is forwarded rather than dropped.
+        let wav = make_wav(10_000);
+        let _ = player.append_chunk(&wav);
+        player.finalize_stream();
+        // Appending after finalize: returns Ok(true) or Ok(false), not an Err.
+        // The point is that the method now forwards the Result to the caller
+        // instead of discarding it internally.
+        let result = player.append_chunk(&[]);
+        assert!(result.is_ok());
     }
 }

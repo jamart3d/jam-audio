@@ -123,6 +123,16 @@ export function initPlaybackWorker({
           controller.stop();
           self.postMessage({ type: 'response', requestId });
           return;
+        case 'nudge': {
+          const status = controller.nudge();
+          self.postMessage({ type: 'response', requestId, payload: status });
+          return;
+        }
+        case 'getHealthStatus': {
+          const status = controller.getHealthStatus();
+          self.postMessage({ type: 'response', requestId, payload: status });
+          return;
+        }
         case 'setBufferedDurationMs':
           controller.setBufferedDurationMs(data.value);
           self.postMessage({ type: 'response', requestId });
