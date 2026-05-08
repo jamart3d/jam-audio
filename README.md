@@ -1,6 +1,18 @@
 # Jam Audio Pipeline
 
-Standalone extraction of the Jamdisc audio engine and web worklet bridge.
+A high-performance audio pipeline for gapless, low-latency playback in Flutter and web applications. Built in Rust and compiled to WebAssembly, it handles the full decode-to-output path — from compressed audio bytes to a low-jitter `AudioWorklet` stream — without relying on platform media APIs.
+
+### Why it exists
+
+Browser and Flutter media APIs offer convenience but limited control. For music applications that need gapless track transitions, precise seek behavior, and consistent decode quality across platforms, native APIs fall short. This pipeline gives full ownership of the decode and playback loop, with predictable latency and no codec surprises.
+
+### What it provides
+
+- **Gapless playback** — seamless transitions between tracks with no audible gap
+- **Streaming decode** — audio is decoded incrementally as it arrives, not buffered in full
+- **Wasm-first engine** — the Rust core compiles to a single `.wasm` artifact consumed directly by the browser
+- **Flutter bridge** — the same engine exposed to Flutter via `flutter_rust_bridge` for mobile and desktop
+- **Low-latency worklet** — a dedicated `AudioWorklet` processor keeps the audio thread isolated from the main thread
 
 ## Architecture
 
