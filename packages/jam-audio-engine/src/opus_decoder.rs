@@ -86,10 +86,11 @@ mod pure_rust {
         sample_rate: u32,
         samples_per_channel: u64,
         num_channels: usize,
-    ) -> AudioBuffer<f32> {
-        let channels = map_to_channels(num_channels).expect("invalid channels");
+    ) -> Result<AudioBuffer<f32>> {
+        let channels = map_to_channels(num_channels)
+            .ok_or_else(|| Error::DecodeError("opus: invalid channel count"))?;
         let spec = SignalSpec::new(sample_rate, channels);
-        AudioBuffer::new(samples_per_channel, spec)
+        Ok(AudioBuffer::new(samples_per_channel, spec))
     }
 
     fn make_decoder(sample_rate: u32, num_channels: usize) -> Result<*mut RawOpusDecoder> {
@@ -136,7 +137,7 @@ mod pure_rust {
                     sample_rate,
                     DEFAULT_SAMPLES_PER_CHANNEL as u64,
                     num_channels,
-                ),
+                )?,
                 pcm: [0.0; _],
                 samples_per_channel: DEFAULT_SAMPLES_PER_CHANNEL,
                 sample_rate,
@@ -191,7 +192,7 @@ mod pure_rust {
                     self.sample_rate,
                     samples_per_channel as u64,
                     self.num_channels,
-                );
+                )?;
                 self.samples_per_channel = samples_per_channel;
             }
 

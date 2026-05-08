@@ -73,8 +73,8 @@ impl WasmGaplessPlayer {
     }
 
     #[wasm_bindgen(js_name = seekToMs)]
-    pub fn seek_to_ms(&mut self, ms: f64) {
-        self.inner.seek_to_ms(ms);
+    pub fn seek_to_ms(&mut self, ms: f64) -> Result<(), JsValue> {
+        self.inner.seek_to_ms(ms).map_err(|e| gapless_error_to_js("seek_failed", &e.to_string()))
     }
 
     #[wasm_bindgen(js_name = positionMs)]

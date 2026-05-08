@@ -110,11 +110,12 @@ impl GaplessPlayer {
         Ok(())
     }
 
-    pub fn seek_to_ms(&mut self, ms: f64) {
-        let _ = self.active.seek_to_ms(ms);
+    pub fn seek_to_ms(&mut self, ms: f64) -> Result<(), GaplessError> {
+        self.active.seek_to_ms(ms).map_err(|e| GaplessError::Corrupted(e.to_string()))?;
         self.residual.clear();
         self.total_frames_decoded = (ms * self.target_sample_rate as f64 / 1000.0) as u64;
         self.ended = false;
+        Ok(())
     }
 
     pub fn position_ms(&self) -> f64 {
@@ -249,7 +250,7 @@ mod tests {
     #[test]
     fn seek_to_ms_repositions() {
         let mut player = GaplessPlayer::new(make_wav(48000), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
-        player.seek_to_ms(500.0);
+        player.seek_to_ms(500.0).unwrap();
         let pos = player.position_ms();
         assert!((pos - 500.0).abs() < 10.0, "expected ~500ms, got {pos}");
     }
