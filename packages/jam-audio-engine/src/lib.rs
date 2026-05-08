@@ -198,39 +198,81 @@ impl MediaSource for SharedWindowedMediaSource {
 }
 
 // Internal bridge between AppendableMediaSource and Symphonia
+#[cfg(target_arch = "wasm32")]
 struct SharedAppendableMediaSource {
     inner: Rc<RefCell<AppendableMediaSource>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct SharedAppendableMediaSource {
+    inner: Arc<Mutex<AppendableMediaSource>>,
+}
+
 impl SharedAppendableMediaSource {
+    #[cfg(target_arch = "wasm32")]
     fn new(inner: Rc<RefCell<AppendableMediaSource>>) -> Self {
+        Self { inner }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn new(inner: Arc<Mutex<AppendableMediaSource>>) -> Self {
         Self { inner }
     }
 }
 
 // SAFETY: Same single-threaded Wasm invariant as SharedWindowedMediaSource above.
+#[cfg(target_arch = "wasm32")]
 unsafe impl Send for SharedAppendableMediaSource {}
+#[cfg(target_arch = "wasm32")]
 unsafe impl Sync for SharedAppendableMediaSource {}
 
 impl Read for SharedAppendableMediaSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.borrow_mut().read(buf)
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.inner.borrow_mut().read(buf)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner.lock().unwrap().read(buf)
+        }
     }
 }
 
 impl Seek for SharedAppendableMediaSource {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.inner.borrow_mut().seek(pos)
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.inner.borrow_mut().seek(pos)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner.lock().unwrap().seek(pos)
+        }
     }
 }
 
 impl MediaSource for SharedAppendableMediaSource {
     fn is_seekable(&self) -> bool {
-        self.inner.borrow().is_seekable()
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.inner.borrow().is_seekable()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner.lock().unwrap().is_seekable()
+        }
     }
 
     fn byte_len(&self) -> Option<u64> {
-        self.inner.borrow().byte_len()
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.inner.borrow().byte_len()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.inner.lock().unwrap().byte_len()
+        }
     }
 }
 
