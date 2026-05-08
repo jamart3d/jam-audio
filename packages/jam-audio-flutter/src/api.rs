@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use jam_audio_engine::{extract_metadata_internal, extract_artwork_internal};
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -29,6 +30,7 @@ pub fn extract_metadata(data: Vec<u8>) -> AudioMetadata {
 
 /// Extracts artwork from audio data.
 /// This function is intended to be called via flutter_rust_bridge.
+#[allow(unexpected_cfgs)]
 #[flutter_rust_bridge::frb(sync)]
 pub fn extract_artwork(data: Vec<u8>) -> Option<Vec<u8>> {
     extract_artwork_internal(&data)

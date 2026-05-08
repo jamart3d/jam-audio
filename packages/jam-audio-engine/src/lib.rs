@@ -1,7 +1,9 @@
 use js_sys::Float32Array;
+#[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
@@ -649,7 +651,10 @@ fn js_string(s: &str) -> JsValue {
 }
 
 struct StreamingPlayerCore {
+    #[cfg(target_arch = "wasm32")]
     source: Rc<RefCell<AppendableMediaSource>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    source: Arc<Mutex<AppendableMediaSource>>,
     decoder: Option<StreamingDecoder>,
     frames_decoded: u64,
     residual: VecDeque<f32>,
@@ -660,7 +665,10 @@ struct StreamingPlayerCore {
 impl StreamingPlayerCore {
     fn new(target_sample_rate: u32) -> Self {
         Self {
+            #[cfg(target_arch = "wasm32")]
             source: Rc::new(RefCell::new(AppendableMediaSource::new())),
+            #[cfg(not(target_arch = "wasm32"))]
+            source: Arc::new(Mutex::new(AppendableMediaSource::new())),
             decoder: None,
             frames_decoded: 0,
             residual: VecDeque::new(),
@@ -670,12 +678,18 @@ impl StreamingPlayerCore {
     }
 
     fn append_chunk(&mut self, chunk: &[u8]) -> Result<bool, DecodeError> {
-        self.source.borrow_mut().append(chunk);
+        #[cfg(target_arch = "wasm32")]
+        { self.source.borrow_mut().append(chunk); }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.source.lock().unwrap().append(chunk); }
         self.try_initialize_decoder()
     }
 
     fn finalize(&mut self) {
-        self.source.borrow_mut().finalize();
+        #[cfg(target_arch = "wasm32")]
+        { self.source.borrow_mut().finalize(); }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.source.lock().unwrap().finalize(); }
         let _ = self.try_initialize_decoder();
     }
 
@@ -696,7 +710,10 @@ impl StreamingPlayerCore {
     }
 
     fn buffered_bytes(&self) -> usize {
-        self.source.borrow().buffered_len()
+        #[cfg(target_arch = "wasm32")]
+        { self.source.borrow().buffered_len() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.source.lock().unwrap().buffered_len() }
     }
 
     #[allow(dead_code)]
@@ -772,19 +789,34 @@ impl StreamingPlayerCore {
             return Ok(true);
         }
 
-        let should_probe = self.source.borrow().buffered_len() >= STREAMING_PROBE_THRESHOLD_BYTES || self.source.borrow().is_finalized();
+        #[cfg(target_arch = "wasm32")]
+        let (buffered_len, is_finalized) = {
+            let s = self.source.borrow();
+            (s.buffered_len(), s.is_finalized())
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let (buffered_len, is_finalized) = {
+            let s = self.source.lock().unwrap();
+            (s.buffered_len(), s.is_finalized())
+        };
+
+        let should_probe = buffered_len >= STREAMING_PROBE_THRESHOLD_BYTES || is_finalized;
         if !should_probe {
             return Ok(false);
         }
 
+        #[cfg(target_arch = "wasm32")]
         let shared_source = SharedAppendableMediaSource::new(Rc::clone(&self.source));
+        #[cfg(not(target_arch = "wasm32"))]
+        let shared_source = SharedAppendableMediaSource::new(Arc::clone(&self.source));
+
         match StreamingDecoder::from_media_source(shared_source, self.target_sample_rate) {
             Ok(decoder) => {
                 self.decoder = Some(decoder);
                 Ok(true)
             }
             Err(e) => {
-                if self.source.borrow().is_finalized() {
+                if is_finalized {
                     Err(e)
                 } else {
                     Ok(false)
@@ -794,7 +826,10 @@ impl StreamingPlayerCore {
     }
 
     fn is_finalized(&self) -> bool {
-        self.source.borrow().is_finalized()
+        #[cfg(target_arch = "wasm32")]
+        { self.source.borrow().is_finalized() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.source.lock().unwrap().is_finalized() }
     }
 }
 
