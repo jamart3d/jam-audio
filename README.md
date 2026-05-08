@@ -29,6 +29,12 @@ cd packages/jam-audio-engine
 wasm-pack build --target web --release
 ```
 
+## Roadmap
+
+- Update `build.sh` to sync artifacts directly to the `jamdisc` sibling repo
+- Review remaining `expect` calls in `ring_buffer.rs` for typed error conversion
+- Git tag releases as the changelog grows
+
 ## Repository Governance
 
 This repository is the canonical source of truth for shared audio packages.
