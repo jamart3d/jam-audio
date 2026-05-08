@@ -14,5 +14,8 @@ jam_audio_engine = { path = "../jam-audio-engine", package = "jam-audio-engine" 
 opt-level = "s"
 lto = true
 
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(frb_expand)'] }
+
 [patch.crates-io]
 opus-rs = { path = "../../third_party/opus-rs" }
