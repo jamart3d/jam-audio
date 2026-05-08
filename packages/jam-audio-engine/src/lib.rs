@@ -286,7 +286,10 @@ pub enum StreamingFrameResult {
 }
 
 struct WindowedStreamingPlayerCore {
+    #[cfg(target_arch = "wasm32")]
     source: Rc<RefCell<WindowedMediaSource>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    source: Arc<Mutex<WindowedMediaSource>>,
     decoder: Option<StreamingDecoder>,
     frames_decoded: u64,
     residual: VecDeque<f32>,
@@ -303,7 +306,10 @@ impl WindowedStreamingPlayerCore {
         source.set_total_size(total_size);
 
         Self {
+            #[cfg(target_arch = "wasm32")]
             source: Rc::new(RefCell::new(source)),
+            #[cfg(not(target_arch = "wasm32"))]
+            source: Arc::new(Mutex::new(source)),
             decoder: None,
             frames_decoded: 0,
             residual: VecDeque::new(),
@@ -314,7 +320,10 @@ impl WindowedStreamingPlayerCore {
 
     fn append_chunk(&mut self, chunk: &[u8]) -> Result<bool, DecodeError> {
         {
+            #[cfg(target_arch = "wasm32")]
             let mut source = self.source.borrow_mut();
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut source = self.source.lock().unwrap();
             source.append(chunk);
         }
         self.try_initialize_decoder(false)
@@ -322,22 +331,34 @@ impl WindowedStreamingPlayerCore {
 
     fn finalize(&mut self) {
         {
+            #[cfg(target_arch = "wasm32")]
             let mut source = self.source.borrow_mut();
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut source = self.source.lock().unwrap();
             source.finalize();
         }
         let _ = self.try_initialize_decoder(true);
     }
 
     fn has_pending_seek(&self) -> bool {
-        self.source.borrow().has_pending_seek()
+        #[cfg(target_arch = "wasm32")]
+        { self.source.borrow().has_pending_seek() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.source.lock().unwrap().has_pending_seek() }
     }
 
     fn pending_seek_offset(&self) -> u64 {
-        self.source.borrow().pending_seek_offset().unwrap_or(0)
+        #[cfg(target_arch = "wasm32")]
+        { self.source.borrow().pending_seek_offset().unwrap_or(0) }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.source.lock().unwrap().pending_seek_offset().unwrap_or(0) }
     }
 
     fn clear_pending_seek(&mut self) {
-        self.source.borrow_mut().clear_pending_seek()
+        #[cfg(target_arch = "wasm32")]
+        { self.source.borrow_mut().clear_pending_seek() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.source.lock().unwrap().clear_pending_seek() }
     }
 
     fn seek_to_ms(&mut self, ms: f64) -> Result<(), DecodeError> {
@@ -426,25 +447,42 @@ impl WindowedStreamingPlayerCore {
             return Ok(true);
         }
 
-        let buffered = self.source.borrow().window_start() + self.source.borrow().buffered_bytes() as u64;
+        #[cfg(target_arch = "wasm32")]
+        let (buffered, is_finalized) = {
+            let s = self.source.borrow();
+            (s.window_start() + s.buffered_bytes() as u64, s.is_finalized())
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let (buffered, is_finalized) = {
+            let s = self.source.lock().unwrap();
+            (s.window_start() + s.buffered_bytes() as u64, s.is_finalized())
+        };
+
         let should_probe =
-            force || buffered >= STREAMING_PROBE_THRESHOLD_BYTES as u64 || self.is_finalized();
+            force || buffered >= STREAMING_PROBE_THRESHOLD_BYTES as u64 || is_finalized;
 
         if !should_probe {
             return Ok(false);
         }
 
+        #[cfg(target_arch = "wasm32")]
         let shared_source = SharedWindowedMediaSource::new(Rc::clone(&self.source));
+        #[cfg(not(target_arch = "wasm32"))]
+        let shared_source = SharedWindowedMediaSource::new(Arc::clone(&self.source));
+
         match StreamingDecoder::from_media_source(shared_source, self.target_sample_rate) {
             Ok(decoder) => {
                 self.decoder = Some(decoder);
                 Ok(true)
             }
             Err(error) => {
-                if self.is_finalized() {
+                if is_finalized {
                     Err(error)
                 } else {
+                    #[cfg(target_arch = "wasm32")]
                     let _ = self.source.borrow_mut().seek(SeekFrom::Start(0));
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _ = self.source.lock().unwrap().seek(SeekFrom::Start(0));
                     self.clear_pending_seek();
                     Ok(false)
                 }
@@ -453,7 +491,10 @@ impl WindowedStreamingPlayerCore {
     }
 
     fn is_finalized(&self) -> bool {
-        self.source.borrow().is_finalized()
+        #[cfg(target_arch = "wasm32")]
+        { self.source.borrow().is_finalized() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.source.lock().unwrap().is_finalized() }
     }
 }
 
@@ -500,12 +541,18 @@ impl WindowedStreamingPlayer {
 
     #[wasm_bindgen(js_name = windowStart)]
     pub fn window_start(&self) -> f64 {
-        self.core.source.borrow().window_start() as f64
+        #[cfg(target_arch = "wasm32")]
+        { self.core.source.borrow().window_start() as f64 }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.core.source.lock().unwrap().window_start() as f64 }
     }
 
     #[wasm_bindgen(js_name = bufferedBytes)]
     pub fn buffered_bytes(&self) -> usize {
-        self.core.source.borrow().buffered_bytes()
+        #[cfg(target_arch = "wasm32")]
+        { self.core.source.borrow().buffered_bytes() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.core.source.lock().unwrap().buffered_bytes() }
     }
 
     #[wasm_bindgen(js_name = seekToMs)]
