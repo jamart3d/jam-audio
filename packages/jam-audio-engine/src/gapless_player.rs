@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::decoder::{DecodeError, StreamingDecoder};
 
 #[derive(Debug)]
@@ -20,7 +22,7 @@ impl std::error::Error for GaplessError {}
 pub struct GaplessPlayer {
     active: StreamingDecoder,
     next: Option<StreamingDecoder>,
-    residual: Vec<f32>,
+    residual: VecDeque<f32>,
     scratch: Vec<f32>,
     total_frames_decoded: u64,
     target_sample_rate: u32,
@@ -34,7 +36,7 @@ impl GaplessPlayer {
         Ok(Self {
             active,
             next: None,
-            residual: Vec::new(),
+            residual: VecDeque::new(),
             scratch: Vec::with_capacity(2048),
             total_frames_decoded: 0,
             target_sample_rate,
@@ -68,10 +70,10 @@ impl GaplessPlayer {
         }
 
         // Drain residual first
-        if !self.residual.is_empty() {
-            let take = target_samples.min(self.residual.len());
-            out.extend_from_slice(&self.residual[..take]);
-            self.residual.drain(..take);
+        while !self.residual.is_empty() && out.len() < target_samples {
+            if let Some(sample) = self.residual.pop_front() {
+                out.push(sample);
+            }
         }
 
         while out.len() < target_samples && !self.ended {
@@ -85,7 +87,7 @@ impl GaplessPlayer {
                         out.extend_from_slice(&self.scratch);
                     } else {
                         out.extend_from_slice(&self.scratch[..need]);
-                        self.residual.extend_from_slice(&self.scratch[need..]);
+                        self.residual.extend(self.scratch[need..].iter().copied());
                     }
                 }
                 Ok(false) => {

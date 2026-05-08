@@ -30,7 +30,8 @@ pub fn extract_metadata_internal(data: &[u8]) -> AudioMetadata {
         return result;
     }
 
-    let media_source = InMemoryMediaSource::new(data.to_vec());
+    let shared_data = Arc::from(data);
+    let media_source = InMemoryMediaSource::new(shared_data);
     let media_stream = MediaSourceStream::new(Box::new(media_source), Default::default());
     let hint = Hint::new();
 
@@ -113,12 +114,14 @@ pub fn extract_metadata(data: &[u8]) -> JsValue {
     obj.into()
 }
 
+use std::sync::Arc;
+
 struct InMemoryMediaSource {
-    inner: Cursor<Vec<u8>>,
+    inner: Cursor<Arc<[u8]>>,
 }
 
 impl InMemoryMediaSource {
-    fn new(bytes: Vec<u8>) -> Self {
+    fn new(bytes: Arc<[u8]>) -> Self {
         Self {
             inner: Cursor::new(bytes),
         }
@@ -151,7 +154,8 @@ pub fn extract_artwork_internal(data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    let media_source = InMemoryMediaSource::new(data.to_vec());
+    let shared_data = Arc::from(data);
+    let media_source = InMemoryMediaSource::new(shared_data);
     let media_stream = MediaSourceStream::new(Box::new(media_source), Default::default());
     let hint = Hint::new();
 

@@ -1,5 +1,6 @@
 use js_sys::Float32Array;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::rc::Rc;
 use symphonia_core::io::MediaSource;
@@ -202,7 +203,7 @@ struct WindowedStreamingPlayerCore {
     source: Rc<RefCell<WindowedMediaSource>>,
     decoder: Option<StreamingDecoder>,
     frames_decoded: u64,
-    residual: Vec<f32>,
+    residual: VecDeque<f32>,
     scratch: Vec<f32>,
     target_sample_rate: u32,
 }
@@ -219,7 +220,7 @@ impl WindowedStreamingPlayerCore {
             source: Rc::new(RefCell::new(source)),
             decoder: None,
             frames_decoded: 0,
-            residual: Vec::new(),
+            residual: VecDeque::new(),
             scratch: Vec::with_capacity(2048),
             target_sample_rate,
         }
@@ -281,14 +282,15 @@ impl WindowedStreamingPlayerCore {
 
         let target_samples = target_frames as usize * 2;
 
-        if self.residual.len() >= target_samples {
-            out.extend(self.residual.drain(..target_samples));
-            self.frames_decoded += (out.len() / 2) as u64;
-            return Ok(StreamingFrameResult::Success);
+        while !self.residual.is_empty() && out.len() < target_samples {
+            if let Some(sample) = self.residual.pop_front() {
+                out.push(sample);
+            }
         }
 
-        if !self.residual.is_empty() {
-            out.extend(std::mem::take(&mut self.residual));
+        if out.len() == target_samples {
+            self.frames_decoded += (out.len() / 2) as u64;
+            return Ok(StreamingFrameResult::Success);
         }
 
         while out.len() < target_samples {
@@ -306,7 +308,7 @@ impl WindowedStreamingPlayerCore {
                         out.extend_from_slice(&self.scratch);
                     } else {
                         out.extend_from_slice(&self.scratch[..need_samples]);
-                        self.residual.extend_from_slice(&self.scratch[need_samples..]);
+                        self.residual.extend(self.scratch[need_samples..].iter().copied());
                     }
                 }
                 Ok(false) => {
@@ -517,7 +519,7 @@ struct StreamingPlayerCore {
     source: Rc<RefCell<AppendableMediaSource>>,
     decoder: Option<StreamingDecoder>,
     frames_decoded: u64,
-    residual: Vec<f32>,
+    residual: VecDeque<f32>,
     scratch: Vec<f32>,
     target_sample_rate: u32,
 }
@@ -528,7 +530,7 @@ impl StreamingPlayerCore {
             source: Rc::new(RefCell::new(AppendableMediaSource::new())),
             decoder: None,
             frames_decoded: 0,
-            residual: Vec::new(),
+            residual: VecDeque::new(),
             scratch: Vec::with_capacity(2048),
             target_sample_rate,
         }
@@ -586,14 +588,15 @@ impl StreamingPlayerCore {
 
         let target_samples = target_frames as usize * 2;
 
-        if self.residual.len() >= target_samples {
-            out.extend(self.residual.drain(..target_samples));
-            self.frames_decoded += (out.len() / 2) as u64;
-            return Ok(StreamingFrameResult::Success);
+        while !self.residual.is_empty() && out.len() < target_samples {
+            if let Some(sample) = self.residual.pop_front() {
+                out.push(sample);
+            }
         }
 
-        if !self.residual.is_empty() {
-            out.extend(std::mem::take(&mut self.residual));
+        if out.len() == target_samples {
+            self.frames_decoded += (out.len() / 2) as u64;
+            return Ok(StreamingFrameResult::Success);
         }
 
         while out.len() < target_samples {
@@ -611,7 +614,7 @@ impl StreamingPlayerCore {
                         out.extend_from_slice(&self.scratch);
                     } else {
                         out.extend_from_slice(&self.scratch[..need_samples]);
-                        self.residual.extend_from_slice(&self.scratch[need_samples..]);
+                        self.residual.extend(self.scratch[need_samples..].iter().copied());
                     }
                 }
                 Ok(false) => {
