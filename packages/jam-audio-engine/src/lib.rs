@@ -3,6 +3,8 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
 use std::rc::Rc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
 use symphonia_core::io::MediaSource;
 use wasm_bindgen::prelude::*;
 
