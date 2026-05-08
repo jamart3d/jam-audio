@@ -81,6 +81,48 @@ export function createJamAudioBridge({
     }
     const blob = new Blob([bytes], { type: 'audio/mpeg' });
     currentTrackBlobUrl = URL.createObjectURL(blob);
+
+    emitDiagnosticsEvent({
+      type: 'hidden-media-asset-ready',
+      label: 'Hidden media asset ready (bytes)',
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: {
+        source: 'bytes',
+        blobUrl: currentTrackBlobUrl,
+      },
+    });
+
+    silentAudioEl.src = currentTrackBlobUrl;
+    silentAudioEl.muted = true;
+    silentAudioEl.volume = 0;
+    silentAudioEl.play().catch(() => {});
+  }
+
+  function setStreamingAnchor(bytes) {
+    if (!bytes || bytes.length === 0) return;
+    ensureSilentAudio();
+    // Only set if we don't have a track-specific blob URL yet,
+    // or if we want to "upgrade" from silent.wav.
+    // In streaming, we start with silent.wav and upgrade to first chunk.
+    if (currentTrackBlobUrl) {
+      URL.revokeObjectURL(currentTrackBlobUrl);
+      currentTrackBlobUrl = null;
+    }
+    const blob = new Blob([bytes], { type: 'audio/mpeg' });
+    currentTrackBlobUrl = URL.createObjectURL(blob);
+
+    emitDiagnosticsEvent({
+      type: 'hidden-media-asset-ready',
+      label: 'Hidden media anchor upgraded (streaming chunk)',
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: {
+        source: 'streaming-chunk',
+        blobUrl: currentTrackBlobUrl,
+      },
+    });
+
     silentAudioEl.src = currentTrackBlobUrl;
     silentAudioEl.muted = true;
     silentAudioEl.volume = 0;
@@ -93,6 +135,18 @@ export function createJamAudioBridge({
       URL.revokeObjectURL(currentTrackBlobUrl);
       currentTrackBlobUrl = null;
     }
+
+    emitDiagnosticsEvent({
+      type: 'hidden-media-asset-ready',
+      label: 'Hidden media asset ready (url)',
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: {
+        source: 'url',
+        url: url,
+      },
+    });
+
     silentAudioEl.src = url;
     silentAudioEl.muted = true;
     silentAudioEl.volume = 0;
@@ -762,10 +816,10 @@ export function createJamAudioBridge({
         ensureSilentAudio();
         if (silentAudioEl.paused) silentAudioEl.play().catch(() => {});
       } else if (mapped === 'paused') {
-        if (silentAudioEl && !silentAudioEl.paused) {
-          silentAudioEl.pause();
-          silentAudioEl.currentTime = 0;
-        }
+        // [MODIFIED] Retain the hidden media anchor while paused.
+        // Browsers like Android Chrome dismiss the media session if the anchor is paused.
+        ensureSilentAudio();
+        if (silentAudioEl.paused) silentAudioEl.play().catch(() => {});
       } else if (mapped === 'none') {
         if (!preserveMediaSession && silentAudioEl && !silentAudioEl.paused) {
           silentAudioEl.pause();
@@ -912,6 +966,7 @@ export function createJamAudioBridge({
     playTrack,
     playTrackStreaming,
     playTrackBounded,
+    setStreamingAnchor,
     ensureMediaAlive,
     appendChunk,
     finalizeStream,
