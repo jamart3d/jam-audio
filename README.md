@@ -29,6 +29,11 @@ cd packages/jam-audio-engine
 wasm-pack build --target web --release
 ```
 
+## Repository Governance
+
+This repository is the canonical source of truth for shared audio packages.
+See [SYNC_POLICY.md](SYNC_POLICY.md) for the provider-consumer model and contribution rules.
+
 ## License
 
 MIT
