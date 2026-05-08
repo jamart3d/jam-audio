@@ -78,17 +78,7 @@ pub fn extract_metadata_internal(data: &[u8]) -> AudioMetadata {
     if (result.title.is_none() || result.artist.is_none())
         && let Some(metadata) = probed.metadata.get().as_ref().and_then(|m| m.current())
     {
-        for tag in metadata.tags() {
-            match tag.std_key {
-                Some(StandardTagKey::TrackTitle) => result.title = Some(tag.value.to_string()),
-                Some(StandardTagKey::Artist) => result.artist = Some(tag.value.to_string()),
-                Some(StandardTagKey::Album) => result.album = Some(tag.value.to_string()),
-                Some(StandardTagKey::TrackNumber) if result.track_number.is_none() => {
-                    result.track_number = tag.value.to_string().parse::<u32>().ok();
-                }
-                _ => {}
-            }
-        }
+        apply_tags(&mut result, metadata.tags(), false);
     }
 
     result
