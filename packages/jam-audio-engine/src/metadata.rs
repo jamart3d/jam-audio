@@ -22,6 +22,20 @@ pub struct AudioMetadata {
     pub duration_ms: Option<f64>,
 }
 
+fn apply_tags(result: &mut AudioMetadata, tags: &[symphonia::core::meta::Tag], overwrite: bool) {
+    for tag in tags {
+        match tag.std_key {
+            Some(StandardTagKey::TrackTitle) => result.title = Some(tag.value.to_string()),
+            Some(StandardTagKey::Artist) => result.artist = Some(tag.value.to_string()),
+            Some(StandardTagKey::Album) => result.album = Some(tag.value.to_string()),
+            Some(StandardTagKey::TrackNumber) if overwrite || result.track_number.is_none() => {
+                result.track_number = tag.value.to_string().parse::<u32>().ok();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Internal shared parser for audio metadata.
 pub fn extract_metadata_internal(data: &[u8]) -> AudioMetadata {
     let mut result = AudioMetadata::default();
@@ -57,17 +71,7 @@ pub fn extract_metadata_internal(data: &[u8]) -> AudioMetadata {
 
     // Try container metadata first
     if let Some(metadata) = probed.format.metadata().current() {
-        for tag in metadata.tags() {
-            match tag.std_key {
-                Some(StandardTagKey::TrackTitle) => result.title = Some(tag.value.to_string()),
-                Some(StandardTagKey::Artist) => result.artist = Some(tag.value.to_string()),
-                Some(StandardTagKey::Album) => result.album = Some(tag.value.to_string()),
-                Some(StandardTagKey::TrackNumber) => {
-                    result.track_number = tag.value.to_string().parse::<u32>().ok()
-                }
-                _ => {}
-            }
-        }
+        apply_tags(&mut result, metadata.tags(), true);
     }
 
     // Try metadata block
