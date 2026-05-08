@@ -1,0 +1,49 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85"
+          targets: wasm32-unknown-unknown
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install system deps (libopus for native)
+        run: sudo apt-get install -y libopus-dev
+
+      - name: cargo check — engine (native)
+        run: cargo check --manifest-path packages/jam-audio-engine/Cargo.toml
+
+      - name: cargo check — engine (wasm32)
+        run: cargo check --manifest-path packages/jam-audio-engine/Cargo.toml --target wasm32-unknown-unknown
+
+      - name: cargo check — flutter
+        run: cargo check --manifest-path packages/jam-audio-flutter/Cargo.toml
+
+      - name: cargo test — engine
+        run: cargo test --manifest-path packages/jam-audio-engine/Cargo.toml

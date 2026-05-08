@@ -1,0 +1,28 @@
+name: Worklet
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/jam-audio-worklet/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/jam-audio-worklet/**"
+
+jobs:
+  check:
+    name: Syntax Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check worklet syntax
+        working-directory: packages/jam-audio-worklet
+        run: npm test
