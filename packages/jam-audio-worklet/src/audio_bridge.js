@@ -795,7 +795,7 @@ export function createJamAudioBridge({
     const { preserveMediaSession = false } = options;
     if (processorNode) processorNode.port.postMessage({ type: 'stop' });
     if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
-    if (currentTrackBlobUrl) {
+    if (currentTrackBlobUrl && !preserveMediaSession) {
       URL.revokeObjectURL(currentTrackBlobUrl);
       currentTrackBlobUrl = null;
     }
