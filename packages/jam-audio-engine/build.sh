@@ -6,14 +6,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Ensure wasm-pack is installed
-if ! command -v wasm-pack &> /dev/null; then
-    echo "Error: wasm-pack is required. Install it with 'cargo install wasm-pack'."
-    exit 1
+WASM_PACK_CMD="wasm-pack"
+if ! command -v $WASM_PACK_CMD &> /dev/null; then
+    if command -v wasm-pack.exe &> /dev/null; then
+        WASM_PACK_CMD="wasm-pack.exe"
+    else
+        echo "Error: wasm-pack is required. Install it with 'cargo install wasm-pack'."
+        exit 1
+    fi
 fi
 
 # 1. Build Wasm
 echo "Building jam_audio_engine..."
-wasm-pack build --target web --release --out-name jam_audio_engine
+$WASM_PACK_CMD build --target web --release --out-name jam_audio_engine
 
 # 2. Sync artifacts to the web app
 PKG_DIR="$SCRIPT_DIR/pkg"
