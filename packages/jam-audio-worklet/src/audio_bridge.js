@@ -96,11 +96,6 @@ export function createJamAudioBridge({
         blobUrl: currentTrackBlobUrl,
       },
     });
-
-    silentAudioEl.src = currentTrackBlobUrl;
-    silentAudioEl.muted = false;
-    silentAudioEl.volume = 0.001;
-    silentAudioEl.play().catch(() => {});
   }
 
   function setStreamingAnchor(bytes) {
@@ -126,11 +121,6 @@ export function createJamAudioBridge({
         blobUrl: currentTrackBlobUrl,
       },
     });
-
-    silentAudioEl.src = currentTrackBlobUrl;
-    silentAudioEl.muted = false;
-    silentAudioEl.volume = 0.001;
-    silentAudioEl.play().catch(() => {});
   }
 
   function setBoundedTrackAudioOnSilentElement(url) {
@@ -149,19 +139,6 @@ export function createJamAudioBridge({
         source: 'url',
         url: url,
       },
-    });
-
-    silentAudioEl.src = url;
-    silentAudioEl.muted = false;
-    silentAudioEl.volume = 0.001;
-    silentAudioEl.play().catch((err) => {
-      emitDiagnosticsEvent({
-        type: 'hidden-media-play-failed',
-        label: 'Hidden bounded media play failed',
-        timestampMs: nowMs(),
-        severity: 'warn',
-        message: err?.message,
-      });
     });
   }
 
