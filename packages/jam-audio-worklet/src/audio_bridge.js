@@ -800,8 +800,8 @@ export function createJamAudioBridge({
       currentTrackBlobUrl = null;
     }
     if (silentAudioEl) {
-      silentAudioEl.src = preserveMediaSession ? silentWavUrl : '';
       if (!preserveMediaSession) {
+        silentAudioEl.src = '';
         silentAudioEl.pause();
         silentAudioEl.currentTime = 0;
       } else if (silentAudioEl.paused) {
