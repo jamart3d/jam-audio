@@ -30,6 +30,7 @@ export function createJamAudioBridge({
   let playbackWorkerRequestId = 0;
   const pendingWorkerRequests = new Map();
   let diagnosticsSnapshotTimerId;
+  let heartbeatIntervalId;
 
   let onPlaybackErrorCallback = null;
   let onPreloadErrorCallback = null;
@@ -234,6 +235,29 @@ export function createJamAudioBridge({
     if (diagnosticsSnapshotTimerId) {
       window.clearInterval(diagnosticsSnapshotTimerId);
       diagnosticsSnapshotTimerId = undefined;
+    }
+  }
+
+  function startHeartbeat() {
+    if (heartbeatIntervalId) return;
+    heartbeatIntervalId = window.setInterval(() => {
+      if ('mediaSession' in navigator) {
+        // Re-set the state to heartbeat the session
+        navigator.mediaSession.playbackState = navigator.mediaSession.playbackState;
+      }
+      emitDiagnosticsEvent({
+        type: 'media-session-heartbeat',
+        label: 'Media session heartbeat',
+        timestampMs: nowMs(),
+        severity: 'info',
+      });
+    }, 10000);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatIntervalId) {
+      window.clearInterval(heartbeatIntervalId);
+      heartbeatIntervalId = undefined;
     }
   }
 
@@ -783,6 +807,7 @@ export function createJamAudioBridge({
     setStartupPhase('idle');
     emitDiagnosticsSnapshot();
     stopDiagnosticsLoop();
+    stopHeartbeat();
   }
 
   function setVolume(value) {
@@ -811,6 +836,13 @@ export function createJamAudioBridge({
       let mapped = 'none';
       if (state === 'playing') mapped = 'playing';
       else if (state === 'paused') mapped = 'paused';
+
+      if (mapped === 'playing' || mapped === 'paused') {
+        startHeartbeat();
+      } else {
+        stopHeartbeat();
+      }
+
       if (!preserveMediaSession) navigator.mediaSession.playbackState = mapped;
       if (mapped === 'playing') {
         ensureSilentAudio();
