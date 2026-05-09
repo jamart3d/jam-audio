@@ -31,6 +31,9 @@ export function createJamAudioBridge({
   const pendingWorkerRequests = new Map();
   let diagnosticsSnapshotTimerId;
   let heartbeatIntervalId;
+  let heartbeatLastKnownPositionSec = 0;
+  let heartbeatLastKnownDurationSec = 0;
+  let heartbeatPositionCapturedAtMs = 0;
 
   let onPlaybackErrorCallback = null;
   let onPreloadErrorCallback = null;
@@ -95,8 +98,8 @@ export function createJamAudioBridge({
     });
 
     silentAudioEl.src = currentTrackBlobUrl;
-    silentAudioEl.muted = true;
-    silentAudioEl.volume = 0;
+    silentAudioEl.muted = false;
+    silentAudioEl.volume = 0.001;
     silentAudioEl.play().catch(() => {});
   }
 
@@ -125,8 +128,8 @@ export function createJamAudioBridge({
     });
 
     silentAudioEl.src = currentTrackBlobUrl;
-    silentAudioEl.muted = true;
-    silentAudioEl.volume = 0;
+    silentAudioEl.muted = false;
+    silentAudioEl.volume = 0.001;
     silentAudioEl.play().catch(() => {});
   }
 
@@ -149,8 +152,8 @@ export function createJamAudioBridge({
     });
 
     silentAudioEl.src = url;
-    silentAudioEl.muted = true;
-    silentAudioEl.volume = 0;
+    silentAudioEl.muted = false;
+    silentAudioEl.volume = 0.001;
     silentAudioEl.play().catch((err) => {
       emitDiagnosticsEvent({
         type: 'hidden-media-play-failed',
@@ -241,9 +244,19 @@ export function createJamAudioBridge({
   function startHeartbeat() {
     if (heartbeatIntervalId) return;
     heartbeatIntervalId = window.setInterval(() => {
-      if ('mediaSession' in navigator) {
-        // Re-set the state to heartbeat the session
-        navigator.mediaSession.playbackState = navigator.mediaSession.playbackState;
+      if ('mediaSession' in navigator && heartbeatLastKnownDurationSec > 0) {
+        try {
+          const elapsedSec = (performance.now() - heartbeatPositionCapturedAtMs) / 1000;
+          const position = Math.min(
+            heartbeatLastKnownPositionSec + elapsedSec,
+            heartbeatLastKnownDurationSec,
+          );
+          navigator.mediaSession.setPositionState({
+            duration: heartbeatLastKnownDurationSec,
+            playbackRate: 1.0,
+            position,
+          });
+        } catch (_) {}
       }
       emitDiagnosticsEvent({
         type: 'media-session-heartbeat',
@@ -251,7 +264,7 @@ export function createJamAudioBridge({
         timestampMs: nowMs(),
         severity: 'info',
       });
-    }, 10000);
+    }, 5000);
   }
 
   function stopHeartbeat() {
@@ -807,7 +820,7 @@ export function createJamAudioBridge({
     setStartupPhase('idle');
     emitDiagnosticsSnapshot();
     stopDiagnosticsLoop();
-    stopHeartbeat();
+    if (!preserveMediaSession) stopHeartbeat();
   }
 
   function setVolume(value) {
@@ -839,7 +852,7 @@ export function createJamAudioBridge({
 
       if (mapped === 'playing' || mapped === 'paused') {
         startHeartbeat();
-      } else {
+      } else if (!preserveMediaSession) {
         stopHeartbeat();
       }
 
@@ -875,6 +888,9 @@ export function createJamAudioBridge({
         playbackRate: rate,
         position: Math.min(position, duration),
       });
+      heartbeatLastKnownPositionSec = position;
+      heartbeatLastKnownDurationSec = duration;
+      heartbeatPositionCapturedAtMs = performance.now();
     } catch (_) {}
   }
 
