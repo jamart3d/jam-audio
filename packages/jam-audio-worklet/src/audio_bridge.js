@@ -778,7 +778,6 @@ export function createJamAudioBridge({
     }
     if (silentAudioEl) {
       if (!preserveMediaSession) {
-        silentAudioEl.src = '';
         silentAudioEl.pause();
         silentAudioEl.currentTime = 0;
       } else if (silentAudioEl.paused) {
