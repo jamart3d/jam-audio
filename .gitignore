@@ -21,6 +21,7 @@ plans/
 
 # OS/IDE
 .DS_Store
+.claude/
 .vscode/
 *.swp
 *.bak

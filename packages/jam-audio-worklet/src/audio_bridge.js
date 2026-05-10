@@ -218,6 +218,17 @@ export function createJamAudioBridge({
     }
   }
 
+  /**
+   * PWA Media Session Heartbeat
+   * 
+   * Android Chrome often drops Media Session notifications if it deems the app inactive.
+   * This heartbeat periodically re-asserts the playback state and position to the OS
+   * to maintain the session's "active" status.
+   * 
+   * NOTE: If Android still drops the notification despite healthy heartbeat diagnostics,
+   * the remainder is likely platform-specific surfacing behavior (e.g. battery optimization)
+   * and further runtime logic changes in the bridge may not be effective.
+   */
   function startHeartbeat() {
     if (heartbeatIntervalId) return;
     heartbeatIntervalId = window.setInterval(() => {
