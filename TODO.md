@@ -2,10 +2,15 @@
 
 ## Architecture (Future)
 
+- [ ] **Mode B: Worklet And Buffer Optimization**
+  - **Goal:** Improve startup, jitter tolerance, buffer management, and bridge overhead without requiring threaded WASM.
+  - **Context:** The current JS worklet is already small; refill timing, diagnostics traffic, and static buffer policy are more likely near-term bottlenecks.
+  - **Plan:** See `docs/superpowers/plans/future/mode-b-worklet-and-buffer-optimization.md` (local artifact) for the recommended next-step roadmap.
+
 - [ ] **Transition to Multithreaded WASM (Mode C)**
-  - **Goal:** Enable zero-copy rendering by moving the `AudioWorkletProcessor` into Rust.
-  - **Context:** Currently, single-threaded WASM cannot natively map external `SharedArrayBuffer`s, leading to a performance penalty when crossing the JS/Wasm boundary in the hot path.
-  - **Plan:** See `docs/superpowers/plans/future/multithreaded-wasm-transition.md` (local artifact) for implementation steps.
+  - **Goal:** Evaluate whether a threaded-wasm architecture is justified for zero-copy rendering and broader Rust ownership of the playback path.
+  - **Context:** Single-threaded WASM cannot natively map external `SharedArrayBuffer`s, but this should remain secondary until Mode B-style tuning shows the current architecture cannot meet playback goals.
+  - **Plan:** See `docs/superpowers/plans/future/multithreaded-wasm-transition.md` (local artifact) for the phased roadmap and go/no-go gates.
   - **Report:** See `reports/architecture/2026-05-09-wasm-threading-constraints.md` (local artifact) for technical background.
 
 ## Maintainability

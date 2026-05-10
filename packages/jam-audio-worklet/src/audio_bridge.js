@@ -386,6 +386,12 @@ export function createJamAudioBridge({
               event.data.framesAvailable ?? diagnosticsState.framesAvailable,
             bufferFillPercent: diagnosticsState.bufferFillPercent,
           });
+        } else if (event.data.type === 'position') {
+          const positionMs = (event.data.framesRendered / audioContext.sampleRate) * 1000;
+          diagnosticsState.positionMs = Math.round(positionMs);
+          if (typeof onPositionCallback === 'function') {
+            onPositionCallback(diagnosticsState.positionMs);
+          }
         }
       };
     }
@@ -497,7 +503,7 @@ export function createJamAudioBridge({
         setStartupPhase('playing');
         return;
       case 'position':
-        if (typeof onPositionCallback === 'function') onPositionCallback(data.positionMs);
+        diagnosticsState.decodedPositionMs = data.positionMs;
         return;
       case 'duration':
         if (typeof onDurationCallback === 'function') onDurationCallback(data.durationMs);
@@ -730,6 +736,10 @@ export function createJamAudioBridge({
 
   function seek(positionMs) {
     diagnosticsState.transitionGapMs = null;
+    diagnosticsState.positionMs = positionMs;
+    if (typeof onPositionCallback === 'function') {
+      onPositionCallback(positionMs);
+    }
     void sendPlaybackWorkerCommand('seek', { positionMs }).catch((error) => {
       if (typeof onPlaybackErrorCallback === 'function') {
         onPlaybackErrorCallback(error instanceof Error ? error.message : String(error));
@@ -1018,6 +1028,7 @@ export function createJamAudioBridge({
     playTrackBounded,
     setStreamingAnchor,
     ensureMediaAlive,
+    getWorkerHealthStatus,
     appendChunk,
     finalizeStream,
 

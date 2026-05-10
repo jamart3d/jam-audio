@@ -46,7 +46,11 @@ wasm-pack build --target web --release
 
 - Update `build.sh` to sync artifacts directly to the `jamdisc` sibling repo
 - Review remaining `expect` calls in `ring_buffer.rs` for typed error conversion
-- Git tag releases as the changelog grows
+- Continue Mode B playback tuning before reconsidering threaded-wasm Mode C work
+
+## Release Process
+
+For version bumps, changelog updates, verification, tagging, and push steps, see [RELEASING.md](RELEASING.md).
 
 ## Repository Governance
 

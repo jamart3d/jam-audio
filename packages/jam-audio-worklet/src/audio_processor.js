@@ -12,6 +12,8 @@ class JamAudioProcessor extends AudioWorkletProcessor {
     this.frameCapacity = 0;
     this.channels = 2;
     this.totalFramesRendered = 0;
+    this.framesSinceLastPositionUpdate = 0;
+    this.positionUpdateIntervalFrames = 4096; // ~85ms at 48kHz
 
     this.port.onmessage = (event) => this.handleMessage(event.data);
   }
@@ -23,11 +25,13 @@ class JamAudioProcessor extends AudioWorkletProcessor {
       this.frameCapacity = data.frameCapacity;
       this.channels = data.channels ?? 2;
       this.totalFramesRendered = 0;
+      this.framesSinceLastPositionUpdate = 0;
       return;
     }
 
     if (data.type === 'reset_position') {
       this.totalFramesRendered = 0;
+      this.framesSinceLastPositionUpdate = 0;
       return;
     }
 
@@ -37,6 +41,7 @@ class JamAudioProcessor extends AudioWorkletProcessor {
       this.frameCapacity = 0;
       this.channels = 2;
       this.totalFramesRendered = 0;
+      this.framesSinceLastPositionUpdate = 0;
     }
   }
 
@@ -55,27 +60,45 @@ class JamAudioProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    for (let frame = 0; frame < left.length; frame += 1) {
-      const shouldStop = Atomics.load(this.state, STOP_INDEX) === 1;
-      const availableFrames = Atomics.load(this.state, FRAMES_AVAILABLE_INDEX);
+    // Hoist common loads outside the hot loop to reduce atomic overhead.
+    const shouldStop = Atomics.load(this.state, STOP_INDEX) === 1;
+    const initialAvailableFrames = Atomics.load(this.state, FRAMES_AVAILABLE_INDEX);
 
-      if (shouldStop || availableFrames <= 0) {
-        left[frame] = 0;
-        right[frame] = 0;
-        continue;
-      }
+    if (shouldStop || initialAvailableFrames <= 0) {
+      left.fill(0);
+      right.fill(0);
+      return true;
+    }
 
-      const readFrame = Atomics.load(this.state, READ_INDEX);
+    const framesToProcess = Math.min(left.length, initialAvailableFrames);
+    let readFrame = Atomics.load(this.state, READ_INDEX);
+
+    for (let frame = 0; frame < framesToProcess; frame += 1) {
       const sampleIndex = (readFrame % this.frameCapacity) * this.channels;
       left[frame] = this.samples[sampleIndex] ?? 0;
       right[frame] = this.channels > 1 ? (this.samples[sampleIndex + 1] ?? 0) : left[frame];
 
-      Atomics.store(this.state, READ_INDEX, (readFrame + 1) % this.frameCapacity);
-      Atomics.sub(this.state, FRAMES_AVAILABLE_INDEX, 1);
-      this.totalFramesRendered += 1;
+      readFrame = (readFrame + 1) % this.frameCapacity;
     }
 
-    this.port.postMessage({ type: 'position', framesRendered: this.totalFramesRendered });
+    // Fill the remainder of the output buffer with silence if we ran out of frames (underrun)
+    for (let frame = framesToProcess; frame < left.length; frame += 1) {
+      left[frame] = 0;
+      right[frame] = 0;
+    }
+
+    if (framesToProcess > 0) {
+      // Single batch update for shared state indices and counters.
+      Atomics.store(this.state, READ_INDEX, readFrame);
+      Atomics.sub(this.state, FRAMES_AVAILABLE_INDEX, framesToProcess);
+
+      this.totalFramesRendered += framesToProcess;
+      this.framesSinceLastPositionUpdate += framesToProcess;
+      if (this.framesSinceLastPositionUpdate >= this.positionUpdateIntervalFrames) {
+        this.port.postMessage({ type: 'position', framesRendered: this.totalFramesRendered });
+        this.framesSinceLastPositionUpdate = 0;
+      }
+    }
 
     return true;
   }
