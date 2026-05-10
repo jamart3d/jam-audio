@@ -35,20 +35,35 @@ export function createJamAudioBridge({
   let heartbeatLastKnownDurationSec = 0;
   let heartbeatPositionCapturedAtMs = 0;
 
+  /** @type {((error: any) => void) | null} */
   let onPlaybackErrorCallback = null;
+  /** @type {((error: any) => void) | null} */
   let onPreloadErrorCallback = null;
+  /** @type {(() => void) | null} */
   let onPlaybackStartedCallback = null;
+  /** @type {(() => void) | null} */
   let onEndedCallback = null;
+  /** @type {((position: number) => void) | null} */
   let onPositionCallback = null;
+  /** @type {((duration: number) => void) | null} */
   let onDurationCallback = null;
+  /** @type {(() => void) | null} */
   let onNextCallback = null;
+  /** @type {(() => void) | null} */
   let onPreviousCallback = null;
+  /** @type {(() => void) | null} */
   let onPlayCallback = null;
+  /** @type {(() => void) | null} */
   let onPauseCallback = null;
+  /** @type {((track: any) => void) | null} */
   let onTrackChangedCallback = null;
+  /** @type {((snapshot: string) => void) | null} */
   let onDiagnosticsSnapshotCallback = null;
+  /** @type {((event: string) => void) | null} */
   let onDiagnosticsEventCallback = null;
+  /** @type {((position: number) => void) | null} */
   let onSeekCallback = null;
+  /** @type {(() => void) | null} */
   let onStopCallback = null;
 
   let diagnosticsState = createDiagnosticsState();

@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-05-08
+## [0.2.0] — 2026-05-09
 
 ### Changed
 - `GaplessPlayer::seek_to_ms` now returns `Result<(), GaplessError>` instead of silently discarding failures
@@ -10,6 +10,8 @@
 - `InMemoryMediaSource` internal buffer changed from `Vec<u8>` to `Arc<[u8]>` to avoid redundant copies in metadata and decode paths
 - Residual sample buffers switched from `Vec<f32>` with front-draining to `VecDeque<f32>` across all player cores
 - Metadata tag mapping extracted into a shared `apply_tags` helper, eliminating duplicated logic between container and block passes
+- Consolidated PWA persistence documentation directly into source code comments and root `README.md`
+- Archived completed development plans and design specs into `docs/superpowers/archive/`
 
 ### Fixed
 - Removed `expect("invalid channels")` panic from opus decode path; invalid channel counts now return a typed error
@@ -18,6 +20,8 @@
 ### Added
 - GitHub Actions CI: Rust check (native + wasm32), wasm-pack build, and worklet syntax check
 - `SYNC_POLICY.md` formalising `jam-audio` as the canonical provider for shared audio packages
+- JSDoc type annotations for the JavaScript `AudioWorklet` bridge to improve IDE support and DX
+- Explicitly ignore `.claude/` settings in `.gitignore` to prevent local configuration leaks
 
 ## [0.1.0] — 2026-04-01
 
