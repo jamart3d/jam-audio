@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-05-09
+
+### Changed
+- Replaced purely fixed refill behavior with more adaptive playback-worker refill scheduling
+- Improved low-headroom recovery so the worker can restore buffer headroom without blocking playback unnecessarily
+- Added refill-path diagnostics to make starvation, low-watermark pressure, and recovery behavior easier to tune
+
+### Verified
+- Targeted validation for refill scheduling, recovery behavior, and playback-worker correctness across startup, steady-state playback, seek, stop, and streaming-related flows
+
 ## [0.2.2] — 2026-05-09
 
 ### Changed
