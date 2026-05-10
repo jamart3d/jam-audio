@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-05-10
+
+### Added
+- Added metadata extraction support for callers that know the external total file size, allowing duration-sensitive formats to use the real file length instead of the currently buffered byte length
+- Added a new `extractMetadataWithSize` wasm export for JS workers that can supply the real file size alongside buffered audio data
+
+### Changed
+- Refactored engine metadata parsing to share JS object construction and route the existing extraction path through the new size-aware internal helper when appropriate
+
+### Verified
+- Targeted validation for the new size-aware metadata path, including engine tests and manifest checks across the publishable packages
+
 ## [0.2.4] — 2026-05-09
 
 ### Changed
