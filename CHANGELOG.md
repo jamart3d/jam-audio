@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-09
+
+### Changed
+- Throttled `AudioWorkletProcessor` position updates to reduce per-callback messaging overhead in the web playback hot path
+- Reduced JS worklet hot-path overhead where safe without changing the current JS worklet plus Rust decoder architecture
+
+### Verified
+- Targeted validation for worklet and bridge behavior covering playback position updates, seek/reset handling, and stop-state correctness
+
 ## [0.2.0] — 2026-05-09
 
 ### Changed
