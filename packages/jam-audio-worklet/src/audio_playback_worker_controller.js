@@ -7,15 +7,12 @@ const CHANNELS = 2;
 const REFILL_CHUNK_FRAMES = 1024;
 const REFILL_CHUNK_FRAMES_RECOVERY = 4096;
 const REFILL_INTERVAL_MS = 15;
-const PLAYBACK_START_FRAMES_DEFAULT = 88200;
-const PLAYBACK_START_FRAMES_MIN = 44100;
-const STEADY_STATE_TARGET_MIN_FRAMES = 264600; // ~6s at 44.1kHz
-const STEADY_STATE_TARGET_MAX_FRAMES = 485100; // ~11s at 44.1kHz
-const TRANSITION_HEADROOM_FRAMES = 132300; // ~3s extra during transitions
+const PLAYBACK_START_FRAMES = 88200;
+const STEADY_STATE_TARGET_FRAMES = 264600; // ~5.5s at 48kHz
 const CRITICAL_THRESHOLD_FRAMES = 44100; // ~1s at 44.1kHz
 const REFILL_MAX_TICK_DURATION_MS = 20;
-const READ_AHEAD_MS = 30000; // 30s
-const RESUME_THRESHOLD_MS = 10000; // 10s
+const READ_AHEAD_BYTES = 8 * 1024 * 1024;
+const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
 function createPlaybackWorkerController({
   createGaplessPlayer,
@@ -49,12 +46,6 @@ function createPlaybackWorkerController({
   let endedEmitted = false;
   let lastChunkReceivedAt = 0;
   let isStalled = false;
-
-  // Adaptive policy state
-  let adaptiveSteadyStateTarget = STEADY_STATE_TARGET_MIN_FRAMES;
-  let adaptiveStartupThreshold = PLAYBACK_START_FRAMES_DEFAULT;
-  let consecutiveStableRefills = 0;
-
   let diagnostics = createWorkerDiagnostics();
 
   function emitDiagnosticsEvent(event) {
@@ -82,7 +73,6 @@ function createPlaybackWorkerController({
         lowWaterMarkCount: diagnostics.lowWaterMarkCount,
         recoveryModeActive: diagnostics.recoveryModeActive,
         activeBoundedWindowSize: diagnostics.activeBoundedWindowSize,
-        adaptiveSteadyStateTarget,
         retainedBytes: diagnostics.retainedBytes,
         pendingSeekDistanceMs: diagnostics.pendingSeekDistanceMs,
         fetchToDecodeLagMs: diagnostics.fetchToDecodeLagMs,
@@ -183,11 +173,6 @@ function createPlaybackWorkerController({
     transitionMonitorUntilMs = 0;
     transitionFloorCandidate = Infinity;
     endedEmitted = false;
-
-    // Reset adaptive state
-    adaptiveSteadyStateTarget = STEADY_STATE_TARGET_MIN_FRAMES;
-    adaptiveStartupThreshold = PLAYBACK_START_FRAMES_DEFAULT;
-    consecutiveStableRefills = 0;
   }
 
   function stopRefillLoop() {
@@ -291,7 +276,7 @@ function createPlaybackWorkerController({
     const activePlayer = currentPlayer();
     const framesAvailable = optionalFrames ?? diagnostics.framesAvailable;
     const bufferReady =
-      framesAvailable >= adaptiveStartupThreshold ||
+      framesAvailable >= PLAYBACK_START_FRAMES ||
       (((streamingFinalized || (player && player.hasEnded())) && framesAvailable > 0));
 
     if (!activePlayer || startupCompleted || !bufferReady) {
@@ -331,52 +316,11 @@ function createPlaybackWorkerController({
     }
     const isStreaming = activePlayer === streamingPlayer || activePlayer === windowedPlayer;
     const refillStartedAt = performanceNow();
-
-    // 1. Adaptive Steady-State Policy
-    // If scheduling jitter is detected (refill gap > 35ms), increase target headroom.
-    // If scheduling is stable, gradually return to minimum target.
-    if (diagnostics.lastRefillGapMs > 35) {
-      const increase = 44100; // Increase by ~1s
-      const nextTarget = Math.min(STEADY_STATE_TARGET_MAX_FRAMES, adaptiveSteadyStateTarget + increase);
-      if (nextTarget > adaptiveSteadyStateTarget) {
-        adaptiveSteadyStateTarget = nextTarget;
-        emitDiagnosticsEvent({
-          type: 'adaptive-target-increased',
-          label: 'Increasing buffer target due to jitter',
-          newTarget: adaptiveSteadyStateTarget,
-          gapMs: diagnostics.lastRefillGapMs,
-          severity: 'info',
-          timestampMs: nowMs(),
-        });
-      }
-      consecutiveStableRefills = 0;
-    } else if (diagnostics.lastRefillGapMs > 0 && diagnostics.lastRefillGapMs < 20) {
-      consecutiveStableRefills++;
-      if (consecutiveStableRefills > 30 && adaptiveSteadyStateTarget > STEADY_STATE_TARGET_MIN_FRAMES) {
-        adaptiveSteadyStateTarget = Math.max(STEADY_STATE_TARGET_MIN_FRAMES, adaptiveSteadyStateTarget - 4410); // Decrease by ~100ms
-        consecutiveStableRefills = 25; // Reset but stay near threshold
-      }
-    }
-
     let wroteFrames = false;
 
     while (true) {
       const framesAvailable = Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX);
-
-      // 2. Transition Headroom Protection
-      // If we are within 10s of a track handoff, increase target headroom to protect against transition dips.
-      let transitionHeadroom = 0;
-      if (!isStreaming && player) {
-        const currentDuration = player.durationMs();
-        const currentPos = player.positionMs() - trackStartPositionMs;
-        const timeRemainingMs = currentDuration - currentPos;
-        if (currentDuration > 0 && timeRemainingMs > 0 && timeRemainingMs < 10000) {
-          transitionHeadroom = TRANSITION_HEADROOM_FRAMES;
-        }
-      }
-
-      const baseTarget = startupCompleted ? adaptiveSteadyStateTarget : frameCapacity;
-      const currentTargetFrames = Math.min(frameCapacity - 4096, baseTarget + transitionHeadroom);
+      const currentTargetFrames = startupCompleted ? STEADY_STATE_TARGET_FRAMES : frameCapacity;
 
       const isCritical = framesAvailable < CRITICAL_THRESHOLD_FRAMES;
       const currentChunkSize = isCritical ? REFILL_CHUNK_FRAMES_RECOVERY : REFILL_CHUNK_FRAMES;
@@ -402,16 +346,7 @@ function createPlaybackWorkerController({
         decodeError = error;
       }
 
-      const decodeDurationMs = performanceNow() - decodeStartedAt;
-      updateDecodeMetrics(Number(decodeDurationMs.toFixed(2)));
-
-      // 3. Adaptive Startup Threshold
-      // If we see very fast decodes initially, we can safely start playback earlier.
-      if (!startupCompleted && diagnostics.refillCount > 1 && diagnostics.refillCount < 5) {
-        if (diagnostics.movingAverageDecodeMs < 8) {
-          adaptiveStartupThreshold = PLAYBACK_START_FRAMES_MIN;
-        }
-      }
+      updateDecodeMetrics(Number((performanceNow() - decodeStartedAt).toFixed(2)));
 
       if (result instanceof Float32Array && result.length > 0) {
         diagnostics.pendingSeekDistanceMs = 0;
@@ -435,9 +370,9 @@ function createPlaybackWorkerController({
             fetchController.fetchFrom(offset);
           }
           return; // Skip this refill tick, data will arrive next tick
-        } else if (fetchController && !fetchController.isPaused && activePlayer.bufferedAheadMs() > READ_AHEAD_MS) {
+        } else if (fetchController && !fetchController.isPaused && activePlayer.bufferedAhead() > READ_AHEAD_BYTES) {
           fetchController.pause();
-        } else if (fetchController && fetchController.isPaused && activePlayer.bufferedAheadMs() < RESUME_THRESHOLD_MS) {
+        } else if (fetchController && fetchController.isPaused && activePlayer.bufferedAhead() < RESUME_THRESHOLD_BYTES) {
           fetchController.resume();
         }
       }
@@ -553,7 +488,7 @@ function createPlaybackWorkerController({
       );
       emitMessage({ type: 'position', positionMs: currentPositionMs });
 
-      if (!startupCompleted && Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX) >= adaptiveStartupThreshold) {
+      if (!startupCompleted && Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX) >= PLAYBACK_START_FRAMES) {
         maybeStartPlaybackIfBuffered(Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX));
       }
 
@@ -673,13 +608,6 @@ function createPlaybackWorkerController({
           const bytesPerFrame = fetched / framesDecoded;
           const estimatedConsumed = framesDecoded * bytesPerFrame;
           return Math.max(0, fetched - estimatedConsumed);
-        },
-        bufferedAheadMs: () => {
-          if (!fetchController || framesDecoded === 0) return 0;
-          const fetched = fetchController.bytesFetched;
-          const bytesPerFrame = fetched / framesDecoded;
-          const bufferedFrames = windowedPlayer.bufferedAhead() / bytesPerFrame;
-          return (bufferedFrames / sampleRate) * 1000;
         }
       };
 
