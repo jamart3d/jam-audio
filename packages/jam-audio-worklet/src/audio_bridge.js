@@ -416,6 +416,7 @@ export function createJamAudioBridge({
       diagnosticsState.lastTransitionFloorPercent = payload.lastTransitionFloorPercent;
     }
     if (payload.lowWaterMarkCount !== undefined) diagnosticsState.lowWaterMarkCount = payload.lowWaterMarkCount;
+    if (payload.recoveryModeActive !== undefined) diagnosticsState.recoveryModeActive = payload.recoveryModeActive;
     if (payload.activeBoundedWindowSize !== undefined) diagnosticsState.activeBoundedWindowSize = payload.activeBoundedWindowSize;
     if (payload.retainedBytes !== undefined) diagnosticsState.retainedBytes = payload.retainedBytes;
     if (payload.pendingSeekDistanceMs !== undefined) diagnosticsState.pendingSeekDistanceMs = payload.pendingSeekDistanceMs;

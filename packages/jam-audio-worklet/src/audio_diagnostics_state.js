@@ -25,6 +25,7 @@ function createDiagnosticsState() {
     // Lowest buffer fill % seen in the 500 ms after a gapless handoff.
     lastTransitionFloorPercent: null,
     lowWaterMarkCount: 0,
+    recoveryModeActive: false,
     activeBoundedWindowSize: 0,
     retainedBytes: 0,
     pendingSeekDistanceMs: 0,
@@ -74,6 +75,7 @@ function buildSnapshot(state, capturedAtMs) {
     transitionGapMs: state.transitionGapMs,
     lastTransitionFloorPercent: state.lastTransitionFloorPercent,
     lowWaterMarkCount: state.lowWaterMarkCount,
+    recoveryModeActive: state.recoveryModeActive,
     activeBoundedWindowSize: state.activeBoundedWindowSize,
     retainedBytes: state.retainedBytes,
     pendingSeekDistanceMs: state.pendingSeekDistanceMs,

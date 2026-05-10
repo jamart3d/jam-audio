@@ -5,9 +5,12 @@ const END_OF_STREAM_INDEX = 3;
 const STOP_INDEX = 4;
 const CHANNELS = 2;
 const REFILL_CHUNK_FRAMES = 1024;
+const REFILL_CHUNK_FRAMES_RECOVERY = 4096;
 const REFILL_INTERVAL_MS = 15;
 const PLAYBACK_START_FRAMES = 88200;
 const STEADY_STATE_TARGET_FRAMES = 264600; // ~5.5s at 48kHz
+const CRITICAL_THRESHOLD_FRAMES = 44100; // ~1s at 44.1kHz
+const REFILL_MAX_TICK_DURATION_MS = 20;
 const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
@@ -35,6 +38,7 @@ function createPlaybackWorkerController({
   let streamingBufferedDurationMs = 0;
   let startupCompleted = false;
   let refillTimerId = null;
+  let refillPending = false;
   let lastRefillTickMs = 0;
   let trackStartPositionMs = 0;
   let transitionMonitorUntilMs = 0;
@@ -67,6 +71,7 @@ function createPlaybackWorkerController({
         transitionGapMs: diagnostics.transitionGapMs,
         lastTransitionFloorPercent: diagnostics.lastTransitionFloorPercent,
         lowWaterMarkCount: diagnostics.lowWaterMarkCount,
+        recoveryModeActive: diagnostics.recoveryModeActive,
         activeBoundedWindowSize: diagnostics.activeBoundedWindowSize,
         retainedBytes: diagnostics.retainedBytes,
         pendingSeekDistanceMs: diagnostics.pendingSeekDistanceMs,
@@ -99,6 +104,20 @@ function createPlaybackWorkerController({
       diagnostics.lowWaterMarkCount += 1;
     } else if (diagnostics.bufferFillPercent >= 15) {
       isBelowLowWaterMark = false;
+    }
+
+    const isCritical = framesAvailable < CRITICAL_THRESHOLD_FRAMES && frameCapacity > 0;
+    if (isCritical !== diagnostics.recoveryModeActive) {
+      diagnostics.recoveryModeActive = isCritical;
+      if (isCritical) {
+        emitDiagnosticsEvent({
+          type: 'recovery-mode-entered',
+          label: 'Entering recovery mode (low headroom)',
+          severity: 'warning',
+          timestampMs: nowMs(),
+          framesAvailable,
+        });
+      }
     }
 
     if (windowedPlayer) {
@@ -167,6 +186,7 @@ function createPlaybackWorkerController({
     stopRefillLoop();
     lastRefillTickMs = performanceNow();
     refillTimerId = setIntervalFn(() => {
+      if (refillPending) return;
       const currentTime = performanceNow();
       const gap = currentTime - lastRefillTickMs;
       lastRefillTickMs = currentTime;
@@ -252,11 +272,12 @@ function createPlaybackWorkerController({
     });
   }
 
-  function maybeStartPlaybackIfBuffered() {
+  function maybeStartPlaybackIfBuffered(optionalFrames) {
     const activePlayer = currentPlayer();
+    const framesAvailable = optionalFrames ?? diagnostics.framesAvailable;
     const bufferReady =
-      diagnostics.framesAvailable >= PLAYBACK_START_FRAMES ||
-      (((streamingFinalized || (player && player.hasEnded())) && diagnostics.framesAvailable > 0));
+      framesAvailable >= PLAYBACK_START_FRAMES ||
+      (((streamingFinalized || (player && player.hasEnded())) && framesAvailable > 0));
 
     if (!activePlayer || startupCompleted || !bufferReady) {
       return;
@@ -288,6 +309,7 @@ function createPlaybackWorkerController({
   }
 
   function refillRingBuffer() {
+    refillPending = false;
     const activePlayer = currentPlayer();
     if (!activePlayer || !sharedSamples || !sharedState) {
       return;
@@ -299,9 +321,13 @@ function createPlaybackWorkerController({
     while (true) {
       const framesAvailable = Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX);
       const currentTargetFrames = startupCompleted ? STEADY_STATE_TARGET_FRAMES : frameCapacity;
+
+      const isCritical = framesAvailable < CRITICAL_THRESHOLD_FRAMES;
+      const currentChunkSize = isCritical ? REFILL_CHUNK_FRAMES_RECOVERY : REFILL_CHUNK_FRAMES;
+
       const writableFrames = Math.min(
         currentTargetFrames - framesAvailable,
-        REFILL_CHUNK_FRAMES,
+        currentChunkSize,
       );
 
       if (writableFrames <= 0) {
@@ -461,6 +487,16 @@ function createPlaybackWorkerController({
           trackStartPositionMs,
       );
       emitMessage({ type: 'position', positionMs: currentPositionMs });
+
+      if (!startupCompleted && Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX) >= PLAYBACK_START_FRAMES) {
+        maybeStartPlaybackIfBuffered(Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX));
+      }
+
+      if (performanceNow() - refillStartedAt > REFILL_MAX_TICK_DURATION_MS) {
+        refillPending = true;
+        setTimeout(() => refillRingBuffer(), 0);
+        break;
+      }
     }
 
     diagnostics.lastRefillDurationMs = Number(
@@ -821,6 +857,7 @@ function createWorkerDiagnostics(overrides = {}) {
     transitionGapMs: null,
     lastTransitionFloorPercent: null,
     lowWaterMarkCount: 0,
+    recoveryModeActive: false,
     activeBoundedWindowSize: 0,
     retainedBytes: 0,
     pendingSeekDistanceMs: 0,
