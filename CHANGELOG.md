@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-05-09
+
+### Changed
+- Made playback buffer policy more adaptive so startup and steady-state headroom can respond better to runtime conditions
+- Tuned buffer-management behavior to improve tolerance for degraded scheduling conditions such as background throttling
+- Refined playback-worker policy around buffered headroom and transition safety margins
+
+### Fixed
+- Added crate-local `LICENSE` files for package builds that require license files beside each publishable crate
+
+### Verified
+- Targeted validation for adaptive buffer policy across startup, steady-state playback, seek, stop, transition behavior, and streaming-related flows
+
 ## [0.2.3] — 2026-05-09
 
 ### Changed
