@@ -6,6 +6,8 @@
   - **Goal:** Improve startup, jitter tolerance, buffer management, and bridge overhead without requiring threaded WASM.
   - **Context:** The current JS worklet is already small; refill timing, diagnostics traffic, and static buffer policy are more likely near-term bottlenecks.
   - **Plan:** See `docs/superpowers/plans/future/mode-b-worklet-and-buffer-optimization.md` (local artifact) for the recommended next-step roadmap.
+  - **Landed:** Phase 1 worklet-overhead reduction, Phase 2 refill scheduling and recovery, and Phase 3 adaptive buffer-policy tuning have shipped in separate release slices.
+  - **Next:** Gather real-world playback observations across long playback sessions, background/screen-off behavior, network variation, bounded streaming, seeks, and gapless transitions before deciding whether Phase 4 diagnostics/bridge cleanup is justified.
 
 - [ ] **Transition to Multithreaded WASM (Mode C)**
   - **Goal:** Evaluate whether a threaded-wasm architecture is justified for zero-copy rendering and broader Rust ownership of the playback path.
