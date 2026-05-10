@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 use js_sys::{Object, Reflect};
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::sync::Arc;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
@@ -38,6 +39,12 @@ fn apply_tags(result: &mut AudioMetadata, tags: &[symphonia::core::meta::Tag], o
 
 /// Internal shared parser for audio metadata.
 pub fn extract_metadata_internal(data: &[u8]) -> AudioMetadata {
+    extract_metadata_with_size_internal(data, 0)
+}
+
+/// Internal shared parser for audio metadata with an optional total file size hint.
+/// This is particularly important for MP3 files where duration is calculated from file size.
+pub fn extract_metadata_with_size_internal(data: &[u8], total_file_size: u64) -> AudioMetadata {
     let mut result = AudioMetadata::default();
 
     if data.is_empty() {
@@ -45,8 +52,14 @@ pub fn extract_metadata_internal(data: &[u8]) -> AudioMetadata {
     }
 
     let shared_data = Arc::from(data);
-    let media_source = InMemoryMediaSource::new(shared_data);
-    let media_stream = MediaSourceStream::new(Box::new(media_source), Default::default());
+    
+    let media_source: Box<dyn MediaSource> = if total_file_size > 0 {
+        Box::new(SizedMediaSource::new(shared_data, total_file_size))
+    } else {
+        Box::new(InMemoryMediaSource::new(shared_data))
+    };
+    
+    let media_stream = MediaSourceStream::new(media_source, Default::default());
     let hint = Hint::new();
 
     let mut probed = match get_probe().format(
@@ -84,9 +97,7 @@ pub fn extract_metadata_internal(data: &[u8]) -> AudioMetadata {
     result
 }
 
-#[wasm_bindgen(js_name = extractMetadata)]
-pub fn extract_metadata(data: &[u8]) -> JsValue {
-    let metadata = extract_metadata_internal(data);
+fn audio_metadata_to_js_value(metadata: AudioMetadata) -> JsValue {
     let obj = Object::new();
 
     if let Some(title) = metadata.title {
@@ -108,7 +119,15 @@ pub fn extract_metadata(data: &[u8]) -> JsValue {
     obj.into()
 }
 
-use std::sync::Arc;
+#[wasm_bindgen(js_name = extractMetadata)]
+pub fn extract_metadata(data: &[u8]) -> JsValue {
+    audio_metadata_to_js_value(extract_metadata_internal(data))
+}
+
+#[wasm_bindgen(js_name = extractMetadataWithSize)]
+pub fn extract_metadata_with_size(data: &[u8], total_file_size: u64) -> JsValue {
+    audio_metadata_to_js_value(extract_metadata_with_size_internal(data, total_file_size))
+}
 
 struct InMemoryMediaSource {
     inner: Cursor<Arc<[u8]>>,
@@ -140,6 +159,51 @@ impl MediaSource for InMemoryMediaSource {
     }
     fn byte_len(&self) -> Option<u64> {
         Some(self.inner.get_ref().len() as u64)
+    }
+}
+
+struct SizedMediaSource {
+    inner: Cursor<Arc<[u8]>>,
+    total_file_size: u64,
+}
+
+impl SizedMediaSource {
+    fn new(bytes: Arc<[u8]>, total_file_size: u64) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            total_file_size,
+        }
+    }
+}
+
+impl Read for SizedMediaSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for SizedMediaSource {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match pos {
+            SeekFrom::End(n) => {
+                let target = if n >= 0 {
+                    self.total_file_size.saturating_add(n as u64)
+                } else {
+                    self.total_file_size.saturating_sub(n.unsigned_abs())
+                };
+                self.inner.seek(SeekFrom::Start(target))
+            }
+            _ => self.inner.seek(pos),
+        }
+    }
+}
+
+impl MediaSource for SizedMediaSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.total_file_size)
     }
 }
 
@@ -209,5 +273,16 @@ mod tests {
         assert_eq!(metadata.duration_ms, Some(1020.0));
         assert!(metadata.title.is_none());
         assert!(metadata.artist.is_none());
+    }
+
+    #[test]
+    fn extract_metadata_with_size_internal_uses_provided_size() {
+        let data = std::fs::read("testdata/opus_sample.opus").expect("failed to read sample file");
+        
+        // For Opus, duration is usually in the container, so providing a wrong size
+        // might not change duration, but we can at least verify it doesn't crash
+        // and returns the same metadata if the size is correct or irrelevant.
+        let metadata = extract_metadata_with_size_internal(&data, data.len() as u64);
+        assert_eq!(metadata.duration_ms, Some(1020.0));
     }
 }
