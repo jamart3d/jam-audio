@@ -285,4 +285,27 @@ mod tests {
         let metadata = extract_metadata_with_size_internal(&data, data.len() as u64);
         assert_eq!(metadata.duration_ms, Some(1020.0));
     }
+
+    #[test]
+    fn extract_metadata_with_size_internal_calculates_mp3_duration_from_total_size() {
+        // Minimal MP3 frame header (128kbps, 44.1kHz, Mono)
+        // Header: FF FB 90 44
+        let mut data = vec![0u8; 1024];
+        data[0] = 0xFF;
+        data[1] = 0xFB;
+        data[2] = 0x90;
+        data[3] = 0x44;
+        
+        // With 1KB data, duration should be very small (~0.06s)
+        let meta1 = extract_metadata_with_size_internal(&data, 0);
+        let dur1 = meta1.duration_ms.unwrap_or(0.0);
+        
+        // With 1MB total_file_size, duration should be scaled (~65s)
+        let meta2 = extract_metadata_with_size_internal(&data, 1024 * 1024);
+        let dur2 = meta2.duration_ms.unwrap_or(0.0);
+        
+        assert!(dur2 > dur1 * 100.0, "Duration should scale with total_file_size. dur1: {}, dur2: {}", dur1, dur2);
+        // 1MB @ 128kbps = 1024*1024*8 / 128000 = 65.536s
+        assert!(dur2 > 60000.0 && dur2 < 70000.0, "Duration {}ms should be approx 65s", dur2);
+    }
 }
