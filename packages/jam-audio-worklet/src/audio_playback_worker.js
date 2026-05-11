@@ -107,6 +107,10 @@ export function initPlaybackWorker({
           controller.finalizeStream();
           self.postMessage({ type: 'response', requestId });
           return;
+        case 'pauseRefill':
+          controller.pauseRefill();
+          self.postMessage({ type: 'response', requestId });
+          return;
         case 'preloadNext':
           controller.preloadNext(data.audioBytes);
           self.postMessage({ type: 'response', requestId });

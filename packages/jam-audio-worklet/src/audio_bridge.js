@@ -758,6 +758,7 @@ export function createJamAudioBridge({
         await new Promise((resolve) => setTimeout(resolve, DECLICK_DURATION_S * 1000));
       }
       await audioContext.suspend();
+      if (playbackWorker) void sendPlaybackWorkerCommand('pauseRefill').catch(() => {});
       markPlaybackState('paused');
       if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
       emitDiagnosticsEvent({ type: 'pause', label: 'Paused', timestampMs: nowMs(), severity: 'info' });

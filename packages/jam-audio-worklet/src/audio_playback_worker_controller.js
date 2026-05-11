@@ -801,6 +801,10 @@ function createPlaybackWorkerController({
       return 0;
     },
 
+    pauseRefill() {
+      stopRefillLoop();
+    },
+
     stop() {
       stopRefillLoop();
       if (sharedState) {
