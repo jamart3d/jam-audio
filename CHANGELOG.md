@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-05-11
+
+### Added
+- Added MP3 duration scaling test in the engine to ensure accuracy for VBR/CBR files
+
+### Changed
+- Improved worklet `pauseRefill` implementation to better handle background tab survival and prevent unnecessary starvation
+
+### Chore
+- Added missing metadata fields (authors, description, repository) to `jam-audio-flutter` Cargo.toml
+
 ## [0.2.5] — 2026-05-10
 
 ### Added

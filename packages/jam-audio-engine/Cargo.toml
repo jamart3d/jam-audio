@@ -1,6 +1,6 @@
 [package]
 name = "jam-audio-engine"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 rust-version = "1.89"
 description = "Rust audio engine for decoding, metadata extraction, ring buffering, and gapless playback"
