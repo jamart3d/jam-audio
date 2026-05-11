@@ -288,15 +288,19 @@ mod tests {
 
     #[test]
     fn extract_metadata_with_size_internal_calculates_mp3_duration_from_total_size() {
-        // Minimal MP3 frame header (128kbps, 44.1kHz, Mono)
-        // Header: FF FB 90 44
-        let mut data = vec![0u8; 1024];
-        data[0] = 0xFF;
-        data[1] = 0xFB;
-        data[2] = 0x90;
-        data[3] = 0x44;
+        // Symphonia estimates MP3 duration from multiple valid frame headers.
+        // Build a short synthetic CBR stream and then report a much larger total size.
+        const FRAME_HEADER: [u8; 4] = [0xFF, 0xFB, 0x90, 0xC0];
+        const FRAME_LEN: usize = 417;
+        const FRAME_COUNT: usize = 20;
+
+        let mut data = vec![0u8; FRAME_LEN * FRAME_COUNT];
+        for frame_idx in 0..FRAME_COUNT {
+            let offset = frame_idx * FRAME_LEN;
+            data[offset..offset + FRAME_HEADER.len()].copy_from_slice(&FRAME_HEADER);
+        }
         
-        // With 1KB data, duration should be very small (~0.06s)
+        // Without a larger file size hint, duration should reflect the buffered bytes only.
         let meta1 = extract_metadata_with_size_internal(&data, 0);
         let dur1 = meta1.duration_ms.unwrap_or(0.0);
         
