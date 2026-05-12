@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-05-12
+
+### Fixed
+- Resolved a race condition in the worklet where rapid track skipping could lead to inconsistent worker states
+- Ensured AudioContext is resumed before starting bounded (proxy) playback to prevent stalls on first skip after startup
+
+### Added
+- Added `bounded-first-byte` diagnostics event to the worklet to track Cloudflare proxy cold-start latency
+
 ## [0.2.7] — 2026-05-12
 
 ### Fixed
