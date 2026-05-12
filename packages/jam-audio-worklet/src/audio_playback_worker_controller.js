@@ -45,6 +45,9 @@ function createPlaybackWorkerController({
   let currentTrackEndPositionMs = 0;
   let transitionMonitorUntilMs = 0;
   let transitionFloorCandidate = Infinity;
+  let handoffUnderrunBaseline = 0;
+  let handoffStartedAtMs = 0;
+  let lastCompletedHandoffUnderrunDelta = 0;
   let endedEmitted = false;
   let lastChunkReceivedAt = 0;
   let isStalled = false;
@@ -136,6 +139,8 @@ function createPlaybackWorkerController({
       currentTime > transitionMonitorUntilMs
     ) {
       diagnostics.lastTransitionFloorPercent = transitionFloorCandidate;
+      lastCompletedHandoffUnderrunDelta =
+        diagnostics.underrunCount - handoffUnderrunBaseline;
       emitDiagnosticsEvent({
         type: 'transition-buffer-floor',
         label: 'Transition buffer floor',
@@ -175,6 +180,9 @@ function createPlaybackWorkerController({
     currentTrackEndPositionMs = 0;
     transitionMonitorUntilMs = 0;
     transitionFloorCandidate = Infinity;
+    handoffUnderrunBaseline = 0;
+    handoffStartedAtMs = 0;
+    lastCompletedHandoffUnderrunDelta = 0;
     endedEmitted = false;
   }
 
@@ -446,19 +454,36 @@ function createPlaybackWorkerController({
           newDuration !== currentTrackEndPositionMs &&
           crossedTrackBoundary
         ) {
+          const currentFillPercent = frameCapacity > 0 ? (framesAvailable / frameCapacity) * 100 : 0;
+          if (currentFillPercent < 25) {
+            stopRefillLoop();
+            diagnostics.transitionGapMs = null;
+            emitMessage({ type: 'playback-error', message: 'handoff_unsafe' });
+            return;
+          }
           diagnostics.transitionGapMs =
             transitionPositionMs - currentTrackEndPositionMs;
+          handoffUnderrunBaseline = diagnostics.underrunCount;
+          handoffStartedAtMs = nowMs();
+          const signedGapMs = diagnostics.transitionGapMs;
+          const audibleLateGapMs = Math.max(0, signedGapMs);
+          const underrunDelta = lastCompletedHandoffUnderrunDelta;
           trackStartPositionMs = transitionPositionMs;
           currentTrackEndPositionMs = newDuration;
           emitDiagnosticsEvent({
             type: 'track-handoff',
             label: 'Track handoff',
-            timestampMs: nowMs(),
-            severity: 'info',
+            timestampMs: handoffStartedAtMs,
+            severity:
+              audibleLateGapMs > 0 || underrunDelta > 0 ? 'warning' : 'info',
+            signedGapMs,
+            audibleLateGapMs,
+            transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
+            underrunDelta,
           });
           emitMessage({ type: 'track-changed' });
           emitMessage({ type: 'duration', durationMs: Math.floor(newDuration) });
-          transitionMonitorUntilMs = nowMs() + 500;
+          transitionMonitorUntilMs = handoffStartedAtMs + 500;
           transitionFloorCandidate = Infinity;
         }
       }
@@ -873,6 +898,7 @@ function createWorkerDiagnostics(overrides = {}) {
     movingAverageDecodeMs: 0,
     transitionGapMs: null,
     lastTransitionFloorPercent: null,
+    underrunCount: 0,
     lowWaterMarkCount: 0,
     recoveryModeActive: false,
     activeBoundedWindowSize: 0,
