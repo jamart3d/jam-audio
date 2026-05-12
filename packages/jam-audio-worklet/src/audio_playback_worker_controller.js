@@ -13,6 +13,7 @@ const CRITICAL_THRESHOLD_FRAMES = 44100; // ~1s at 44.1kHz
 const REFILL_MAX_TICK_DURATION_MS = 20;
 const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
+const TRACK_HANDOFF_TOLERANCE_MS = 50;
 
 function createPlaybackWorkerController({
   createGaplessPlayer,
@@ -41,6 +42,7 @@ function createPlaybackWorkerController({
   let refillPending = false;
   let lastRefillTickMs = 0;
   let trackStartPositionMs = 0;
+  let currentTrackEndPositionMs = 0;
   let transitionMonitorUntilMs = 0;
   let transitionFloorCandidate = Infinity;
   let endedEmitted = false;
@@ -170,6 +172,7 @@ function createPlaybackWorkerController({
     streamingBufferedDurationMs = 0;
     startupCompleted = false;
     trackStartPositionMs = 0;
+    currentTrackEndPositionMs = 0;
     transitionMonitorUntilMs = 0;
     transitionFloorCandidate = Infinity;
     endedEmitted = false;
@@ -435,10 +438,18 @@ function createPlaybackWorkerController({
 
       if (!isStreaming) {
         const newDuration = player.durationMs();
-        if (newDuration !== previousDuration) {
-          const actualTransitionMs = player.positionMs() - trackStartPositionMs;
-          diagnostics.transitionGapMs = actualTransitionMs - previousDuration;
-          trackStartPositionMs = player.positionMs();
+        const transitionPositionMs = player.positionMs();
+        const crossedTrackBoundary =
+          transitionPositionMs >=
+          currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+        if (
+          newDuration !== currentTrackEndPositionMs &&
+          crossedTrackBoundary
+        ) {
+          diagnostics.transitionGapMs =
+            transitionPositionMs - currentTrackEndPositionMs;
+          trackStartPositionMs = transitionPositionMs;
+          currentTrackEndPositionMs = newDuration;
           emitDiagnosticsEvent({
             type: 'track-handoff',
             label: 'Track handoff',
@@ -539,6 +550,7 @@ function createPlaybackWorkerController({
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
       player = createGaplessPlayer(audioBytes, buffers.sampleRate ?? 48000);
+      currentTrackEndPositionMs = player.durationMs();
       emitMessage({ type: 'duration', durationMs: Math.floor(player.durationMs()) });
       emitDiagnosticsSync({
         startupTimingsMs: {
@@ -770,6 +782,7 @@ function createPlaybackWorkerController({
           Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
         }
         trackStartPositionMs = 0;
+        currentTrackEndPositionMs = activePlayer.durationMs();
         endedEmitted = false;
         emitDiagnosticsEvent({
           type: 'seek',
