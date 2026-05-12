@@ -1,15 +1,21 @@
 export class RangeFetchController {
-  constructor(url, { onChunk, onComplete, onError }) {
+  constructor(url, { onChunk, onComplete, onError, firstByteTimeoutMs = 10000, midStreamTimeoutMs = 8000 }) {
     this.url = url;
     this.onChunk = onChunk;
     this.onComplete = onComplete;
     this.onError = onError;
+    
+    this.firstByteTimeoutMs = firstByteTimeoutMs;
+    this.midStreamTimeoutMs = midStreamTimeoutMs;
     
     this.abortController = null;
     this.reader = null;
     this.isPaused = false;
     this.resumePromise = null;
     this.resumeResolve = null;
+    
+    this.firstByteTimer = null;
+    this.midStreamTimer = null;
     
     this.bytesFetched = 0;
     this.challengeRetryCount = 0;
@@ -30,6 +36,13 @@ export class RangeFetchController {
     }
 
     try {
+      this.firstByteTimer = setTimeout(() => {
+        this.abort();
+        if (this.onError) {
+          this.onError(new Error('network-timeout: first byte'));
+        }
+      }, this.firstByteTimeoutMs);
+
       const isRetryWithToken = this.url.includes('confirm=');
       const headers = {};
       
@@ -93,8 +106,26 @@ export class RangeFetchController {
 
       this.reader = response.body.getReader();
 
+      const resetMidStreamTimer = () => {
+        if (this.midStreamTimer) {
+          clearTimeout(this.midStreamTimer);
+          this.midStreamTimer = null;
+        }
+        if (this.isPaused) return;
+        this.midStreamTimer = setTimeout(() => {
+          this.abort();
+          if (this.onError) {
+            this.onError(new Error('network-timeout: mid-stream'));
+          }
+        }, this.midStreamTimeoutMs);
+      };
+
       while (true) {
         if (this.isPaused) {
+          if (this.midStreamTimer) {
+            clearTimeout(this.midStreamTimer);
+            this.midStreamTimer = null;
+          }
           await new Promise(resolve => {
             this.resumeResolve = resolve;
           });
@@ -102,9 +133,19 @@ export class RangeFetchController {
         
         if (!this.reader) break;
 
+        resetMidStreamTimer();
         const { done, value } = await this.reader.read();
 
+        if (this.firstByteTimer) {
+          clearTimeout(this.firstByteTimer);
+          this.firstByteTimer = null;
+        }
+
         if (done) {
+          if (this.midStreamTimer) {
+            clearTimeout(this.midStreamTimer);
+            this.midStreamTimer = null;
+          }
           if (this.onComplete) this.onComplete();
           break;
         }
@@ -124,12 +165,28 @@ export class RangeFetchController {
         this.onError(error);
       }
     } finally {
+      if (this.firstByteTimer) {
+        clearTimeout(this.firstByteTimer);
+        this.firstByteTimer = null;
+      }
+      if (this.midStreamTimer) {
+        clearTimeout(this.midStreamTimer);
+        this.midStreamTimer = null;
+      }
       this.reader = null;
       this.abortController = null;
     }
   }
 
   abort() {
+    if (this.firstByteTimer) {
+      clearTimeout(this.firstByteTimer);
+      this.firstByteTimer = null;
+    }
+    if (this.midStreamTimer) {
+      clearTimeout(this.midStreamTimer);
+      this.midStreamTimer = null;
+    }
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
@@ -146,6 +203,10 @@ export class RangeFetchController {
 
   pause() {
     this.isPaused = true;
+    if (this.midStreamTimer) {
+      clearTimeout(this.midStreamTimer);
+      this.midStreamTimer = null;
+    }
   }
 
   resume() {

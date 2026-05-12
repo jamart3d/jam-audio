@@ -13,6 +13,7 @@ const CRITICAL_THRESHOLD_FRAMES = 44100; // ~1s at 44.1kHz
 const REFILL_MAX_TICK_DURATION_MS = 20;
 const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
+const MIN_FRAMES_FOR_READAHEAD = 48000 * 5; // 5 seconds at 48kHz
 const TRACK_HANDOFF_TOLERANCE_MS = 50;
 
 function createPlaybackWorkerController({
@@ -51,6 +52,7 @@ function createPlaybackWorkerController({
   let endedEmitted = false;
   let lastChunkReceivedAt = 0;
   let isStalled = false;
+  let currentSessionId = 0;
   let diagnostics = createWorkerDiagnostics();
 
   function emitDiagnosticsEvent(event) {
@@ -184,6 +186,9 @@ function createPlaybackWorkerController({
     handoffStartedAtMs = 0;
     lastCompletedHandoffUnderrunDelta = 0;
     endedEmitted = false;
+    lastChunkReceivedAt = 0;
+    isStalled = false;
+    currentSessionId++;
   }
 
   function stopRefillLoop() {
@@ -381,10 +386,34 @@ function createPlaybackWorkerController({
             fetchController.fetchFrom(offset);
           }
           return; // Skip this refill tick, data will arrive next tick
-        } else if (fetchController && !fetchController.isPaused && activePlayer.bufferedAhead() > READ_AHEAD_BYTES) {
-          fetchController.pause();
-        } else if (fetchController && fetchController.isPaused && activePlayer.bufferedAhead() < RESUME_THRESHOLD_BYTES) {
-          fetchController.resume();
+        } else if (fetchController) {
+          const bufferedAhead = activePlayer.bufferedAhead();
+          const framesDecodedCount = windowedPlayer.framesDecoded();
+          const isPaused = fetchController.isPaused;
+          const sampleRate = activePlayer.sampleRate();
+          const minFrames = sampleRate * 5;
+
+          // Diagnostics logging
+          if (framesDecodedCount < minFrames * 2) { // Log more frequently early on
+            emitDiagnosticsEvent({
+              type: 'readahead-status',
+              label: 'Read-ahead status',
+              timestampMs: nowMs(),
+              severity: 'info',
+              bufferedAhead,
+              bytesFetched: fetchController.bytesFetched,
+              framesDecoded: framesDecodedCount,
+              isPaused,
+            });
+          }
+
+          if (framesDecodedCount > minFrames) {
+            if (!isPaused && bufferedAhead > READ_AHEAD_BYTES) {
+              fetchController.pause();
+            } else if (isPaused && bufferedAhead < RESUME_THRESHOLD_BYTES) {
+              fetchController.resume();
+            }
+          }
         }
       }
 
@@ -589,6 +618,7 @@ function createPlaybackWorkerController({
     playTrackBounded(url, totalSize, sampleRate, buffers) {
       stopRefillLoop();
       resetPlaybackState();
+      const sessionId = currentSessionId;
       const maxWindowMb = 64;
       diagnostics = createWorkerDiagnostics({
         workerState: 'running',
@@ -610,6 +640,7 @@ function createPlaybackWorkerController({
       
       windowedPlayer = {
         free: () => wasmPlayer.free(),
+        framesDecoded: () => framesDecoded,
         decodeFrames: (n) => {
           const result = wasmPlayer.decodeFrames(n);
           if (result instanceof Float32Array) {
@@ -659,6 +690,7 @@ function createPlaybackWorkerController({
 
       fetchController = createRangeFetchController(url, {
         onChunk: (chunk) => {
+          if (sessionId !== currentSessionId) return;
           const isFirstChunk = lastChunkReceivedAt === 0;
           lastChunkReceivedAt = performanceNow();
           if (isFirstChunk && fetchStartAt > 0) {
@@ -689,6 +721,7 @@ function createPlaybackWorkerController({
           }
         },
         onComplete: () => {
+          if (sessionId !== currentSessionId) return;
           if (windowedPlayer) {
             windowedPlayer.finalizeStream();
             streamingFinalized = true;
@@ -696,6 +729,7 @@ function createPlaybackWorkerController({
           }
         },
         onError: (err) => {
+          if (sessionId !== currentSessionId) return;
           diagnostics.transitionGapMs = null;
           emitMessage({ type: 'playback-error', message: err.message || 'fetch error' });
         }
@@ -730,7 +764,11 @@ function createPlaybackWorkerController({
 
     appendChunk(chunk) {
       if (!streamingPlayer) {
-        throw new Error('Streaming player is not active.');
+        return {
+          ready: false,
+          playbackStarted: false,
+          sessionEnded: true,
+        };
       }
 
       const wasReady = streamingPlayer.isReady();
@@ -749,6 +787,7 @@ function createPlaybackWorkerController({
       return {
         ready: streamingPlayer.isReady(),
         playbackStarted: streamingPlaybackStarted,
+        sessionEnded: false,
       };
     },
 

@@ -650,6 +650,9 @@ export function createJamAudioBridge({
       await ensureWasm();
       await ensureAudioGraph();
       gainNode.gain.value = currentVolume;
+      if (audioContext && audioContext.state === 'suspended') {
+        await audioContext.resume().catch(() => {});
+      }
       createSharedBuffers();
       setStartupPhase('creating streaming decoder');
       await sendPlaybackWorkerCommand('playTrackStreaming', {
