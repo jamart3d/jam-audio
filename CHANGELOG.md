@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-05-12
+
+### Fixed
+- Corrected the engine MP3 duration scaling test so the synthetic stream uses valid frame headers and passes consistently in CI
+
+### Changed
+- Improved worklet handoff safety and track-boundary handling to reduce false gapless transitions
+- Added handoff metrics and a safety floor in the playback worker controller for better transition diagnostics
+
 ## [0.2.6] — 2026-05-11
 
 ### Added
