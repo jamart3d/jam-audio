@@ -654,9 +654,23 @@ function createPlaybackWorkerController({
         },
       });
 
+      // Fix 3: track fetch start time to diagnose proxy cold-start latency.
+      let fetchStartAt = 0;
+
       fetchController = createRangeFetchController(url, {
         onChunk: (chunk) => {
+          const isFirstChunk = lastChunkReceivedAt === 0;
           lastChunkReceivedAt = performanceNow();
+          if (isFirstChunk && fetchStartAt > 0) {
+            const firstByteMs = Math.round(lastChunkReceivedAt - fetchStartAt);
+            emitDiagnosticsEvent({
+              type: 'bounded-first-byte',
+              label: `First byte received after ${firstByteMs}ms`,
+              timestampMs: nowMs(),
+              severity: firstByteMs > 5000 ? 'warning' : 'info',
+              firstByteMs,
+            });
+          }
           if (windowedPlayer) {
             windowedPlayer.appendChunk(chunk);
             const currentWindowStart = windowedPlayer.windowStart();
@@ -687,6 +701,7 @@ function createPlaybackWorkerController({
         }
       });
 
+      fetchStartAt = performanceNow();
       fetchController.fetchFrom(0);
     },
 

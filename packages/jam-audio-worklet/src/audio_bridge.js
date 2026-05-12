@@ -582,8 +582,17 @@ export function createJamAudioBridge({
     });
   }
 
-  function beginPlaybackSession() {
-    stop({ preserveMediaSession: true });
+  async function beginPlaybackSession() {
+    // Await the worker stop so rapid skips cannot race the stop/play sequence.
+    // Without this, a second skip arriving 1-2 s after the first can send
+    // playTrackBounded to the worker before the previous resetPlaybackState()
+    // has completed, leaving windowedPlayer/fetchController in an inconsistent
+    // state where the refill loop never starts for the new session.
+    if (playbackWorker) {
+      await sendPlaybackWorkerCommand('stop').catch(() => {});
+    } else {
+      stop({ preserveMediaSession: true });
+    }
     diagnosticsState = createDiagnosticsState();
     markPlaybackState('loading', { preserveMediaSession: true });
     setStartupPhase('initializing wasm');
@@ -597,7 +606,7 @@ export function createJamAudioBridge({
   }
 
   async function playTrack(audioBytes) {
-    beginPlaybackSession();
+    await beginPlaybackSession();
     setTrackAudioOnSilentElement(audioBytes);
     try {
       await initAudio();
@@ -635,7 +644,7 @@ export function createJamAudioBridge({
   }
 
   async function playTrackStreaming() {
-    beginPlaybackSession();
+    await beginPlaybackSession();
     try {
       ensureCrossOriginIsolation();
       await ensureWasm();
@@ -674,12 +683,17 @@ export function createJamAudioBridge({
   }
 
   async function playTrackBounded(url, totalSize) {
-    beginPlaybackSession();
+    await beginPlaybackSession();
     setBoundedTrackAudioOnSilentElement(url);
     try {
       ensureCrossOriginIsolation();
       await ensureWasm();
       await ensureAudioGraph();
+      // Fix 2: resume AudioContext if it was auto-suspended between rapid skips.
+      // The playTrack path calls initAudio() which resumes; bounded skips this.
+      if (audioContext && audioContext.state === 'suspended') {
+        await audioContext.resume().catch(() => {});
+      }
       gainNode.gain.value = currentVolume;
       createSharedBuffers();
       setStartupPhase('creating streaming decoder');
