@@ -97,6 +97,8 @@ pub struct StreamingDecoder {
     sample_buffer: Option<SampleBuffer<f32>>,
     sample_buffer_rate: u32,
     sample_buffer_channels: u32,
+    encoder_delay_frames: u64,
+    trailing_pad_frames: u64,
 }
 
 fn codec_supported_on_target(
@@ -173,6 +175,12 @@ impl StreamingDecoder {
             0.0
         };
 
+        let raw_delay = track.codec_params.delay.unwrap_or(0) as f64;
+        let raw_padding = track.codec_params.padding.unwrap_or(0) as f64;
+        let rate_ratio = target_sample_rate as f64 / source_sample_rate as f64;
+        let encoder_delay_frames = (raw_delay * rate_ratio).round() as u64;
+        let trailing_pad_frames = (raw_padding * rate_ratio).round() as u64;
+
         Ok(Self {
             format,
             decoder,
@@ -188,6 +196,8 @@ impl StreamingDecoder {
             sample_buffer: None,
             sample_buffer_rate: 0,
             sample_buffer_channels: 0,
+            encoder_delay_frames,
+            trailing_pad_frames,
         })
     }
 
@@ -201,6 +211,14 @@ impl StreamingDecoder {
 
     pub fn channels(&self) -> u32 {
         2
+    }
+
+    pub fn encoder_delay_frames(&self) -> u64 {
+        self.encoder_delay_frames
+    }
+
+    pub fn trailing_pad_frames(&self) -> u64 {
+        self.trailing_pad_frames
     }
 
     pub fn seek_to_ms(&mut self, ms: f64) -> Result<(), DecodeError> {

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-05-12
+
+### Fixed
+- Exposed `sessionEnded` on the worklet bridge `appendChunk()` result so callers can observe worker end-of-session state consistently
+
+### Added
+- Added a `worker-resume-nudge` diagnostics event before resume-time worker nudges to improve playback troubleshooting
+
 ## [0.2.8] — 2026-05-12
 
 ### Fixed

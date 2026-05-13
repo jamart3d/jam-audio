@@ -27,6 +27,7 @@ pub struct GaplessPlayer {
     total_frames_decoded: u64,
     target_sample_rate: u32,
     ended: bool,
+    pending_skip_frames: u64,
 }
 
 impl GaplessPlayer {
@@ -41,6 +42,7 @@ impl GaplessPlayer {
             total_frames_decoded: 0,
             target_sample_rate,
             ended: false,
+            pending_skip_frames: 0,
         })
     }
 
@@ -82,6 +84,13 @@ impl GaplessPlayer {
             self.scratch.clear();
             match self.active.decode_chunk_into(remaining_frames, &mut self.scratch) {
                 Ok(true) => {
+                    if self.pending_skip_frames > 0 {
+                        let chunk_frames = (self.scratch.len() / 2) as u64;
+                        let skip = self.pending_skip_frames.min(chunk_frames);
+                        let skip_samples = (skip * 2) as usize;
+                        self.pending_skip_frames -= skip;
+                        self.scratch.drain(..skip_samples);
+                    }
                     let need = target_samples - out.len();
                     if self.scratch.len() <= need {
                         out.extend_from_slice(&self.scratch);
@@ -92,6 +101,7 @@ impl GaplessPlayer {
                 }
                 Ok(false) => {
                     if let Some(next) = self.next.take() {
+                        self.pending_skip_frames = next.encoder_delay_frames();
                         self.active = next;
                     } else {
                         self.ended = true;
@@ -134,6 +144,11 @@ impl GaplessPlayer {
 
     pub fn clear_next(&mut self) {
         self.next = None;
+    }
+
+    #[cfg(test)]
+    pub fn inject_pending_skip_frames_for_test(&mut self, n: u64) {
+        self.pending_skip_frames = n;
     }
 }
 
@@ -277,5 +292,37 @@ mod tests {
     fn gapless_error_implements_std_error() {
         let err = GaplessError::Corrupted("bad".into());
         let _: &dyn std::error::Error = &err; // fails to compile if Error not impl'd
+    }
+
+    #[test]
+    fn strips_injected_encoder_delay_at_track_boundary() {
+        let track_frames = 1000usize;
+        let wav1 = make_wav(track_frames);
+        let wav2 = make_wav(track_frames);
+
+        let mut player = GaplessPlayer::new(wav1, DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        player.load_next(wav2).unwrap();
+
+        // Inject skip before any decoding so the mechanism is exercised
+        player.inject_pending_skip_frames_for_test(100);
+
+        let mut total_samples = 0usize;
+        loop {
+            let frames = player.decode_frames(256).unwrap();
+            if frames.is_empty() {
+                break;
+            }
+            total_samples += frames.len();
+        }
+
+        // Per-track frames after resampling 44100 -> 48000
+        let per_track_frames =
+            ((track_frames as f64 * DEFAULT_OUTPUT_SAMPLE_RATE as f64) / 44_100.0).round() as usize;
+        // 100 frames were stripped; two tracks decoded
+        let expected_samples = (per_track_frames * 2 - 100) * 2;
+        assert_eq!(
+            total_samples, expected_samples,
+            "expected {expected_samples} samples (2 tracks * {per_track_frames} frames - 100 skipped), got {total_samples}"
+        );
     }
 }
