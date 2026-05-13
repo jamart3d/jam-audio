@@ -15,6 +15,8 @@ const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
 const MIN_FRAMES_FOR_READAHEAD = 48000 * 5; // 5 seconds at 48kHz
 const TRACK_HANDOFF_TOLERANCE_MS = 50;
+const HANDOFF_RETRY_WINDOW_MS = 200;
+const HANDOFF_FILL_THRESHOLD_PERCENT = 25;
 
 function createPlaybackWorkerController({
   createGaplessPlayer,
@@ -48,6 +50,7 @@ function createPlaybackWorkerController({
   let transitionFloorCandidate = Infinity;
   let handoffUnderrunBaseline = 0;
   let handoffStartedAtMs = 0;
+  let handoffPendingUntilMs = 0;
   let lastCompletedHandoffUnderrunDelta = 0;
   let endedEmitted = false;
   let lastChunkReceivedAt = 0;
@@ -184,6 +187,7 @@ function createPlaybackWorkerController({
     transitionFloorCandidate = Infinity;
     handoffUnderrunBaseline = 0;
     handoffStartedAtMs = 0;
+    handoffPendingUntilMs = 0;
     lastCompletedHandoffUnderrunDelta = 0;
     endedEmitted = false;
     lastChunkReceivedAt = 0;
@@ -484,12 +488,20 @@ function createPlaybackWorkerController({
           crossedTrackBoundary
         ) {
           const currentFillPercent = frameCapacity > 0 ? (framesAvailable / frameCapacity) * 100 : 0;
-          if (currentFillPercent < 25) {
+          if (currentFillPercent < HANDOFF_FILL_THRESHOLD_PERCENT) {
+            if (handoffPendingUntilMs === 0) {
+              handoffPendingUntilMs = nowMs() + HANDOFF_RETRY_WINDOW_MS;
+            }
+            if (nowMs() < handoffPendingUntilMs) {
+              return; // retry next tick
+            }
+            handoffPendingUntilMs = 0;
             stopRefillLoop();
             diagnostics.transitionGapMs = null;
             emitMessage({ type: 'playback-error', message: 'handoff_unsafe' });
             return;
           }
+          handoffPendingUntilMs = 0;
           diagnostics.transitionGapMs =
             transitionPositionMs - currentTrackEndPositionMs;
           handoffUnderrunBaseline = diagnostics.underrunCount;
