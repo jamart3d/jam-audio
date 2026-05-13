@@ -733,10 +733,14 @@ export function createJamAudioBridge({
   }
 
   async function appendChunk(chunk) {
-    const result = await sendPlaybackWorkerCommand('appendChunk', { audioBytes: chunk });
+    const result = await sendPlaybackWorkerCommand('appendChunk', {
+      audioBytes: chunk,
+    });
+    
     return {
       ready: result?.ready ?? false,
       playbackStarted: result?.playbackStarted ?? false,
+      sessionEnded: result?.sessionEnded ?? false,
     };
   }
 
@@ -806,7 +810,15 @@ export function createJamAudioBridge({
         isAppOwnedResumeInFlight = false;
       }
       markPlaybackState('playing');
-      if (playbackWorker) void sendPlaybackWorkerCommand('nudge').catch(() => {});
+      if (playbackWorker) {
+        emitDiagnosticsEvent({
+          type: 'worker-resume-nudge',
+          label: 'Worker resume nudge sent',
+          timestampMs: nowMs(),
+          severity: 'info',
+        });
+        void sendPlaybackWorkerCommand('nudge').catch(() => {});
+      }
       emitDiagnosticsEvent({ type: 'resume', label: 'Resumed', timestampMs: nowMs(), severity: 'info' });
     }
   }
