@@ -556,7 +556,10 @@ function createPlaybackWorkerController({
             transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
             underrunDelta,
           });
-          emitMessage({ type: 'track-changed', transitionPositionMs });
+          emitMessage({
+            type: 'track-changed',
+            transitionPositionMs: Math.floor(transitionPositionMs),
+          });
           emitMessage({ type: 'duration', durationMs: Math.floor(newDuration) });
           transitionMonitorUntilMs = handoffStartedAtMs + 500;
           transitionFloorCandidate = Infinity;
