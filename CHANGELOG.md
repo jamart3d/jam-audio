@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.2.10] — 2026-05-13
+
+### Fixed
+- Trimmed MP3 encoder delay frames at next-track handoff in `GaplessPlayer` to improve gapless transition timing
+- Replaced the hard `handoff_unsafe` abort with a 200ms retry window to reduce unnecessary interrupted handoffs
+
+### Changed
+- Improved gapless playback behavior and cleanup in the worklet handoff path
+- Refined bounded playback anchoring and related controller logic during transition handling
+
 ## [0.2.9] — 2026-05-12
 
 ### Fixed
