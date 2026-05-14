@@ -35,6 +35,16 @@ class JamAudioProcessor extends AudioWorkletProcessor {
       return;
     }
 
+    if (data.type === 'set_position') {
+      const positionMs = Number.isFinite(data.positionMs) ? data.positionMs : 0;
+      this.totalFramesRendered = Math.max(
+        0,
+        Math.round((positionMs / 1000) * sampleRate),
+      );
+      this.framesSinceLastPositionUpdate = 0;
+      return;
+    }
+
     if (data.type === 'stop') {
       this.samples = null;
       this.state = null;

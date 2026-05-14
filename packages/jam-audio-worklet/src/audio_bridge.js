@@ -818,6 +818,10 @@ export function createJamAudioBridge({
     if (typeof onPositionCallback === 'function') {
       onPositionCallback(positionMs);
     }
+    processorNode?.port.postMessage({
+      type: 'set_position',
+      positionMs,
+    });
     void sendPlaybackWorkerCommand('seek', { positionMs }).catch((error) => {
       if (typeof onPlaybackErrorCallback === 'function') {
         onPlaybackErrorCallback(error instanceof Error ? error.message : String(error));
