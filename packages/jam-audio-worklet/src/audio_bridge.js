@@ -41,6 +41,8 @@ export function createJamAudioBridge({
   /** @type {((error: any) => void) | null} */
   let onPreloadErrorCallback = null;
   /** @type {(() => void) | null} */
+  let onPreloadPendingCallback = null;
+  /** @type {(() => void) | null} */
   let onPlaybackStartedCallback = null;
   /** @type {(() => void) | null} */
   let onEndedCallback = null;
@@ -559,7 +561,7 @@ export function createJamAudioBridge({
         if (typeof onDurationCallback === 'function') onDurationCallback(data.durationMs);
         return;
       case 'track-changed':
-        if (typeof onTrackChangedCallback === 'function') onTrackChangedCallback();
+        if (typeof onTrackChangedCallback === 'function') onTrackChangedCallback(data.transitionPositionMs ?? 0);
         return;
       case 'ended':
         if (typeof onEndedCallback === 'function') onEndedCallback();
@@ -576,6 +578,9 @@ export function createJamAudioBridge({
         if (typeof onPreloadErrorCallback === 'function') {
           onPreloadErrorCallback(data.message ?? 'preload failed');
         }
+        return;
+      case 'preload-pending':
+        if (typeof onPreloadPendingCallback === 'function') onPreloadPendingCallback();
         return;
       default:
         return;
@@ -1140,6 +1145,7 @@ export function createJamAudioBridge({
     setOnDiagnosticsEvent: (cb) => { onDiagnosticsEventCallback = cb; },
     setOnPlaybackError: (cb) => { onPlaybackErrorCallback = cb; },
     setOnPreloadError: (cb) => { onPreloadErrorCallback = cb; },
+    setOnPreloadPending: (cb) => { onPreloadPendingCallback = cb; },
     setOnSeek: (cb) => { onSeekCallback = cb; },
     setOnStop: (cb) => { onStopCallback = cb; },
     updatePlaybackState,

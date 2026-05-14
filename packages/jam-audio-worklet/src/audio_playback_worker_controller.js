@@ -56,6 +56,10 @@ function createPlaybackWorkerController({
   let currentSessionId = 0;
   let diagnostics = createWorkerDiagnostics();
 
+  let pendingGaplessBytes = null;
+  let pendingGaplessSampleRate = 0;
+  let activeSampleRate = 48000;
+
   function emitDiagnosticsEvent(event) {
     emitMessage({ type: 'diagnostics-event', event });
   }
@@ -190,6 +194,8 @@ function createPlaybackWorkerController({
     endedEmitted = false;
     lastChunkReceivedAt = 0;
     isStalled = false;
+    pendingGaplessBytes = null;
+    pendingGaplessSampleRate = 0;
     currentSessionId++;
   }
 
@@ -440,9 +446,43 @@ function createPlaybackWorkerController({
             });
           }
           if (streamingFinalized) {
-            handleEndOfStream();
+            if (pendingGaplessBytes !== null) {
+              // Streaming has finished and we have a preloaded next track.
+              // Transition to WasmGaplessPlayer without letting the ring buffer drain.
+              console.log('[worker] streaming→gapless bridge: transitioning at', streamingPlayer.positionMs().toFixed(0), 'ms');
+              const transitionPositionMs = streamingPlayer.positionMs();
+              const bytes = pendingGaplessBytes;
+              pendingGaplessBytes = null;
+
+              const newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
+              trackStartPositionMs = transitionPositionMs;
+              currentTrackEndPositionMs = newPlayer.durationMs();
+              handoffUnderrunBaseline = diagnostics.underrunCount;
+              handoffStartedAtMs = nowMs();
+              diagnostics.transitionGapMs = 0;
+
+              streamingPlayer.free();
+              streamingPlayer = null;
+              streamingFinalized = false;
+              player = newPlayer;
+
+              emitMessage({ type: 'track-changed', transitionPositionMs: Math.floor(transitionPositionMs) });
+              emitMessage({ type: 'duration', durationMs: Math.floor(newPlayer.durationMs()) });
+              emitDiagnosticsEvent({
+                type: 'track-handoff',
+                label: 'Track handoff (streaming→gapless)',
+                timestampMs: handoffStartedAtMs,
+                severity: 'info',
+                signedGapMs: 0,
+                audibleLateGapMs: 0,
+                transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
+                underrunDelta: 0,
+              });
+            } else {
+              handleEndOfStream();
+            }
+            return;
           }
-          return;
         }
         if (player.hasEnded()) {
           handleEndOfStream();
@@ -516,7 +556,7 @@ function createPlaybackWorkerController({
             transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
             underrunDelta,
           });
-          emitMessage({ type: 'track-changed' });
+          emitMessage({ type: 'track-changed', transitionPositionMs });
           emitMessage({ type: 'duration', durationMs: Math.floor(newDuration) });
           transitionMonitorUntilMs = handoffStartedAtMs + 500;
           transitionFloorCandidate = Infinity;
@@ -609,7 +649,8 @@ function createPlaybackWorkerController({
       });
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
-      player = createGaplessPlayer(audioBytes, buffers.sampleRate ?? 48000);
+      activeSampleRate = buffers.sampleRate ?? 48000;
+      player = createGaplessPlayer(audioBytes, activeSampleRate);
       currentTrackEndPositionMs = player.durationMs();
       emitMessage({ type: 'duration', durationMs: Math.floor(player.durationMs()) });
       emitDiagnosticsSync({
@@ -755,7 +796,8 @@ function createPlaybackWorkerController({
       });
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
-      streamingPlayer = createStreamingPlayer(buffers.sampleRate ?? 48000);
+      activeSampleRate = buffers.sampleRate ?? 48000;
+      streamingPlayer = createStreamingPlayer(activeSampleRate);
       emitDiagnosticsSync({
         startupTimingsMs: {
           decoderCreate: Number((performanceNow() - startedAt).toFixed(2)),
@@ -803,6 +845,15 @@ function createPlaybackWorkerController({
 
     preloadNext(audioBytes) {
       if (!player) {
+        if (streamingPlayer || windowedPlayer) {
+          // Store bytes; the streaming→gapless bridge will consume them when streaming ends.
+          pendingGaplessBytes = audioBytes;
+          pendingGaplessSampleRate = activeSampleRate;
+          console.log('[worker] preloadNext: stored as pendingGaplessBytes for streaming→gapless bridge');
+          emitMessage({ type: 'preload-pending' });
+        } else {
+          emitMessage({ type: 'preload-error', message: 'no_active_player' });
+        }
         return;
       }
       const result = player.loadNext(audioBytes);
