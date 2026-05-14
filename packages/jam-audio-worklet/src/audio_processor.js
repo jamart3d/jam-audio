@@ -1,7 +1,7 @@
 const READ_INDEX = 0;
-const WRITE_INDEX = 1;
+const _WRITE_INDEX = 1;
 const FRAMES_AVAILABLE_INDEX = 2;
-const END_OF_STREAM_INDEX = 3;
+const _END_OF_STREAM_INDEX = 3;
 const STOP_INDEX = 4;
 
 class JamAudioProcessor extends AudioWorkletProcessor {

@@ -245,7 +245,7 @@ export class RangeFetchController {
       });
       this._extractHiddenChallengeParams(html, mergedParams);
       return mergedParams.has('confirm') ? mergedParams : null;
-    } catch (_) {
+    } catch {
       this._extractHiddenChallengeParams(html, mergedParams);
       return mergedParams.has('confirm') ? mergedParams : null;
     }
@@ -294,7 +294,7 @@ export class RangeFetchController {
         const decodedChallengeUrl = challengeUrl.replace(/&amp;/g, '&');
         const resolvedChallengeUrl = new URL(decodedChallengeUrl, 'https://drive.google.com').toString();
         nextParams.set('challengeUrl', resolvedChallengeUrl);
-      } catch (_) {}
+      } catch {}
     }
     
     nextParams.set('useUserContent', '1');

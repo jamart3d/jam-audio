@@ -16,6 +16,7 @@ export function createJamAudioBridge({
   const CHANNELS = channels;
   const DECLICK_DURATION_S = (window._jamdiscDeclickDurationMs ?? 15) / 1000;
   const SNAPSHOT_INTERVAL_MS = 250;
+  const enableBoundedUrlAnchorExperiment = window._jamdiscEnableBoundedUrlAnchorExperiment === true;
 
   let wasmReadyPromise;
   let audioContext;
@@ -70,7 +71,24 @@ export function createJamAudioBridge({
   let lastKnownBufferedDurationMs = 0;
   let silentAudioEl = null;
   let currentTrackBlobUrl = null;
+  let boundedAnchorEndedHandler = null;
   let isAppOwnedResumeInFlight = false;
+
+  function restoreSilentAnchor() {
+    if (!silentAudioEl) return;
+    clearBoundedAnchorEndedHandler();
+    silentAudioEl.loop = true;
+    silentAudioEl.src = silentWavUrl;
+    silentAudioEl.load();
+    silentAudioEl.play().catch(() => {});
+  }
+
+  function clearBoundedAnchorEndedHandler() {
+    if (silentAudioEl && boundedAnchorEndedHandler) {
+      silentAudioEl.removeEventListener('ended', boundedAnchorEndedHandler);
+      boundedAnchorEndedHandler = null;
+    }
+  }
 
   function ensureSilentAudio() {
     if (silentAudioEl) return;
@@ -140,19 +158,50 @@ export function createJamAudioBridge({
 
   function setBoundedTrackAudioOnSilentElement(url) {
     ensureSilentAudio();
+    clearBoundedAnchorEndedHandler();
+
     if (currentTrackBlobUrl) {
       URL.revokeObjectURL(currentTrackBlobUrl);
       currentTrackBlobUrl = null;
     }
 
+    if (enableBoundedUrlAnchorExperiment) {
+      silentAudioEl.loop = false;
+      silentAudioEl.src = url;
+      silentAudioEl.load();
+
+      boundedAnchorEndedHandler = () => {
+        restoreSilentAnchor();
+        emitDiagnosticsEvent({
+          type: 'bounded-anchor-ended',
+          label: 'Bounded anchor ended, restored silent anchor',
+          timestampMs: nowMs(),
+          severity: 'info',
+        });
+      };
+      silentAudioEl.addEventListener('ended', boundedAnchorEndedHandler, { once: true });
+
+      silentAudioEl.play().catch((err) => {
+        restoreSilentAnchor();
+        emitDiagnosticsEvent({
+          type: 'hidden-media-bounded-play-failed',
+          label: 'Bounded anchor play failed, restored silent anchor',
+          timestampMs: nowMs(),
+          severity: 'warn',
+          error: err?.message,
+        });
+      });
+    }
+
     emitDiagnosticsEvent({
       type: 'hidden-media-asset-ready',
-      label: 'Hidden media asset ready (url)',
+      label: 'Hidden media asset ready (bounded url)',
       timestampMs: nowMs(),
       severity: 'info',
       details: {
-        source: 'url',
+        source: 'bounded-url',
         url: url,
+        experimentEnabled: enableBoundedUrlAnchorExperiment,
       },
     });
   }
@@ -259,7 +308,7 @@ export function createJamAudioBridge({
             playbackRate: 1.0,
             position,
           });
-        } catch (_) {}
+        } catch {}
       }
       emitDiagnosticsEvent({
         type: 'media-session-heartbeat',
@@ -687,7 +736,9 @@ export function createJamAudioBridge({
 
   async function playTrackBounded(url, totalSize) {
     await beginPlaybackSession();
-    setBoundedTrackAudioOnSilentElement(url);
+    if (enableBoundedUrlAnchorExperiment) {
+      setBoundedTrackAudioOnSilentElement(url);
+    }
     try {
       ensureCrossOriginIsolation();
       await ensureWasm();
@@ -839,6 +890,10 @@ export function createJamAudioBridge({
     const { preserveMediaSession = false } = options;
     if (processorNode) processorNode.port.postMessage({ type: 'stop' });
     if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
+
+    clearBoundedAnchorEndedHandler();
+    restoreSilentAnchor();
+
     if (currentTrackBlobUrl && !preserveMediaSession) {
       URL.revokeObjectURL(currentTrackBlobUrl);
       currentTrackBlobUrl = null;
@@ -934,7 +989,7 @@ export function createJamAudioBridge({
       heartbeatLastKnownPositionSec = position;
       heartbeatLastKnownDurationSec = duration;
       heartbeatPositionCapturedAtMs = performance.now();
-    } catch (_) {}
+    } catch {}
   }
 
   function updateMediaSession(title, artist, album, artworkUrl) {
@@ -1092,6 +1147,9 @@ export function createJamAudioBridge({
     updateMediaSession,
     initAudio,
     initEngine: async () => { await ensureWasm(); },
+    __test__: {
+      setBoundedTrackAudioOnSilentElement,
+    },
   };
 
   if (typeof window !== 'undefined' && namespace) {

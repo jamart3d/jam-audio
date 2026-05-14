@@ -13,7 +13,6 @@ const CRITICAL_THRESHOLD_FRAMES = 44100; // ~1s at 44.1kHz
 const REFILL_MAX_TICK_DURATION_MS = 20;
 const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
-const MIN_FRAMES_FOR_READAHEAD = 48000 * 5; // 5 seconds at 48kHz
 const TRACK_HANDOFF_TOLERANCE_MS = 50;
 const HANDOFF_RETRY_WINDOW_MS = 200;
 const HANDOFF_FILL_THRESHOLD_PERCENT = 25;
@@ -36,7 +35,6 @@ function createPlaybackWorkerController({
   let streamingPlayer = null;
   let windowedPlayer = null;
   let fetchController = null;
-  let streamingFetchError = null;
   let streamingPlaybackStarted = false;
   let streamingFinalized = false;
   let streamingBufferedDurationMs = 0;
@@ -355,9 +353,6 @@ function createPlaybackWorkerController({
       }
 
       const decodeStartedAt = performanceNow();
-      const previousDuration = isStreaming
-        ? activePlayer.durationMs()
-        : player.durationMs();
       let result;
       let decodeError;
       try {
@@ -386,7 +381,6 @@ function createPlaybackWorkerController({
           const offset = activePlayer.pendingSeekOffset();
           activePlayer.clearPendingSeek();
           if (fetchController) {
-            streamingFetchError = null;
             fetchController.fetchFrom(offset);
           }
           return; // Skip this refill tick, data will arrive next tick
@@ -682,12 +676,7 @@ function createPlaybackWorkerController({
         finalizeStream: () => wasmPlayer.finalizeStream(),
         appendChunk: (chunk) => wasmPlayer.appendChunk(chunk),
         bufferedAhead: () => {
-          if (!fetchController) return 0;
-          const fetched = fetchController.bytesFetched;
-          if (framesDecoded === 0) return fetched;
-          const bytesPerFrame = fetched / framesDecoded;
-          const estimatedConsumed = framesDecoded * bytesPerFrame;
-          return Math.max(0, fetched - estimatedConsumed);
+          return wasmPlayer.bufferedBytes();
         }
       };
 
@@ -825,7 +814,7 @@ function createPlaybackWorkerController({
       }
     },
 
-    preloadNextBounded(url, totalSize) {
+    preloadNextBounded(_url, _totalSize) {
       // In v1, bounded streaming preloading doesn't fetch bytes into RAM.
       // The gapless transition will fall back to a standard gapped load when playQueue is called.
     },
