@@ -561,6 +561,9 @@ export function createJamAudioBridge({
         if (typeof onDurationCallback === 'function') onDurationCallback(data.durationMs);
         return;
       case 'track-changed':
+        diagnosticsState.positionMs = 0;
+        diagnosticsState.decodedPositionMs = 0;
+        processorNode?.port.postMessage({ type: 'reset_position' });
         if (typeof onTrackChangedCallback === 'function') onTrackChangedCallback(data.transitionPositionMs ?? 0);
         return;
       case 'ended':
