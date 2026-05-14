@@ -358,6 +358,15 @@ function createPlaybackWorkerController({
         break;
       }
 
+      if (activePlayer === windowedPlayer && activePlayer.hasPendingSeek()) {
+        const offset = activePlayer.pendingSeekOffset();
+        activePlayer.clearPendingSeek();
+        if (fetchController) {
+          fetchController.fetchFrom(offset);
+        }
+        return; // Skip this refill tick, data will arrive next tick
+      }
+
       const decodeStartedAt = performanceNow();
       let result;
       let decodeError;
@@ -383,14 +392,7 @@ function createPlaybackWorkerController({
       }
 
       if (activePlayer === windowedPlayer) {
-        if (activePlayer.hasPendingSeek()) {
-          const offset = activePlayer.pendingSeekOffset();
-          activePlayer.clearPendingSeek();
-          if (fetchController) {
-            fetchController.fetchFrom(offset);
-          }
-          return; // Skip this refill tick, data will arrive next tick
-        } else if (fetchController) {
+        if (fetchController) {
           const bufferedAhead = activePlayer.bufferedAhead();
           const framesDecodedCount = windowedPlayer.framesDecoded();
           const isPaused = fetchController.isPaused;
