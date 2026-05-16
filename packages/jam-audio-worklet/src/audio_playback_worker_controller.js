@@ -323,6 +323,15 @@ function createPlaybackWorkerController({
   }
 
   function handleEndOfStream() {
+    // For streaming formats like Opus, durationMs() stays 0 (OGG total-sample-count is in
+    // the last page, not the headers). positionMs() after all frames are decoded equals the
+    // true total duration, so emit it now if we haven't sent a real duration yet.
+    if (streamingPlayer) {
+      const finalDurationMs = Math.floor(streamingPlayer.positionMs());
+      if (finalDurationMs > 0) {
+        emitMessage({ type: 'duration', durationMs: finalDurationMs });
+      }
+    }
     if (sharedState) {
       Atomics.store(sharedState, END_OF_STREAM_INDEX, 1);
       if (Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX) === 0) {

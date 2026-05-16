@@ -186,6 +186,51 @@ test('playTrack failure emits playback-error', () => {
   );
 });
 
+test('streaming Opus emits duration from positionMs at end-of-stream when durationMs is always 0', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let decodeCalls = 0;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => null,
+    createStreamingPlayer: () => ({
+      appendChunk() { return true; },
+      durationMs() { return 0; },      // Opus: total frames not in OGG headers
+      positionMs() { return 30000; },  // 30 s decoded
+      isReady() { return true; },
+      isFinalized() { return true; },
+      finalize() {},
+      free() {},
+      decodeFrames() {
+        if (decodeCalls > 0) throw new Error('end-of-stream');
+        decodeCalls += 1;
+        return new Float32Array([0.1, 0.1]); // 1 stereo frame
+      },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.playTrackStreaming({
+    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
+    frameCapacity: 8,
+  });
+  controller.finalizeStream();
+  intervalCallback();
+
+  assert.deepEqual(
+    messages.find((m) => m.type === 'duration'),
+    { type: 'duration', durationMs: 30000 },
+    'Should emit duration from positionMs when Opus streaming reaches end-of-stream',
+  );
+});
+
 test('preloadNext emits preload-pending on successful loadNext', () => {
   const messages = [];
   const controller = createPlaybackWorkerController({
