@@ -456,7 +456,19 @@ function createPlaybackWorkerController({
               const bytes = pendingGaplessBytes;
               pendingGaplessBytes = null;
 
-              const newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
+              let newPlayer;
+              try {
+                newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
+              } catch (error) {
+                stopRefillLoop();
+                diagnostics.transitionGapMs = null;
+                emitMessage({
+                  type: 'playback-error',
+                  message: error instanceof Error ? error.message : String(error),
+                });
+                return;
+              }
+
               trackStartPositionMs = transitionPositionMs;
               currentTrackEndPositionMs = newPlayer.durationMs();
               handoffUnderrunBaseline = diagnostics.underrunCount;
@@ -655,7 +667,16 @@ function createPlaybackWorkerController({
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
       activeSampleRate = buffers.sampleRate ?? 48000;
-      player = createGaplessPlayer(audioBytes, activeSampleRate);
+      try {
+        player = createGaplessPlayer(audioBytes, activeSampleRate);
+      } catch (error) {
+        stopRefillLoop();
+        emitMessage({
+          type: 'playback-error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
       currentTrackEndPositionMs = player.durationMs();
       emitMessage({ type: 'duration', durationMs: Math.floor(player.durationMs()) });
       emitDiagnosticsSync({
@@ -686,7 +707,17 @@ function createPlaybackWorkerController({
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
       
-      const wasmPlayer = createWindowedStreamingPlayer(totalSize != null ? BigInt(totalSize) : undefined, maxWindowMb);
+      let wasmPlayer;
+      try {
+        wasmPlayer = createWindowedStreamingPlayer(totalSize != null ? BigInt(totalSize) : undefined, maxWindowMb);
+      } catch (error) {
+        emitMessage({
+          type: 'playback-error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+
       let framesDecoded = 0;
       let lastWindowStart = 0;
       
@@ -802,7 +833,16 @@ function createPlaybackWorkerController({
       bindSharedBuffers(buffers);
       const startedAt = performanceNow();
       activeSampleRate = buffers.sampleRate ?? 48000;
-      streamingPlayer = createStreamingPlayer(activeSampleRate);
+      try {
+        streamingPlayer = createStreamingPlayer(activeSampleRate);
+      } catch (error) {
+        stopRefillLoop();
+        emitMessage({
+          type: 'playback-error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
       emitDiagnosticsSync({
         startupTimingsMs: {
           decoderCreate: Number((performanceNow() - startedAt).toFixed(2)),
@@ -861,12 +901,23 @@ function createPlaybackWorkerController({
         }
         return;
       }
-      const result = player.loadNext(audioBytes);
+      let result;
+      try {
+        result = player.loadNext(audioBytes);
+      } catch (error) {
+        emitMessage({
+          type: 'preload-error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
       if (result && result.error === 'next_failed') {
         emitMessage({
           type: 'preload-error',
           message: result.message ?? 'preload failed',
         });
+      } else {
+        emitMessage({ type: 'preload-pending' });
       }
     },
 

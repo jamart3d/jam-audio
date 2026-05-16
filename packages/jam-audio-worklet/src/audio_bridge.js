@@ -808,11 +808,19 @@ export function createJamAudioBridge({
   }
 
   function preloadNext(audioBytes) {
-    void sendPlaybackWorkerCommand('preloadNext', { audioBytes });
+    void sendPlaybackWorkerCommand('preloadNext', { audioBytes }).catch((error) => {
+      if (typeof onPreloadErrorCallback === 'function') {
+        onPreloadErrorCallback(error instanceof Error ? error.message : String(error));
+      }
+    });
   }
 
   function preloadNextBounded(url, totalSize) {
-    void sendPlaybackWorkerCommand('preloadNextBounded', { url, totalSize });
+    void sendPlaybackWorkerCommand('preloadNextBounded', { url, totalSize }).catch((error) => {
+      if (typeof onPreloadErrorCallback === 'function') {
+        onPreloadErrorCallback(error instanceof Error ? error.message : String(error));
+      }
+    });
   }
 
   function seek(positionMs) {
