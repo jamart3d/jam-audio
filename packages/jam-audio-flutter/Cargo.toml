@@ -10,7 +10,7 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-flutter_rust_bridge = { version = "=2.12.0", default-features = false, features = ["anyhow", "dart-opaque", "log", "portable-atomic", "rust-async", "user-utils", "wasm-start"] }
+flutter_rust_bridge = "=2.12.0"
 jam_audio_engine = { path = "../jam-audio-engine", package = "jam-audio-engine" }
 
 [profile.release]
