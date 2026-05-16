@@ -1,6 +1,6 @@
 [package]
 name = "jam_audio_flutter"
-version = "0.2.10"
+version = "0.2.12"
 edition = "2024"
 description = "Flutter bridge for the Jamdisc Rust audio engine"
 repository = "https://github.com/jamart3d/jam-audio"
@@ -10,7 +10,7 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-flutter_rust_bridge = "=2.12.0"
+flutter_rust_bridge = { version = "=2.12.0", default-features = false, features = ["anyhow", "dart-opaque", "log", "portable-atomic", "rust-async", "user-utils", "wasm-start"] }
 jam_audio_engine = { path = "../jam-audio-engine", package = "jam-audio-engine" }
 
 [profile.release]
