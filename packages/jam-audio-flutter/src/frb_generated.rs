@@ -38,46 +38,46 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -686923496;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 290357291;
 
 // Section: executor
 
-flutter_rust_bridge::frb_generated_default_handler!();
+// Hand-expanded frb_generated_default_handler!() with a 0-worker pool on web.
+// WorkerPool::default() panics if WebAssembly.Memory is not shared (requires
+// crossOriginIsolated + atomics build). All API functions are #[frb(sync)] so
+// no workers are ever dispatched to; a 0-worker pool is safe. If codegen is
+// re-run this block must be restored manually.
+#[cfg(not(target_family = "wasm"))]
+flutter_rust_bridge::for_generated::lazy_static! {
+    pub static ref FLUTTER_RUST_BRIDGE_HANDLER:
+        flutter_rust_bridge::DefaultHandler<flutter_rust_bridge::for_generated::SimpleThreadPool> = {
+        assert_eq!(
+            FLUTTER_RUST_BRIDGE_CODEGEN_VERSION,
+            flutter_rust_bridge::for_generated::FLUTTER_RUST_BRIDGE_RUNTIME_VERSION,
+            "Please ensure flutter_rust_bridge's codegen ({}) and runtime ({}) versions are the same",
+            FLUTTER_RUST_BRIDGE_CODEGEN_VERSION,
+            flutter_rust_bridge::for_generated::FLUTTER_RUST_BRIDGE_RUNTIME_VERSION,
+        );
+        flutter_rust_bridge::DefaultHandler::new_simple(Default::default())
+    };
+}
+
+#[cfg(target_family = "wasm")]
+thread_local! {
+    pub static THREAD_POOL: flutter_rust_bridge::for_generated::SimpleThreadPool =
+        flutter_rust_bridge::for_generated::SimpleThreadPool::new(Some(0), Some(String::new()), None, None)
+            .expect("fail to create WorkerPool");
+}
+
+#[cfg(target_family = "wasm")]
+flutter_rust_bridge::for_generated::lazy_static! {
+    pub static ref FLUTTER_RUST_BRIDGE_HANDLER:
+        flutter_rust_bridge::DefaultHandler<&'static std::thread::LocalKey<flutter_rust_bridge::for_generated::SimpleThreadPool>>
+        = flutter_rust_bridge::DefaultHandler::new_simple(&THREAD_POOL);
+}
 
 // Section: wire_funcs
 
-fn wire__crate__api__audio_metadata_default_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "audio_metadata_default",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            deserializer.end();
-            move |context| {
-                transform_result_sse::<_, ()>((move || {
-                    let output_ok = Result::<_, ()>::Ok(crate::api::AudioMetadata::default())?;
-                    Ok(output_ok)
-                })())
-            }
-        },
-    )
-}
 fn wire__crate__api__extract_artwork_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -109,16 +109,15 @@ fn wire__crate__api__extract_artwork_impl(
     )
 }
 fn wire__crate__api__extract_metadata_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
     data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
             debug_name: "extract_metadata",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
         },
         move || {
             let message = unsafe {
@@ -132,12 +131,10 @@ fn wire__crate__api__extract_metadata_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_data = <Vec<u8>>::sse_decode(&mut deserializer);
             deserializer.end();
-            move |context| {
-                transform_result_sse::<_, ()>((move || {
-                    let output_ok = Result::<_, ()>::Ok(crate::api::extract_metadata(api_data))?;
-                    Ok(output_ok)
-                })())
-            }
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::extract_metadata(api_data))?;
+                Ok(output_ok)
+            })())
         },
     )
 }
@@ -275,8 +272,6 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__audio_metadata_default_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__extract_metadata_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -289,7 +284,8 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        2 => wire__crate__api__extract_artwork_impl(ptr, rust_vec_len, data_len),
+        1 => wire__crate__api__extract_artwork_impl(ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__extract_metadata_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

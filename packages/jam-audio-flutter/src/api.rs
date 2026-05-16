@@ -1,7 +1,7 @@
 #![allow(unexpected_cfgs)]
 use jam_audio_engine::{extract_metadata_internal, extract_artwork_internal};
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AudioMetadata {
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -24,6 +24,7 @@ impl From<jam_audio_engine::AudioMetadata> for AudioMetadata {
 
 /// Extracts metadata from audio data using the internal shared parser.
 /// This function is intended to be called via flutter_rust_bridge.
+#[flutter_rust_bridge::frb(sync)]
 pub fn extract_metadata(data: Vec<u8>) -> AudioMetadata {
     extract_metadata_internal(&data).into()
 }
