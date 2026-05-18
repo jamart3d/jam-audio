@@ -265,3 +265,85 @@ test('preloadNext emits preload-pending on successful loadNext', () => {
     'Should have emitted preload-pending'
   );
 });
+
+test('reentrant session switch during decode aborts stale refill work', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let decodeCalls = 0;
+  let controller;
+
+  controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        decodeCalls += 1;
+        if (decodeCalls === 1) {
+          return new Float32Array([0.1, 0.1]);
+        }
+        controller.playTrackStreaming({
+          pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+          stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
+          frameCapacity: 8,
+        });
+        return null;
+      },
+      durationMs() {
+        return 1000;
+      },
+      positionMs() {
+        return 500;
+      },
+      hasEnded() {
+        return true;
+      },
+      loadNext() {
+        return null;
+      },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => ({
+      appendChunk() {
+        return false;
+      },
+      durationMs() {
+        return 0;
+      },
+      positionMs() {
+        return 0;
+      },
+      isReady() {
+        return false;
+      },
+      isFinalized() {
+        return false;
+      },
+      finalize() {},
+      free() {},
+      decodeFrames() {
+        return null;
+      },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
+    frameCapacity: 8,
+  });
+
+  assert.doesNotThrow(() => intervalCallback());
+  assert.ok(
+    messages.every((message) => message.type !== 'ended'),
+    'stale refill tick should not end the replacement session',
+  );
+});

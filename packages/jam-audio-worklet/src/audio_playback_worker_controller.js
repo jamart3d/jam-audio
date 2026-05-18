@@ -374,6 +374,10 @@ function createPlaybackWorkerController({
 
       updateDecodeMetrics(Number((performanceNow() - decodeStartedAt).toFixed(2)));
 
+      if (activePlayer !== currentPlayer()) {
+        return;
+      }
+
       if (result instanceof Float32Array && result.length > 0) {
         diagnostics.pendingSeekDistanceMs = 0;
         if (lastChunkReceivedAt > 0) {
@@ -494,7 +498,10 @@ function createPlaybackWorkerController({
             return;
           }
         }
-        if (player.hasEnded()) {
+        if (activePlayer !== player) {
+          return;
+        }
+        if (activePlayer.hasEnded()) {
           handleEndOfStream();
         }
         return;
@@ -522,8 +529,11 @@ function createPlaybackWorkerController({
       }
 
       if (!isStreaming) {
-        const newDuration = player.durationMs();
-        const transitionPositionMs = player.positionMs();
+        if (activePlayer !== player) {
+          return;
+        }
+        const newDuration = activePlayer.durationMs();
+        const transitionPositionMs = activePlayer.positionMs();
         const crossedTrackBoundary =
           transitionPositionMs >=
           currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
@@ -607,8 +617,7 @@ function createPlaybackWorkerController({
       wroteFrames = true;
 
       const currentPositionMs = Math.floor(
-        (isStreaming ? activePlayer.positionMs() : player.positionMs()) -
-          trackStartPositionMs,
+        activePlayer.positionMs() - trackStartPositionMs,
       );
       emitMessage({ type: 'position', positionMs: currentPositionMs });
 
