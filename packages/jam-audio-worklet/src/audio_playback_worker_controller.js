@@ -1,3 +1,8 @@
+import {
+  createBaseWorkerDiagnostics,
+  createSharedPlaybackWorkerControllerCore,
+} from '../shared/playback_worker_controller_core.js';
+
 const READ_INDEX = 0;
 const WRITE_INDEX = 1;
 const FRAMES_AVAILABLE_INDEX = 2;
@@ -59,41 +64,28 @@ function createPlaybackWorkerController({
   let pendingGaplessBytes = null;
   let pendingGaplessSampleRate = 0;
   let activeSampleRate = 48000;
+  const core = createSharedPlaybackWorkerControllerCore({
+    emitMessage,
+    clearIntervalFn,
+    getDiagnostics: () => diagnostics,
+    getFrameCapacity: () => frameCapacity,
+    getExtraSyncPayload: () => ({
+      lowWaterMarkCount: diagnostics.lowWaterMarkCount,
+      recoveryModeActive: diagnostics.recoveryModeActive,
+      activeBoundedWindowSize: diagnostics.activeBoundedWindowSize,
+      retainedBytes: diagnostics.retainedBytes,
+      pendingSeekDistanceMs: diagnostics.pendingSeekDistanceMs,
+      fetchToDecodeLagMs: diagnostics.fetchToDecodeLagMs,
+      resumeAfterStallLatencyMs: diagnostics.resumeAfterStallLatencyMs,
+    }),
+    getRefillTimerId: () => refillTimerId,
+    setRefillTimerId: (value) => {
+      refillTimerId = value;
+    },
+  });
 
-  function emitDiagnosticsEvent(event) {
-    emitMessage({ type: 'diagnostics-event', event });
-  }
-
-  function emitDiagnosticsSync({ historyPoint, startupTimingsMs } = {}) {
-    emitMessage({
-      type: 'diagnostics-sync',
-      payload: {
-        workerState: diagnostics.workerState,
-        decoderOwner: diagnostics.decoderOwner,
-        framesAvailable: diagnostics.framesAvailable,
-        frameCapacity,
-        bufferFillPercent: diagnostics.bufferFillPercent,
-        lastDecodeMs: diagnostics.lastDecodeMs,
-        lastRefillGapMs: diagnostics.lastRefillGapMs,
-        maxRefillGapMs: diagnostics.maxRefillGapMs,
-        refillCount: diagnostics.refillCount,
-        lastRefillDurationMs: diagnostics.lastRefillDurationMs,
-        maxDecodeMs: diagnostics.maxDecodeMs,
-        movingAverageDecodeMs: diagnostics.movingAverageDecodeMs,
-        transitionGapMs: diagnostics.transitionGapMs,
-        lastTransitionFloorPercent: diagnostics.lastTransitionFloorPercent,
-        lowWaterMarkCount: diagnostics.lowWaterMarkCount,
-        recoveryModeActive: diagnostics.recoveryModeActive,
-        activeBoundedWindowSize: diagnostics.activeBoundedWindowSize,
-        retainedBytes: diagnostics.retainedBytes,
-        pendingSeekDistanceMs: diagnostics.pendingSeekDistanceMs,
-        fetchToDecodeLagMs: diagnostics.fetchToDecodeLagMs,
-        resumeAfterStallLatencyMs: diagnostics.resumeAfterStallLatencyMs,
-        historyPoint,
-        startupTimingsMs,
-      },
-    });
-  }
+  const emitDiagnosticsEvent = core.emitDiagnosticsEvent;
+  const emitDiagnosticsSync = core.emitDiagnosticsSync;
 
   function currentPlayer() {
     return windowedPlayer ?? streamingPlayer ?? player;
@@ -199,12 +191,7 @@ function createPlaybackWorkerController({
     currentSessionId++;
   }
 
-  function stopRefillLoop() {
-    if (refillTimerId != null) {
-      clearIntervalFn(refillTimerId);
-      refillTimerId = null;
-    }
-  }
+  const stopRefillLoop = core.stopRefillLoop;
 
   function startRefillLoop() {
     stopRefillLoop();
@@ -1055,21 +1042,7 @@ function createPlaybackWorkerController({
 }
 
 function createWorkerDiagnostics(overrides = {}) {
-  return {
-    workerState: 'idle',
-    decoderOwner: 'main',
-    bufferFillPercent: 0,
-    framesAvailable: 0,
-    lastDecodeMs: 0,
-    lastRefillGapMs: 0,
-    maxRefillGapMs: 0,
-    refillCount: 0,
-    lastRefillDurationMs: 0,
-    maxDecodeMs: 0,
-    movingAverageDecodeMs: 0,
-    transitionGapMs: null,
-    lastTransitionFloorPercent: null,
-    underrunCount: 0,
+  return createBaseWorkerDiagnostics({
     lowWaterMarkCount: 0,
     recoveryModeActive: false,
     activeBoundedWindowSize: 0,
@@ -1078,7 +1051,7 @@ function createWorkerDiagnostics(overrides = {}) {
     fetchToDecodeLagMs: 0,
     resumeAfterStallLatencyMs: 0,
     ...overrides,
-  };
+  });
 }
 
 export { createPlaybackWorkerController };

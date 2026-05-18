@@ -5,6 +5,10 @@ import { createPlaybackWorkerController } from './audio_playback_worker_controll
 
 const CHANNELS = 2;
 
+test('worklet wrapper still exports createPlaybackWorkerController', () => {
+  assert.equal(typeof createPlaybackWorkerController, 'function');
+});
+
 test('gapless handoff emits an integer transition position', () => {
   const messages = [];
   let intervalCallback = null;
