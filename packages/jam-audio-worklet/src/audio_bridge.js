@@ -1208,10 +1208,10 @@ export function createJamAudioBridge({
       });
     }
 
+    // Fire-and-forget: same as initAudio() — awaiting resume() hangs indefinitely
+    // on Android Chrome until a user gesture, which would block the health monitor.
     if (audioContext && audioContext.state === 'suspended') {
-      try {
-        await audioContext.resume();
-      } catch (err) {
+      audioContext.resume().catch((err) => {
         emitDiagnosticsEvent({
           type: 'audio-context-ensure-resume-failed',
           label: 'Audio context ensure resume failed',
@@ -1219,7 +1219,7 @@ export function createJamAudioBridge({
           severity: 'warn',
           message: err?.message ?? String(err),
         });
-      }
+      });
     }
 
     audioContextState = audioContext?.state ?? 'missing';
