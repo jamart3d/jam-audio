@@ -581,9 +581,12 @@ pub struct StreamingPlayer {
 #[wasm_bindgen]
 impl StreamingPlayer {
     #[wasm_bindgen(constructor)]
-    pub fn new(target_sample_rate: Option<u32>) -> Self {
+    pub fn new(target_sample_rate: Option<u32>, max_buffered_mb: Option<u32>) -> Self {
         Self {
-            core: StreamingPlayerCore::new(target_sample_rate.unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE)),
+            core: StreamingPlayerCore::with_bounds(
+                target_sample_rate.unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE),
+                max_buffered_mb.unwrap_or(0),
+            ),
             output_buffer: Vec::with_capacity(2048),
         }
     }
@@ -663,12 +666,21 @@ struct StreamingPlayerCore {
 }
 
 impl StreamingPlayerCore {
+    #[allow(dead_code)]
     fn new(target_sample_rate: u32) -> Self {
+        Self::with_bounds(target_sample_rate, 0)
+    }
+
+    fn with_bounds(target_sample_rate: u32, max_buffered_mb: u32) -> Self {
+        let max_bytes = (max_buffered_mb as usize).saturating_mul(1024 * 1024);
+        let header_reserve = if max_bytes == 0 { 0 } else { 512 * 1024 };
+        let keep_behind = if max_bytes == 0 { 0 } else { 1024 * 1024 };
+        let source = AppendableMediaSource::with_bounds(max_bytes, header_reserve, keep_behind);
         Self {
             #[cfg(target_arch = "wasm32")]
-            source: Rc::new(RefCell::new(AppendableMediaSource::new())),
+            source: Rc::new(RefCell::new(source)),
             #[cfg(not(target_arch = "wasm32"))]
-            source: Arc::new(Mutex::new(AppendableMediaSource::new())),
+            source: Arc::new(Mutex::new(source)),
             decoder: None,
             frames_decoded: 0,
             residual: VecDeque::new(),
