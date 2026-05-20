@@ -76,9 +76,7 @@ export function createJamAudioBridge({
   let boundedAnchorEndedHandler = null;
   let isAppOwnedResumeInFlight = false;
 
-  function shouldUseAndroidTransportTransitions() {
-    return /Android/i.test(navigator.userAgent ?? '');
-  }
+  const isAndroidTransport = /Android/i.test(navigator.userAgent ?? '');
 
   async function rampGainToValue(targetValue, durationSeconds) {
     if (!audioContext || !gainNode) return;
@@ -116,28 +114,28 @@ export function createJamAudioBridge({
     });
 
     if (!skipInitialRamp) {
-      await rampGainToValue(0, DECLICK_DURATION_S);
+      await Promise.all([
+        rampGainToValue(0, DECLICK_DURATION_S),
+        waitForWorkerTransportQuiet(),
+      ]);
       emitDiagnosticsEvent({
         type: 'transport-gain-zero',
         label: `Transport gain reached zero: ${transitionKind}`,
         timestampMs: nowMs(),
         severity: 'info',
       });
+    } else {
+      await waitForWorkerTransportQuiet();
     }
-
-    await waitForWorkerTransportQuiet();
     try {
       await performAction({ preserveMediaSession });
     } catch (e) {
       console.warn(`[Android transition] performAction failed (${transitionKind}):`, e);
     }
 
-    if (fadeIn && gainNode && audioContext) {
+    if (fadeIn) {
       if (playbackWorker) await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
-      const now = audioContext.currentTime;
-      gainNode.gain.cancelScheduledValues(now);
-      gainNode.gain.setValueAtTime(0, now);
-      gainNode.gain.linearRampToValueAtTime(currentVolume, now + DECLICK_DURATION_S);
+      await rampGainToValue(currentVolume, DECLICK_DURATION_S);
     }
   }
 
@@ -687,30 +685,34 @@ export function createJamAudioBridge({
       timestampMs: nowMs(),
       severity: 'info',
     });
-    const resumePromise = audioContext.resume();
+    // Fire-and-forget: on Android Chrome the resume() promise stays PENDING until
+    // a user gesture is received, so awaiting it here would hang initAudio() and
+    // cause startPlayback() to detect a requestToken mismatch and silently abort.
+    // Diagnostics are preserved via .then(); the AudioContext resumes as soon as
+    // the browser allows (first user gesture).
+    audioContext.resume().then(() => {
+      const durationMs = roundMs(performance.now() - resumeStartedAt);
+      recordStartupTiming('audioContextResume', durationMs);
+      emitDiagnosticsEvent({
+        type: 'audio-context-resumed',
+        label: 'Audio context resumed',
+        timestampMs: nowMs(),
+        severity: 'info',
+        durationMs,
+      });
+    }).catch(() => {});
 
     await ensureWasm();
     await ensureAudioGraph();
-
-    await resumePromise;
-    const durationMs = roundMs(performance.now() - resumeStartedAt);
-    recordStartupTiming('audioContextResume', durationMs);
-    emitDiagnosticsEvent({
-      type: 'audio-context-resumed',
-      label: 'Audio context resumed',
-      timestampMs: nowMs(),
-      severity: 'info',
-      durationMs,
-    });
   }
 
-  async function beginPlaybackSession({ transitionKind = 'track-replace', useAndroidMutedTransition = false } = {}) {
+  async function beginPlaybackSession({ transitionKind = 'track-replace' } = {}) {
     // Await the worker stop so rapid skips cannot race the stop/play sequence.
     // Without this, a second skip arriving 1-2 s after the first can send
     // playTrackBounded to the worker before the previous resetPlaybackState()
     // has completed, leaving windowedPlayer/fetchController in an inconsistent
     // state where the refill loop never starts for the new session.
-    if (useAndroidMutedTransition && shouldUseAndroidTransportTransitions()) {
+    if (isAndroidTransport) {
       await runMutedAndroidTransportTransition({
         transitionKind,
         preserveMediaSession: true,
@@ -743,7 +745,7 @@ export function createJamAudioBridge({
   }
 
   async function playTrack(audioBytes) {
-    await beginPlaybackSession({ useAndroidMutedTransition: true });
+    await beginPlaybackSession();
     setTrackAudioOnSilentElement(audioBytes);
     try {
       await initAudio();
@@ -782,14 +784,14 @@ export function createJamAudioBridge({
   }
 
   async function playTrackStreaming() {
-    await beginPlaybackSession({ useAndroidMutedTransition: true });
+    await beginPlaybackSession();
     try {
       ensureCrossOriginIsolation();
       await ensureWasm();
       await ensureAudioGraph();
       gainNode.gain.value = currentVolume;
       if (audioContext && audioContext.state === 'suspended') {
-        await audioContext.resume().catch(() => {});
+        audioContext.resume().catch(() => {});
       }
       createSharedBuffers();
       setStartupPhase('creating streaming decoder');
@@ -824,7 +826,7 @@ export function createJamAudioBridge({
   }
 
   async function playTrackBounded(url, totalSize) {
-    await beginPlaybackSession({ useAndroidMutedTransition: true });
+    await beginPlaybackSession();
     if (enableBoundedUrlAnchorExperiment) {
       setBoundedTrackAudioOnSilentElement(url);
     }
@@ -832,10 +834,8 @@ export function createJamAudioBridge({
       ensureCrossOriginIsolation();
       await ensureWasm();
       await ensureAudioGraph();
-      // Fix 2: resume AudioContext if it was auto-suspended between rapid skips.
-      // The playTrack path calls initAudio() which resumes; bounded skips this.
       if (audioContext && audioContext.state === 'suspended') {
-        await audioContext.resume().catch(() => {});
+        audioContext.resume().catch(() => {});
       }
       gainNode.gain.value = currentVolume;
       createSharedBuffers();
@@ -924,7 +924,7 @@ export function createJamAudioBridge({
   async function pause() {
     if (!audioContext) return;
 
-    if (shouldUseAndroidTransportTransitions()) {
+    if (isAndroidTransport) {
       await runMutedAndroidTransportTransition({
         transitionKind: 'pause',
         preserveMediaSession: true,
@@ -949,7 +949,7 @@ export function createJamAudioBridge({
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
     isAppOwnedResumeInFlight = true;
     try {
-      if (shouldUseAndroidTransportTransitions()) {
+      if (isAndroidTransport) {
         await runMutedAndroidTransportTransition({
           transitionKind: 'resume',
           preserveMediaSession: true,
