@@ -125,6 +125,7 @@ impl GaplessPlayer {
     pub fn seek_to_ms(&mut self, ms: f64) -> Result<(), GaplessError> {
         self.active.seek_to_ms(ms).map_err(|e| GaplessError::Corrupted(e.to_string()))?;
         self.residual.clear();
+        self.pending_skip_frames = 0;
         self.total_frames_decoded = (ms * self.target_sample_rate as f64 / 1000.0) as u64;
         self.ended = false;
         Ok(())
@@ -324,5 +325,17 @@ mod tests {
             total_samples, expected_samples,
             "expected {expected_samples} samples (2 tracks * {per_track_frames} frames - 100 skipped), got {total_samples}"
         );
+    }
+
+    #[test]
+    fn seek_clears_pending_encoder_delay_skip() {
+        let mut player = GaplessPlayer::new(make_wav(48000), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        player.inject_pending_skip_frames_for_test(1000);
+        player.seek_to_ms(100.0).unwrap();
+        // Assert that pending skip frames are cleared
+        assert_eq!(player.pending_skip_frames, 0, "seek should clear pending skip frames");
+        // Decode after seek; if pending skip leaked through, we'd lose the first 1000 frames.
+        let out = player.decode_frames(256).unwrap();
+        assert_eq!(out.len(), 256 * 2, "seek should consume the encoder-delay skip");
     }
 }
