@@ -347,3 +347,42 @@ test('reentrant session switch during decode aborts stale refill work', () => {
     'stale refill tick should not end the replacement session',
   );
 });
+
+test('transportMute silences the processor state until transportUnmute clears it', () => {
+  const pcmBuffer = new SharedArrayBuffer(32 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() { return new Float32Array(CHANNELS * 8); },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: () => {},
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 16,
+    sampleRate: 48000,
+  });
+
+  controller.transportMute();
+  assert.equal(sharedState[4], 1, 'STOP_INDEX should be asserted during transport mute');
+
+  controller.transportUnmute();
+  assert.equal(sharedState[4], 0, 'STOP_INDEX should be cleared during transport unmute');
+});

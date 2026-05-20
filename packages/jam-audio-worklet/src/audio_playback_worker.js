@@ -111,6 +111,16 @@ export function initPlaybackWorker({
           controller.pauseRefill();
           self.postMessage({ type: 'response', requestId });
           return;
+        case 'transportMute': {
+          const status = controller.transportMute();
+          self.postMessage({ type: 'response', requestId, payload: status });
+          return;
+        }
+        case 'transportUnmute': {
+          const status = controller.transportUnmute();
+          self.postMessage({ type: 'response', requestId, payload: status });
+          return;
+        }
         case 'preloadNext':
           controller.preloadNext(data.audioBytes);
           self.postMessage({ type: 'response', requestId });

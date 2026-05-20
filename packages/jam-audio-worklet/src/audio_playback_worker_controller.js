@@ -1097,6 +1097,24 @@ function createPlaybackWorkerController({
       stopRefillLoop();
     },
 
+    transportMute() {
+      stopRefillLoop();
+      if (sharedState) {
+        Atomics.store(sharedState, STOP_INDEX, 1);
+      }
+      emitDiagnosticsSync();
+      return this.getHealthStatus();
+    },
+
+    transportUnmute() {
+      if (sharedState) {
+        Atomics.store(sharedState, STOP_INDEX, 0);
+      }
+      kickRefillLoopIfNeeded();
+      emitDiagnosticsSync();
+      return this.getHealthStatus();
+    },
+
     stop() {
       stopRefillLoop();
       if (sharedState) {

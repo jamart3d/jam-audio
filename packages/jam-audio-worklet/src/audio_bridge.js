@@ -76,6 +76,71 @@ export function createJamAudioBridge({
   let boundedAnchorEndedHandler = null;
   let isAppOwnedResumeInFlight = false;
 
+  function shouldUseAndroidTransportTransitions() {
+    return /Android/i.test(navigator.userAgent ?? '');
+  }
+
+  async function rampGainToValue(targetValue, durationSeconds) {
+    if (!audioContext || !gainNode) return;
+    if (Math.abs(gainNode.gain.value - targetValue) < 1e-4) return;
+    const now = audioContext.currentTime;
+    gainNode.gain.cancelScheduledValues(now);
+    gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+    gainNode.gain.linearRampToValueAtTime(targetValue, now + durationSeconds);
+    await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
+  }
+
+  async function waitForWorkerTransportQuiet() {
+    if (!playbackWorker) return;
+    await sendPlaybackWorkerCommand('transportMute').catch(() => {});
+    emitDiagnosticsEvent({
+      type: 'transport-worker-muted',
+      label: 'Transport worker muted',
+      timestampMs: nowMs(),
+      severity: 'info',
+    });
+  }
+
+  async function runMutedAndroidTransportTransition({
+    transitionKind,
+    preserveMediaSession = true,
+    performAction,
+    fadeIn = false,
+    skipInitialRamp = false,
+  }) {
+    emitDiagnosticsEvent({
+      type: 'transport-transition-start',
+      label: `Transport transition start: ${transitionKind}`,
+      timestampMs: nowMs(),
+      severity: 'info',
+    });
+
+    if (!skipInitialRamp) {
+      await rampGainToValue(0, DECLICK_DURATION_S);
+      emitDiagnosticsEvent({
+        type: 'transport-gain-zero',
+        label: `Transport gain reached zero: ${transitionKind}`,
+        timestampMs: nowMs(),
+        severity: 'info',
+      });
+    }
+
+    await waitForWorkerTransportQuiet();
+    try {
+      await performAction({ preserveMediaSession });
+    } catch (e) {
+      console.warn(`[Android transition] performAction failed (${transitionKind}):`, e);
+    }
+
+    if (fadeIn && gainNode && audioContext) {
+      if (playbackWorker) await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
+      const now = audioContext.currentTime;
+      gainNode.gain.cancelScheduledValues(now);
+      gainNode.gain.setValueAtTime(0, now);
+      gainNode.gain.linearRampToValueAtTime(currentVolume, now + DECLICK_DURATION_S);
+    }
+  }
+
   function restoreSilentAnchor() {
     if (!silentAudioEl) return;
     clearBoundedAnchorEndedHandler();
@@ -639,17 +704,32 @@ export function createJamAudioBridge({
     });
   }
 
-  async function beginPlaybackSession() {
+  async function beginPlaybackSession({ transitionKind = 'track-replace', useAndroidMutedTransition = false } = {}) {
     // Await the worker stop so rapid skips cannot race the stop/play sequence.
     // Without this, a second skip arriving 1-2 s after the first can send
     // playTrackBounded to the worker before the previous resetPlaybackState()
     // has completed, leaving windowedPlayer/fetchController in an inconsistent
     // state where the refill loop never starts for the new session.
-    if (playbackWorker) {
-      await sendPlaybackWorkerCommand('stop').catch(() => {});
+    if (useAndroidMutedTransition && shouldUseAndroidTransportTransitions()) {
+      await runMutedAndroidTransportTransition({
+        transitionKind,
+        preserveMediaSession: true,
+        performAction: async ({ preserveMediaSession }) => {
+          if (playbackWorker) {
+            await sendPlaybackWorkerCommand('stop').catch(() => {});
+          } else {
+            stop({ preserveMediaSession });
+          }
+        },
+      });
     } else {
-      stop({ preserveMediaSession: true });
+      if (playbackWorker) {
+        await sendPlaybackWorkerCommand('stop').catch(() => {});
+      } else {
+        stop({ preserveMediaSession: true });
+      }
     }
+
     diagnosticsState = createDiagnosticsState();
     markPlaybackState('loading', { preserveMediaSession: true });
     setStartupPhase('initializing wasm');
@@ -663,10 +743,11 @@ export function createJamAudioBridge({
   }
 
   async function playTrack(audioBytes) {
-    await beginPlaybackSession();
+    await beginPlaybackSession({ useAndroidMutedTransition: true });
     setTrackAudioOnSilentElement(audioBytes);
     try {
       await initAudio();
+      if (gainNode) gainNode.gain.value = currentVolume;
       createSharedBuffers();
       setStartupPhase('creating decoder');
       await sendPlaybackWorkerCommand('playTrack', {
@@ -701,7 +782,7 @@ export function createJamAudioBridge({
   }
 
   async function playTrackStreaming() {
-    await beginPlaybackSession();
+    await beginPlaybackSession({ useAndroidMutedTransition: true });
     try {
       ensureCrossOriginIsolation();
       await ensureWasm();
@@ -743,7 +824,7 @@ export function createJamAudioBridge({
   }
 
   async function playTrackBounded(url, totalSize) {
-    await beginPlaybackSession();
+    await beginPlaybackSession({ useAndroidMutedTransition: true });
     if (enableBoundedUrlAnchorExperiment) {
       setBoundedTrackAudioOnSilentElement(url);
     }
@@ -841,57 +922,74 @@ export function createJamAudioBridge({
   }
 
   async function pause() {
-    if (audioContext) {
-      if (gainNode && audioContext.state === 'running') {
-        const now = audioContext.currentTime;
-        gainNode.gain.cancelScheduledValues(now);
-        gainNode.gain.setValueAtTime(gainNode.gain.value, now);
-        gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
-        await new Promise((resolve) => setTimeout(resolve, DECLICK_DURATION_S * 1000));
-      }
+    if (!audioContext) return;
+
+    if (shouldUseAndroidTransportTransitions()) {
+      await runMutedAndroidTransportTransition({
+        transitionKind: 'pause',
+        preserveMediaSession: true,
+        performAction: async () => {
+          await audioContext.suspend();
+        },
+      });
+    } else {
+      await rampGainToValue(0, DECLICK_DURATION_S);
       await audioContext.suspend();
       if (playbackWorker) void sendPlaybackWorkerCommand('pauseRefill').catch(() => {});
-      markPlaybackState('paused');
-      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
-      emitDiagnosticsEvent({ type: 'pause', label: 'Paused', timestampMs: nowMs(), severity: 'info' });
     }
+
+    markPlaybackState('paused');
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    emitDiagnosticsEvent({ type: 'pause', label: 'Paused', timestampMs: nowMs(), severity: 'info' });
   }
 
   async function resume() {
-    if (audioContext) {
-      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
-      isAppOwnedResumeInFlight = true;
-      try {
+    if (!audioContext) return;
+
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    isAppOwnedResumeInFlight = true;
+    try {
+      if (shouldUseAndroidTransportTransitions()) {
+        await runMutedAndroidTransportTransition({
+          transitionKind: 'resume',
+          preserveMediaSession: true,
+          fadeIn: true,
+          skipInitialRamp: true,
+          performAction: async () => {
+            if (audioContext.state === 'suspended') await audioContext.resume();
+            if (silentAudioEl) await silentAudioEl.play().catch(() => {});
+          },
+        });
+      } else {
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.cancelScheduledValues(now);
           gainNode.gain.setValueAtTime(0, now);
         }
         if (audioContext.state === 'suspended') await audioContext.resume();
-        if (silentAudioEl) {
-          try { await silentAudioEl.play(); } catch (e) { console.warn(`[${namespace}] silentAudioEl.play() failed:`, e); }
-        }
+        if (silentAudioEl) await silentAudioEl.play().catch(() => {});
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.linearRampToValueAtTime(currentVolume, now + DECLICK_DURATION_S);
         }
-      } catch (e) {
-        console.error(`[${namespace}] audioContext.resume() failed:`, e);
-      } finally {
-        isAppOwnedResumeInFlight = false;
       }
-      markPlaybackState('playing');
-      if (playbackWorker) {
-        emitDiagnosticsEvent({
-          type: 'worker-resume-nudge',
-          label: 'Worker resume nudge sent',
-          timestampMs: nowMs(),
-          severity: 'info',
-        });
-        void sendPlaybackWorkerCommand('nudge').catch(() => {});
-      }
-      emitDiagnosticsEvent({ type: 'resume', label: 'Resumed', timestampMs: nowMs(), severity: 'info' });
+    } catch (e) {
+      console.error(`[${namespace}] audioContext.resume() failed:`, e);
+    } finally {
+      isAppOwnedResumeInFlight = false;
     }
+
+    markPlaybackState('playing');
+    if (playbackWorker) {
+      emitDiagnosticsEvent({
+        type: 'worker-resume-nudge',
+        label: 'Worker resume nudge sent',
+        timestampMs: nowMs(),
+        severity: 'info',
+      });
+      void sendPlaybackWorkerCommand('nudge').catch(() => {});
+    }
+    emitDiagnosticsEvent({ type: 'resume', label: 'Resumed', timestampMs: nowMs(), severity: 'info' });
   }
 
   async function getWorkerHealthStatus() {
