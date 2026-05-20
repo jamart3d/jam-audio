@@ -791,7 +791,13 @@ export function createJamAudioBridge({
       await ensureAudioGraph();
       gainNode.gain.value = currentVolume;
       if (audioContext && audioContext.state === 'suspended') {
-        audioContext.resume().catch(() => {});
+        // Race: wait up to 150 ms for the context to resume (fast on installed PWA
+        // where Chrome grants autoplay), then proceed anyway (handles the case where
+        // the gesture gate is still blocking — the health monitor will recover later).
+        await Promise.race([
+          audioContext.resume(),
+          new Promise((r) => setTimeout(r, 150)),
+        ]).catch(() => {});
       }
       createSharedBuffers();
       setStartupPhase('creating streaming decoder');
@@ -835,7 +841,13 @@ export function createJamAudioBridge({
       await ensureWasm();
       await ensureAudioGraph();
       if (audioContext && audioContext.state === 'suspended') {
-        audioContext.resume().catch(() => {});
+        // Race: wait up to 150 ms for the context to resume (fast on installed PWA
+        // where Chrome grants autoplay), then proceed anyway (handles the case where
+        // the gesture gate is still blocking — the health monitor will recover later).
+        await Promise.race([
+          audioContext.resume(),
+          new Promise((r) => setTimeout(r, 150)),
+        ]).catch(() => {});
       }
       gainNode.gain.value = currentVolume;
       createSharedBuffers();
