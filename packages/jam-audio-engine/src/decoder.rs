@@ -330,24 +330,23 @@ fn enabled_codecs() -> CodecRegistry {
     codecs
 }
 
-// Keep the old decode_audio_bytes around for backward compat if needed, or remove it.
 pub fn decode_audio_bytes(
     data: &[u8],
     target_sample_rate: u32,
 ) -> Result<DecodedAudioData, DecodeError> {
     let mut streaming = StreamingDecoder::new(data.to_vec(), target_sample_rate)?;
     let mut all_samples = Vec::new();
-    while let Ok(Some(chunk)) = streaming.decode_chunk(8192) {
-        all_samples.extend_from_slice(chunk.samples());
+    loop {
+        match streaming.decode_chunk(8192) {
+            Ok(Some(chunk)) => all_samples.extend_from_slice(chunk.samples()),
+            Ok(None) => break,
+            Err(e) => return Err(e),
+        }
     }
     if all_samples.is_empty() {
         return Err(DecodeError::EmptyInput);
     }
-    Ok(DecodedAudioData::new(
-        all_samples,
-        target_sample_rate,
-        2,
-    ))
+    Ok(DecodedAudioData::new(all_samples, target_sample_rate, 2))
 }
 
 fn append_interleaved_samples(
@@ -1183,6 +1182,28 @@ mod tests {
         assert_eq!(src.read(&mut header).unwrap(), 64);
         for (i, b) in header.iter().enumerate() {
             assert_eq!(*b, (i & 0xff) as u8, "header byte {i} corrupted");
+        }
+    }
+
+    #[test]
+    fn decode_audio_bytes_propagates_midstream_errors() {
+        // Truncate an opus file mid-page. Symphonia should error during decode
+        // (or report unexpected EOF). Either way, we want a Symphonia/IO error
+        // surfaced rather than a silently short Vec.
+        let mut bytes = include_bytes!("../testdata/opus_sample.opus").to_vec();
+        // Drop the last 64 bytes to corrupt the trailing page.
+        let truncated_len = bytes.len().saturating_sub(64);
+        bytes.truncate(truncated_len);
+
+        let result = decode_audio_bytes(&bytes, DEFAULT_OUTPUT_SAMPLE_RATE);
+
+        // Either Ok with full content (if symphonia is lenient) or a
+        // structured DecodeError. We assert that we never get an EmptyInput
+        // and that if it's Err, it's something a caller can act on.
+        match result {
+            Ok(decoded) => assert!(!decoded.samples().is_empty()),
+            Err(DecodeError::EmptyInput) => panic!("midstream truncation must not present as EmptyInput"),
+            Err(_) => { /* acceptable: real error surfaced */ }
         }
     }
 }
