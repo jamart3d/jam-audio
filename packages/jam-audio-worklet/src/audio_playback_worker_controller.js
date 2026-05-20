@@ -427,6 +427,35 @@ function createPlaybackWorkerController({
         const message =
           decodeError instanceof Error ? decodeError.message : String(decodeError);
         if (message.includes('end-of-stream')) {
+          if (isStreaming && streamingFinalized && pendingGaplessBytes !== null) {
+            // end-of-stream error on a finalized stream — route through the bridge.
+            const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
+            console.log('[worker] streaming→gapless bridge (end-of-stream error): transitioning at', transitionPositionMs.toFixed(0), 'ms');
+            const bytes = pendingGaplessBytes;
+            pendingGaplessBytes = null;
+            let newPlayer;
+            try {
+              newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
+            } catch (bridgeError) {
+              stopRefillLoop();
+              diagnostics.transitionGapMs = null;
+              emitMessage({ type: 'playback-error', message: bridgeError instanceof Error ? bridgeError.message : String(bridgeError) });
+              return;
+            }
+            trackStartPositionMs = transitionPositionMs;
+            currentTrackEndPositionMs = newPlayer.durationMs();
+            handoffUnderrunBaseline = diagnostics.underrunCount;
+            handoffStartedAtMs = nowMs();
+            diagnostics.transitionGapMs = 0;
+            streamingPlayer.free();
+            streamingPlayer = null;
+            streamingFinalized = false;
+            player = newPlayer;
+            emitMessage({ type: 'track-changed', transitionPositionMs: Math.floor(transitionPositionMs) });
+            emitMessage({ type: 'duration', durationMs: Math.floor(newPlayer.durationMs()) });
+            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, end-of-stream path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            return;
+          }
           handleEndOfStream();
           return;
         }
@@ -509,6 +538,35 @@ function createPlaybackWorkerController({
 
       if (!(result instanceof Float32Array)) {
         if (isStreaming && streamingFinalized) {
+          if (pendingGaplessBytes !== null) {
+            // Non-Float32Array result on a finalized stream — route through the bridge.
+            const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
+            console.log('[worker] streaming→gapless bridge (non-array result): transitioning at', transitionPositionMs.toFixed(0), 'ms');
+            const bytes = pendingGaplessBytes;
+            pendingGaplessBytes = null;
+            let newPlayer;
+            try {
+              newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
+            } catch (bridgeError) {
+              stopRefillLoop();
+              diagnostics.transitionGapMs = null;
+              emitMessage({ type: 'playback-error', message: bridgeError instanceof Error ? bridgeError.message : String(bridgeError) });
+              return;
+            }
+            trackStartPositionMs = transitionPositionMs;
+            currentTrackEndPositionMs = newPlayer.durationMs();
+            handoffUnderrunBaseline = diagnostics.underrunCount;
+            handoffStartedAtMs = nowMs();
+            diagnostics.transitionGapMs = 0;
+            streamingPlayer.free();
+            streamingPlayer = null;
+            streamingFinalized = false;
+            player = newPlayer;
+            emitMessage({ type: 'track-changed', transitionPositionMs: Math.floor(transitionPositionMs) });
+            emitMessage({ type: 'duration', durationMs: Math.floor(newPlayer.durationMs()) });
+            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, non-array path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            return;
+          }
           handleEndOfStream();
           return;
         }
@@ -523,6 +581,35 @@ function createPlaybackWorkerController({
 
       if (isStreaming && result.length === 0) {
         if (streamingFinalized) {
+          if (pendingGaplessBytes !== null) {
+            // Zero-length result on a finalized stream — route through the bridge.
+            const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
+            console.log('[worker] streaming→gapless bridge (zero-length result): transitioning at', transitionPositionMs.toFixed(0), 'ms');
+            const bytes = pendingGaplessBytes;
+            pendingGaplessBytes = null;
+            let newPlayer;
+            try {
+              newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
+            } catch (bridgeError) {
+              stopRefillLoop();
+              diagnostics.transitionGapMs = null;
+              emitMessage({ type: 'playback-error', message: bridgeError instanceof Error ? bridgeError.message : String(bridgeError) });
+              return;
+            }
+            trackStartPositionMs = transitionPositionMs;
+            currentTrackEndPositionMs = newPlayer.durationMs();
+            handoffUnderrunBaseline = diagnostics.underrunCount;
+            handoffStartedAtMs = nowMs();
+            diagnostics.transitionGapMs = 0;
+            streamingPlayer.free();
+            streamingPlayer = null;
+            streamingFinalized = false;
+            player = newPlayer;
+            emitMessage({ type: 'track-changed', transitionPositionMs: Math.floor(transitionPositionMs) });
+            emitMessage({ type: 'duration', durationMs: Math.floor(newPlayer.durationMs()) });
+            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, zero-length path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            return;
+          }
           handleEndOfStream();
         }
         return;
