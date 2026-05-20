@@ -445,8 +445,15 @@ fn normalize_to_stereo_output_into(
 #[derive(Debug, Clone)]
 pub struct AppendableMediaSource {
     buffer: Vec<u8>,
+    /// Absolute byte offset of `buffer[header_len()]` in the original stream.
+    /// For bounded sources this advances as bytes are evicted.
+    window_start: u64,
     position: u64,
     finalized: bool,
+    /// 0 disables eviction (legacy "grow forever" behaviour).
+    max_buffered_bytes: usize,
+    header_reserve_bytes: usize,
+    keep_behind: usize,
 }
 
 impl Default for AppendableMediaSource {
@@ -456,16 +463,34 @@ impl Default for AppendableMediaSource {
 }
 
 impl AppendableMediaSource {
+    /// Legacy unbounded constructor — keeps every byte ever appended.
+    /// Prefer `with_bounds` for live streams.
     pub fn new() -> Self {
+        Self::with_bounds(0, 0, 0)
+    }
+
+    /// Bounded constructor. When `max_buffered_bytes > 0` the source evicts
+    /// bytes behind the read cursor (past `keep_behind`) but preserves the
+    /// first `header_reserve_bytes` for re-probing.
+    pub fn with_bounds(
+        max_buffered_bytes: usize,
+        header_reserve_bytes: usize,
+        keep_behind: usize,
+    ) -> Self {
         Self {
             buffer: Vec::new(),
+            window_start: 0,
             position: 0,
             finalized: false,
+            max_buffered_bytes,
+            header_reserve_bytes,
+            keep_behind,
         }
     }
 
     pub fn append(&mut self, chunk: &[u8]) {
         self.buffer.extend_from_slice(chunk);
+        self.evict_if_needed();
     }
 
     pub fn finalize(&mut self) {
@@ -479,41 +504,85 @@ impl AppendableMediaSource {
     pub fn is_finalized(&self) -> bool {
         self.finalized
     }
+
+    fn header_len(&self) -> usize {
+        if self.window_start == 0 {
+            self.buffer.len().min(self.header_reserve_bytes)
+        } else {
+            self.header_reserve_bytes
+        }
+    }
+
+    fn evict_if_needed(&mut self) {
+        if self.max_buffered_bytes == 0 || self.buffer.len() <= self.max_buffered_bytes {
+            return;
+        }
+        let read_pos_in_window = self.position.saturating_sub(self.window_start) as usize;
+        let evict = read_pos_in_window.saturating_sub(self.keep_behind);
+        if evict == 0 {
+            return;
+        }
+        if self.window_start == 0 {
+            if evict > self.header_reserve_bytes {
+                self.buffer.drain(self.header_reserve_bytes..evict);
+                self.window_start = evict as u64;
+            }
+        } else {
+            self.buffer
+                .drain(self.header_reserve_bytes..self.header_reserve_bytes + evict);
+            self.window_start += evict as u64;
+        }
+    }
 }
 
 impl Read for AppendableMediaSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let position = self.position as usize;
-        if position >= self.buffer.len() {
-            return Ok(0);
+        let position = self.position;
+
+        let header_len = self.header_len() as u64;
+        if position < header_len {
+            let available = (header_len - position) as usize;
+            let count = available.min(buf.len());
+            let off = position as usize;
+            buf[..count].copy_from_slice(&self.buffer[off..off + count]);
+            self.position += count as u64;
+            self.evict_if_needed();
+            return Ok(count);
         }
 
-        let available = self.buffer.len() - position;
-        let count = available.min(buf.len());
-        buf[..count].copy_from_slice(&self.buffer[position..position + count]);
-        self.position += count as u64;
-        Ok(count)
+        let window_offset = if self.window_start == 0 {
+            0
+        } else {
+            self.header_reserve_bytes
+        };
+        let window_len = self.buffer.len() - window_offset;
+        if position >= self.window_start && position < self.window_start + window_len as u64 {
+            let pos_in_window = (position - self.window_start) as usize;
+            let available = window_len - pos_in_window;
+            let count = available.min(buf.len());
+            let start = window_offset + pos_in_window;
+            buf[..count].copy_from_slice(&self.buffer[start..start + count]);
+            self.position += count as u64;
+            self.evict_if_needed();
+            return Ok(count);
+        }
+        Ok(0)
     }
 }
 
 impl Seek for AppendableMediaSource {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let len = self.buffer.len() as i128;
+        let window_offset = if self.window_start == 0 { 0 } else { self.header_reserve_bytes };
+        let window_len = (self.buffer.len() - window_offset) as u64;
+        let current_end = self.window_start + window_len;
         let current = self.position as i128;
+
         let target = match pos {
-            SeekFrom::Start(offset) => {
-                if offset as i128 > len {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "seek past buffered data",
-                    ));
-                }
-                offset as i128
-            }
-            SeekFrom::Current(delta) => current + delta as i128,
-            SeekFrom::End(delta) => {
+            SeekFrom::Start(o) => o as i128,
+            SeekFrom::Current(d) => current + d as i128,
+            SeekFrom::End(d) => {
                 if self.finalized {
-                    len + delta as i128
+                    current_end as i128 + d as i128
                 } else {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Unsupported,
@@ -523,15 +592,25 @@ impl Seek for AppendableMediaSource {
             }
         };
 
-        if target < 0 || target > len {
+        if target < 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "seek past buffered data",
+                "seek before start",
             ));
         }
-
-        self.position = target as u64;
-        Ok(self.position)
+        let t = target as u64;
+        let header_len = self.header_len() as u64;
+        let in_header = t < header_len;
+        let in_window = t >= self.window_start && t <= current_end;
+        if in_header || in_window {
+            self.position = t;
+            Ok(t)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek past buffered data",
+            ))
+        }
     }
 }
 
@@ -539,10 +618,10 @@ impl MediaSource for AppendableMediaSource {
     fn is_seekable(&self) -> bool {
         true
     }
-
     fn byte_len(&self) -> Option<u64> {
         if self.finalized {
-            Some(self.buffer.len() as u64)
+            Some(self.window_start + (self.buffer.len()
+                - if self.window_start == 0 { 0 } else { self.header_reserve_bytes }) as u64)
         } else {
             None
         }
@@ -1067,5 +1146,43 @@ mod tests {
         let target_rate = 44100;
         let streaming = StreamingDecoder::new(bytes, target_rate).unwrap();
         assert_eq!(streaming.sample_rate(), target_rate);
+    }
+
+    #[test]
+    fn appendable_source_evicts_behind_read_cursor() {
+        let mut src = AppendableMediaSource::with_bounds(
+            /* max_buffered_bytes = */ 1024,
+            /* header_reserve_bytes = */ 64,
+            /* keep_behind = */ 128,
+        );
+
+        // Push 4KB of data, read past the eviction point.
+        let payload: Vec<u8> = (0u32..4096).map(|i| (i & 0xff) as u8).collect();
+        src.append(&payload);
+        let mut sink = [0u8; 4096];
+        let mut read_total = 0;
+        loop {
+            let n = src.read(&mut sink[read_total..]).unwrap();
+            if n == 0 {
+                break;
+            }
+            read_total += n;
+        }
+        assert_eq!(read_total, 4096);
+
+        // After eviction, buffered_len must stay under max_buffered_bytes.
+        assert!(
+            src.buffered_len() <= 1024,
+            "expected eviction to cap buffer at 1024, got {}",
+            src.buffered_len()
+        );
+
+        // Header bytes (0..64) must still be readable via seek-to-start.
+        src.seek(SeekFrom::Start(0)).unwrap();
+        let mut header = [0u8; 64];
+        assert_eq!(src.read(&mut header).unwrap(), 64);
+        for (i, b) in header.iter().enumerate() {
+            assert_eq!(*b, (i & 0xff) as u8, "header byte {i} corrupted");
+        }
     }
 }
