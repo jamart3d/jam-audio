@@ -119,49 +119,56 @@ impl PcmRingBuffer {
         &mut self,
         interleaved_samples: &[f32],
     ) -> Result<usize, RingBufferError> {
-        #[allow(clippy::manual_is_multiple_of)]
-        if interleaved_samples.len() % self.layout.channels() != 0 {
+        let channels = self.layout.channels();
+        if !interleaved_samples.len().is_multiple_of(channels) {
             return Err(RingBufferError::ChannelMismatch {
-                expected: self.layout.channels(),
+                expected: channels,
                 actual: interleaved_samples.len(),
             });
         }
-
-        let requested_frames = interleaved_samples.len() / self.layout.channels();
+        let cap = self.layout.frame_capacity();
+        let requested_frames = interleaved_samples.len() / channels;
         let writable_frames = requested_frames.min(self.free_frames());
-        let writable_samples = writable_frames * self.layout.channels();
-
-        for (sample_index, &sample) in interleaved_samples.iter().enumerate().take(writable_samples) {
-            let frame_offset = sample_index / self.layout.channels();
-            let channel_offset = sample_index % self.layout.channels();
-            let destination_frame = (self.write_frame + frame_offset) % self.layout.frame_capacity();
-            let destination_index = destination_frame * self.layout.channels() + channel_offset;
-            self.samples[destination_index] = sample;
+        if writable_frames == 0 {
+            return Ok(0);
         }
 
-        self.write_frame = (self.write_frame + writable_frames) % self.layout.frame_capacity();
-        self.len_frames += writable_frames;
+        let writable_samples = writable_frames * channels;
+        let write_sample = self.write_frame * channels;
+        let cap_samples = cap * channels;
+        let first = (cap_samples - write_sample).min(writable_samples);
 
+        self.samples[write_sample..write_sample + first]
+            .copy_from_slice(&interleaved_samples[..first]);
+        if first < writable_samples {
+            let rest = writable_samples - first;
+            self.samples[..rest].copy_from_slice(&interleaved_samples[first..writable_samples]);
+        }
+
+        self.write_frame = (self.write_frame + writable_frames) % cap;
+        self.len_frames += writable_frames;
         Ok(writable_frames)
     }
 
     pub fn pop_interleaved(&mut self, frames: usize) -> Vec<f32> {
+        let channels = self.layout.channels();
+        let cap = self.layout.frame_capacity();
         let readable_frames = frames.min(self.available_frames());
-        let readable_samples = readable_frames * self.layout.channels();
-        let mut output = Vec::with_capacity(readable_samples);
+        let readable_samples = readable_frames * channels;
+        let mut out = Vec::with_capacity(readable_samples);
 
-        for sample_index in 0..readable_samples {
-            let frame_offset = sample_index / self.layout.channels();
-            let channel_offset = sample_index % self.layout.channels();
-            let source_frame = (self.read_frame + frame_offset) % self.layout.frame_capacity();
-            let source_index = source_frame * self.layout.channels() + channel_offset;
-            output.push(self.samples[source_index]);
+        let read_sample = self.read_frame * channels;
+        let cap_samples = cap * channels;
+        let first = (cap_samples - read_sample).min(readable_samples);
+        out.extend_from_slice(&self.samples[read_sample..read_sample + first]);
+        if first < readable_samples {
+            let rest = readable_samples - first;
+            out.extend_from_slice(&self.samples[..rest]);
         }
 
-        self.read_frame = (self.read_frame + readable_frames) % self.layout.frame_capacity();
+        self.read_frame = (self.read_frame + readable_frames) % cap;
         self.len_frames -= readable_frames;
-
-        output
+        out
     }
 }
 
@@ -250,5 +257,22 @@ mod tests {
         let layout = RingBufferLayout::new(1024, 2).unwrap();
         assert_eq!(layout.frame_capacity(), 1024);
         assert_eq!(layout.channels(), 2);
+    }
+
+    #[test]
+    fn ring_buffer_wraps_with_block_copy_parity() {
+        let mut buffer = PcmRingBuffer::new(8, 2).unwrap();
+        // Fill, drain half, wrap-fill.
+        let in1: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        assert_eq!(buffer.push_interleaved(&in1).unwrap(), 8);
+        let out1 = buffer.pop_interleaved(4);
+        assert_eq!(out1, (0..8).map(|i| i as f32).collect::<Vec<_>>());
+
+        let in2: Vec<f32> = (100..108).map(|i| i as f32).collect();
+        assert_eq!(buffer.push_interleaved(&in2).unwrap(), 4);
+
+        let out2 = buffer.pop_interleaved(8);
+        let expected: Vec<f32> = (8..16).map(|i| i as f32).chain((100..108).map(|i| i as f32)).collect();
+        assert_eq!(out2, expected);
     }
 }
