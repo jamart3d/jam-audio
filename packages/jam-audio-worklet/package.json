@@ -1,6 +1,6 @@
 {
   "name": "jam_audio_worklet",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "Generic audio worklet and bridge for Jam Audio Pipeline",
   "type": "module",
   "main": "src/audio_bridge.js",
