@@ -791,12 +791,13 @@ export function createJamAudioBridge({
       await ensureAudioGraph();
       gainNode.gain.value = currentVolume;
       if (audioContext && audioContext.state === 'suspended') {
-        // Race: wait up to 150 ms for the context to resume (fast on installed PWA
-        // where Chrome grants autoplay), then proceed anyway (handles the case where
-        // the gesture gate is still blocking — the health monitor will recover later).
+        // Race: wait up to 2 s for the context to resume. 150 ms was too short for
+        // mobile browsers where the deep-link gesture is processed more slowly.
+        // Exits as soon as the context is running (fast on desktop / installed PWA),
+        // falls through after 2 s if permanently blocked (health monitor recovers).
         await Promise.race([
           audioContext.resume(),
-          new Promise((r) => setTimeout(r, 150)),
+          new Promise((r) => setTimeout(r, 2000)),
         ]).catch(() => {});
       }
       createSharedBuffers();
@@ -841,12 +842,13 @@ export function createJamAudioBridge({
       await ensureWasm();
       await ensureAudioGraph();
       if (audioContext && audioContext.state === 'suspended') {
-        // Race: wait up to 150 ms for the context to resume (fast on installed PWA
-        // where Chrome grants autoplay), then proceed anyway (handles the case where
-        // the gesture gate is still blocking — the health monitor will recover later).
+        // Race: wait up to 2 s for the context to resume. 150 ms was too short for
+        // mobile browsers where the deep-link gesture is processed more slowly.
+        // Exits as soon as the context is running (fast on desktop / installed PWA),
+        // falls through after 2 s if permanently blocked (health monitor recovers).
         await Promise.race([
           audioContext.resume(),
-          new Promise((r) => setTimeout(r, 150)),
+          new Promise((r) => setTimeout(r, 2000)),
         ]).catch(() => {});
       }
       gainNode.gain.value = currentVolume;
