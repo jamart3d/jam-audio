@@ -23,11 +23,15 @@ This is a **sibling** of the `jamdisc` repo, not a subdirectory.
 
 ## Version Scheme
 
-- All Rust crates (`jam-audio-engine`, `jam-audio-flutter`) share **one version number**.
-- The version lives in each crate's `Cargo.toml` → `version = "X.Y.Z"`.
-- Both crates MUST be bumped together.
+- All packages share **one version number**:
+  - `jam-audio-engine`
+  - `jam-audio-flutter`
+  - `jam-audio-worklet`
+- The Rust crate versions live in each crate's `Cargo.toml` -> `version = "X.Y.Z"`.
+- The worklet version lives in `packages/jam-audio-worklet/package.json` -> `"version": "X.Y.Z"`.
+- All three package manifests MUST be bumped together unless there is an explicit documented exception.
 - Git tags use the format `vX.Y.Z`.
-- Worklet has no independent version — it rides the repo tag.
+- The root `CHANGELOG.md` is the release log for all three packages.
 
 ### When to Bump
 
@@ -44,15 +48,20 @@ This is a **sibling** of the `jamdisc` repo, not a subdirectory.
 ```bash
 cd packages/jam-audio-engine
 cargo test
-cargo clippy --all-targets
+cargo build --target wasm32-unknown-unknown
+cd ../..
+npm --prefix packages/jam-audio-worklet test
+cargo check --manifest-path packages/jam-audio-engine/Cargo.toml
+cargo check --manifest-path packages/jam-audio-flutter/Cargo.toml
 ```
 
 ### 2. Bump Version
 
-Edit **both** Cargo.toml files to the new version:
+Edit all package manifests to the new version:
 
 - `packages/jam-audio-engine/Cargo.toml`  →  `version = "X.Y.Z"`
 - `packages/jam-audio-flutter/Cargo.toml`  →  `version = "X.Y.Z"`
+- `packages/jam-audio-worklet/package.json`  →  `"version": "X.Y.Z"`
 
 ### 3. Update CHANGELOG
 
@@ -73,9 +82,12 @@ Move any content from `[Unreleased]` into the new version section.
 ### 4. Commit and Tag
 
 ```bash
-git add -A
+git add CHANGELOG.md \
+  packages/jam-audio-engine/Cargo.toml \
+  packages/jam-audio-flutter/Cargo.toml \
+  packages/jam-audio-worklet/package.json
 git commit -m "Release X.Y.Z"
-git tag vX.Y.Z
+git tag -a vX.Y.Z -m "jam-audio vX.Y.Z"
 ```
 
 ### 5. Push
@@ -105,6 +117,9 @@ authored in `jamdisc` (use `/sync_canonical` for that first).
 - **Bumping only one Cargo.toml**: Both must match. `jam-audio-flutter`
   depends on `jam-audio-engine` via path — a version mismatch won't
   break the build but makes the tag misleading.
+- **Forgetting the worklet package version**: `jam-audio-worklet` is
+  versioned lockstep with the Rust packages. `package.json` must match
+  the Cargo crate versions and release tag.
 - **Forgetting the git tag**: The build scripts embed `git rev-parse --short HEAD`
   into the jamdisc display string. Tags make release tracking possible.
 - **Skipping `jam-audio-flutter`**: If `jam-audio-engine` API surface changes,
