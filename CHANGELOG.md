@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-20
+
+### Added
+- Added shared `media_source` primitives for in-memory and sized audio sources
+- Added wasm smoke coverage for exported player surfaces
+
+### Changed
+- Completed the jam-audio-engine overhaul with a unified generic streaming core
+- Swapped decoder resampling to `rubato` polyphase sinc resampling
+- Reworked gapless residual buffering to use `PcmRingBuffer`
+- Exposed metadata through `wasm_bindgen` getters instead of manual JS object construction
+
+### Fixed
+- Destroyed stale raw Opus decoder state during reset to avoid leaks
+- Bounded appendable streaming source growth for long-lived playback
+- Propagated midstream decode errors from `decode_audio_bytes`
+- Compensated seeks for encoder delay to improve sample-accurate playback
+
+### Verified
+- Native engine test suite
+- wasm32 engine build
+- Worklet package test
+- Flutter bridge cargo check
+
 ## [0.2.10] — 2026-05-13
 
 ### Fixed

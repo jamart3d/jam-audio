@@ -1,6 +1,6 @@
 [package]
 name = "jam_audio_flutter"
-version = "0.2.15"
+version = "0.3.0"
 edition = "2024"
 description = "Flutter bridge for the Jamdisc Rust audio engine"
 repository = "https://github.com/jamart3d/jam-audio"
