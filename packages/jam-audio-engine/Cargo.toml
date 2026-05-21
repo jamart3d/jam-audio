@@ -15,6 +15,7 @@ console_error_panic_hook = ["dep:console_error_panic_hook"]
 
 [dependencies]
 js-sys = "0.3"
+rubato = { version = "0.15", default-features = false }
 symphonia = { version = "0.5", features = ["mp3", "ogg", "flac"] }
 symphonia-core = "0.5"
 wasm-bindgen = "0.2"
