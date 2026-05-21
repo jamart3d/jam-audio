@@ -1,12 +1,11 @@
 use wasm_bindgen::prelude::*;
-use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
 use symphonia::core::probe::Hint;
 use symphonia::default::get_probe;
-use crate::decoder::InMemoryMediaSource;
+use crate::media_source::{InMemoryMediaSource, SizedMediaSource};
 
 /// Typed metadata for an audio track.
 #[wasm_bindgen]
@@ -124,50 +123,7 @@ pub fn extract_metadata_with_size(data: &[u8], total_file_size: u64) -> AudioMet
 
 
 
-struct SizedMediaSource {
-    inner: Cursor<Arc<[u8]>>,
-    total_file_size: u64,
-}
 
-impl SizedMediaSource {
-    fn new(bytes: Arc<[u8]>, total_file_size: u64) -> Self {
-        Self {
-            inner: Cursor::new(bytes),
-            total_file_size,
-        }
-    }
-}
-
-impl Read for SizedMediaSource {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.read(buf)
-    }
-}
-
-impl Seek for SizedMediaSource {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        match pos {
-            SeekFrom::End(n) => {
-                let target = if n >= 0 {
-                    self.total_file_size.saturating_add(n as u64)
-                } else {
-                    self.total_file_size.saturating_sub(n.unsigned_abs())
-                };
-                self.inner.seek(SeekFrom::Start(target))
-            }
-            _ => self.inner.seek(pos),
-        }
-    }
-}
-
-impl MediaSource for SizedMediaSource {
-    fn is_seekable(&self) -> bool {
-        true
-    }
-    fn byte_len(&self) -> Option<u64> {
-        Some(self.total_file_size)
-    }
-}
 
 pub fn extract_artwork_internal(data: &[u8]) -> Option<Vec<u8>> {
     if data.is_empty() {

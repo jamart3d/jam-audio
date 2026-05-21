@@ -6,6 +6,7 @@ use wasm_bindgen::prelude::*;
 
 mod decoder;
 mod gapless_player;
+mod media_source;
 mod metadata;
 mod opus_decoder;
 mod ring_buffer;
