@@ -168,10 +168,6 @@ trait StreamingSource: Read + Seek + MediaSource + 'static {
     fn has_pending_seek(&self) -> bool {
         false
     }
-    fn pending_seek_offset(&self) -> u64 {
-        0
-    }
-    fn clear_pending_seek(&mut self) {}
 }
 
 impl StreamingSource for AppendableMediaSource {
@@ -219,17 +215,11 @@ impl StreamingSource for WindowedMediaSource {
     fn has_pending_seek(&self) -> bool {
         WindowedMediaSource::has_pending_seek(self)
     }
-
-    fn pending_seek_offset(&self) -> u64 {
-        WindowedMediaSource::pending_seek_offset(self).unwrap_or(0)
-    }
-
-    fn clear_pending_seek(&mut self) {
-        WindowedMediaSource::clear_pending_seek(self);
-    }
 }
 
 pub const STREAMING_PROBE_THRESHOLD_BYTES: usize = 256 * 1024;
+pub const DEFAULT_HEADER_RESERVE_BYTES: usize = 512 * 1024;
+pub const DEFAULT_KEEP_BEHIND_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub enum StreamingFrameResult {
@@ -312,11 +302,15 @@ impl<S: StreamingSource> StreamingCore<S> {
         let has_pending_seek = self.source.with(|s| s.has_pending_seek());
         let is_finalized = self.is_finalized();
 
+        let mut state = DecodeState {
+            decoder: &mut self.decoder,
+            residual: &mut self.residual,
+            scratch: &mut self.scratch,
+            frames_decoded: &mut self.frames_decoded,
+        };
+
         decode_frames_impl(
-            &mut self.decoder,
-            &mut self.residual,
-            &mut self.scratch,
-            &mut self.frames_decoded,
+            &mut state,
             target_frames,
             out,
             has_pending_seek,
@@ -366,8 +360,8 @@ impl<S: StreamingSource> StreamingCore<S> {
 impl StreamingCore<AppendableMediaSource> {
     fn appendable(target_sample_rate: u32, max_buffered_mb: u32) -> Self {
         let max_bytes = (max_buffered_mb as usize).saturating_mul(1024 * 1024);
-        let header_reserve = if max_bytes == 0 { 0 } else { 512 * 1024 };
-        let keep_behind = if max_bytes == 0 { 0 } else { 1024 * 1024 };
+        let header_reserve = if max_bytes == 0 { 0 } else { DEFAULT_HEADER_RESERVE_BYTES };
+        let keep_behind = if max_bytes == 0 { 0 } else { DEFAULT_KEEP_BEHIND_BYTES };
         Self::from_source(
             AppendableMediaSource::with_bounds(max_bytes, header_reserve, keep_behind),
             target_sample_rate,
@@ -383,7 +377,7 @@ impl StreamingCore<AppendableMediaSource> {
 impl StreamingCore<WindowedMediaSource> {
     fn windowed(total_size: Option<u64>, max_window_mb: u32, target_sample_rate: u32) -> Self {
         let max_window_bytes = (max_window_mb as usize).saturating_mul(1024 * 1024);
-        let mut source = WindowedMediaSource::new(max_window_bytes, 512 * 1024, 1024 * 1024);
+        let mut source = WindowedMediaSource::new(max_window_bytes, DEFAULT_HEADER_RESERVE_BYTES, DEFAULT_KEEP_BEHIND_BYTES);
         source.set_total_size(total_size);
         Self::from_source(source, target_sample_rate)
     }
@@ -560,11 +554,15 @@ fn js_string(s: &str) -> JsValue {
     JsValue::from_str(s)
 }
 
+struct DecodeState<'a> {
+    decoder: &'a mut Option<StreamingDecoder>,
+    residual: &'a mut VecDeque<f32>,
+    scratch: &'a mut Vec<f32>,
+    frames_decoded: &'a mut u64,
+}
+
 fn decode_frames_impl(
-    decoder: &mut Option<StreamingDecoder>,
-    residual: &mut VecDeque<f32>,
-    scratch: &mut Vec<f32>,
-    frames_decoded: &mut u64,
+    state: &mut DecodeState,
     target_frames: u32,
     out: &mut Vec<f32>,
     has_pending_seek: bool,
@@ -572,33 +570,33 @@ fn decode_frames_impl(
 ) -> Result<StreamingFrameResult, DecodeError> {
     let target_samples = target_frames as usize * 2;
 
-    while !residual.is_empty() && out.len() < target_samples {
-        if let Some(sample) = residual.pop_front() {
+    while !state.residual.is_empty() && out.len() < target_samples {
+        if let Some(sample) = state.residual.pop_front() {
             out.push(sample);
         }
     }
 
     if out.len() == target_samples {
-        *frames_decoded += (out.len() / 2) as u64;
+        *state.frames_decoded += (out.len() / 2) as u64;
         return Ok(StreamingFrameResult::Success);
     }
 
     while out.len() < target_samples {
         let need_frames = (target_samples - out.len()) / 2;
-        scratch.clear();
+        state.scratch.clear();
 
-        let decode_res = decoder
+        let decode_res = state.decoder
             .as_mut()
             .ok_or_else(|| DecodeError::Symphonia("decoder unexpectedly absent".into()))?
-            .decode_chunk_into(need_frames, scratch);
+            .decode_chunk_into(need_frames, state.scratch);
         match decode_res {
             Ok(true) => {
                 let need_samples = target_samples - out.len();
-                if scratch.len() <= need_samples {
-                    out.extend_from_slice(scratch);
+                if state.scratch.len() <= need_samples {
+                    out.extend_from_slice(state.scratch);
                 } else {
-                    out.extend_from_slice(&scratch[..need_samples]);
-                    residual.extend(scratch[need_samples..].iter().copied());
+                    out.extend_from_slice(&state.scratch[..need_samples]);
+                    state.residual.extend(state.scratch[need_samples..].iter().copied());
                 }
             }
             Ok(false) => {
@@ -625,7 +623,7 @@ fn decode_frames_impl(
         }
     }
 
-    *frames_decoded += (out.len() / 2) as u64;
+    *state.frames_decoded += (out.len() / 2) as u64;
     Ok(StreamingFrameResult::Success)
 }
 
