@@ -15,15 +15,16 @@ mod shared_cell;
 use shared_cell::SharedCell;
 
 pub use decoder::{
-    AppendableMediaSource, DecodeError, DecodedAudioData, DEFAULT_OUTPUT_SAMPLE_RATE,
+    AppendableMediaSource, DEFAULT_OUTPUT_SAMPLE_RATE, DecodeError, DecodedAudioData,
     StreamingDecoder, WindowedMediaSource, decode_audio_bytes,
 };
 pub use gapless_player::GaplessPlayer;
+pub use metadata::{
+    AudioMetadata, extract_artwork, extract_artwork_internal, extract_metadata,
+    extract_metadata_internal,
+};
 pub use ring_buffer::{
     DEFAULT_FRAME_CAPACITY, PcmRingBuffer, RingBufferError, RingBufferLayout, SHARED_STATE_SLOTS,
-};
-pub use metadata::{
-    extract_metadata, extract_artwork, extract_artwork_internal, extract_metadata_internal, AudioMetadata,
 };
 
 #[wasm_bindgen]
@@ -77,7 +78,9 @@ impl WasmGaplessPlayer {
 
     #[wasm_bindgen(js_name = seekToMs)]
     pub fn seek_to_ms(&mut self, ms: f64) -> Result<(), JsValue> {
-        self.inner.seek_to_ms(ms).map_err(|e| gapless_error_to_js("seek_failed", &e.to_string()))
+        self.inner
+            .seek_to_ms(ms)
+            .map_err(|e| gapless_error_to_js("seek_failed", &e.to_string()))
     }
 
     #[wasm_bindgen(js_name = positionMs)]
@@ -156,6 +159,76 @@ impl<T: Read + Seek + MediaSource + 'static> MediaSource for SharedMediaSource<T
     }
 }
 
+trait StreamingSource: Read + Seek + MediaSource + 'static {
+    fn append_chunk(&mut self, chunk: &[u8]);
+    fn finalize_source(&mut self);
+    fn buffered_for_probe(&self) -> u64;
+    fn is_finalized(&self) -> bool;
+    fn after_probe_failure(&mut self);
+    fn has_pending_seek(&self) -> bool {
+        false
+    }
+    fn pending_seek_offset(&self) -> u64 {
+        0
+    }
+    fn clear_pending_seek(&mut self) {}
+}
+
+impl StreamingSource for AppendableMediaSource {
+    fn append_chunk(&mut self, chunk: &[u8]) {
+        self.append(chunk);
+    }
+
+    fn finalize_source(&mut self) {
+        self.finalize();
+    }
+
+    fn buffered_for_probe(&self) -> u64 {
+        self.buffered_len() as u64
+    }
+
+    fn is_finalized(&self) -> bool {
+        AppendableMediaSource::is_finalized(self)
+    }
+
+    fn after_probe_failure(&mut self) {}
+}
+
+impl StreamingSource for WindowedMediaSource {
+    fn append_chunk(&mut self, chunk: &[u8]) {
+        self.append(chunk);
+    }
+
+    fn finalize_source(&mut self) {
+        self.finalize();
+    }
+
+    fn buffered_for_probe(&self) -> u64 {
+        self.window_start() + self.buffered_bytes() as u64
+    }
+
+    fn is_finalized(&self) -> bool {
+        WindowedMediaSource::is_finalized(self)
+    }
+
+    fn after_probe_failure(&mut self) {
+        let _ = self.seek(SeekFrom::Start(0));
+        self.clear_pending_seek();
+    }
+
+    fn has_pending_seek(&self) -> bool {
+        WindowedMediaSource::has_pending_seek(self)
+    }
+
+    fn pending_seek_offset(&self) -> u64 {
+        WindowedMediaSource::pending_seek_offset(self).unwrap_or(0)
+    }
+
+    fn clear_pending_seek(&mut self) {
+        WindowedMediaSource::clear_pending_seek(self);
+    }
+}
+
 pub const STREAMING_PROBE_THRESHOLD_BYTES: usize = 256 * 1024;
 
 #[derive(Debug)]
@@ -165,8 +238,8 @@ pub enum StreamingFrameResult {
     EndOfStream,
 }
 
-struct WindowedStreamingPlayerCore {
-    source: SharedCell<WindowedMediaSource>,
+struct StreamingCore<S: StreamingSource> {
+    source: SharedCell<S>,
     decoder: Option<StreamingDecoder>,
     frames_decoded: u64,
     residual: VecDeque<f32>,
@@ -174,14 +247,8 @@ struct WindowedStreamingPlayerCore {
     target_sample_rate: u32,
 }
 
-impl WindowedStreamingPlayerCore {
-    fn new(total_size: Option<u64>, max_window_mb: u32, target_sample_rate: u32) -> Self {
-        let max_window_bytes = (max_window_mb as usize).saturating_mul(1024 * 1024);
-        let header_reserve_bytes = 512 * 1024;
-        let keep_behind = 1024 * 1024;
-        let mut source = WindowedMediaSource::new(max_window_bytes, header_reserve_bytes, keep_behind);
-        source.set_total_size(total_size);
-
+impl<S: StreamingSource> StreamingCore<S> {
+    fn from_source(source: S, target_sample_rate: u32) -> Self {
         Self {
             source: SharedCell::new(source),
             decoder: None,
@@ -193,25 +260,17 @@ impl WindowedStreamingPlayerCore {
     }
 
     fn append_chunk(&mut self, chunk: &[u8]) -> Result<bool, DecodeError> {
-        self.source.with_mut(|s| s.append(chunk));
+        self.source.with_mut(|s| s.append_chunk(chunk));
         self.try_initialize_decoder(false)
     }
 
     fn finalize(&mut self) {
-        self.source.with_mut(|s| s.finalize());
+        self.source.with_mut(|s| s.finalize_source());
         let _ = self.try_initialize_decoder(true);
     }
 
-    fn has_pending_seek(&self) -> bool {
-        self.source.with(|s| s.has_pending_seek())
-    }
-
-    fn pending_seek_offset(&self) -> u64 {
-        self.source.with(|s| s.pending_seek_offset().unwrap_or(0))
-    }
-
-    fn clear_pending_seek(&mut self) {
-        self.source.with_mut(|s| s.clear_pending_seek())
+    fn is_ready(&self) -> bool {
+        self.decoder.is_some()
     }
 
     fn seek_to_ms(&mut self, ms: f64) -> Result<(), DecodeError> {
@@ -226,6 +285,12 @@ impl WindowedStreamingPlayerCore {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    fn decode_frames(&mut self, n: u32) -> Result<StreamingFrameResult, DecodeError> {
+        let mut out = Vec::new();
+        self.decode_frames_into(n, &mut out)
+    }
+
     fn decode_frames_into(
         &mut self,
         target_frames: u32,
@@ -236,11 +301,15 @@ impl WindowedStreamingPlayerCore {
         if self.decoder.is_none() {
             let ready = self.try_initialize_decoder(self.is_finalized())?;
             if !ready {
-                return Ok(if self.is_finalized() { StreamingFrameResult::EndOfStream } else { StreamingFrameResult::Waiting });
+                return Ok(if self.is_finalized() {
+                    StreamingFrameResult::EndOfStream
+                } else {
+                    StreamingFrameResult::Waiting
+                });
             }
         }
 
-        let has_pending_seek = self.has_pending_seek();
+        let has_pending_seek = self.source.with(|s| s.has_pending_seek());
         let is_finalized = self.is_finalized();
 
         decode_frames_impl(
@@ -260,9 +329,9 @@ impl WindowedStreamingPlayerCore {
             return Ok(true);
         }
 
-        let (buffered, is_finalized) = self.source.with(|s| {
-            (s.window_start() + s.buffered_bytes() as u64, s.is_finalized())
-        });
+        let (buffered, is_finalized) = self
+            .source
+            .with(|s| (s.buffered_for_probe(), s.is_finalized()));
 
         let should_probe =
             force || buffered >= STREAMING_PROBE_THRESHOLD_BYTES as u64 || is_finalized;
@@ -282,8 +351,7 @@ impl WindowedStreamingPlayerCore {
                 if is_finalized {
                     Err(error)
                 } else {
-                    let _ = self.source.with_mut(|s| s.seek(SeekFrom::Start(0)));
-                    self.clear_pending_seek();
+                    self.source.with_mut(|s| s.after_probe_failure());
                     Ok(false)
                 }
             }
@@ -295,9 +363,47 @@ impl WindowedStreamingPlayerCore {
     }
 }
 
+impl StreamingCore<AppendableMediaSource> {
+    fn appendable(target_sample_rate: u32, max_buffered_mb: u32) -> Self {
+        let max_bytes = (max_buffered_mb as usize).saturating_mul(1024 * 1024);
+        let header_reserve = if max_bytes == 0 { 0 } else { 512 * 1024 };
+        let keep_behind = if max_bytes == 0 { 0 } else { 1024 * 1024 };
+        Self::from_source(
+            AppendableMediaSource::with_bounds(max_bytes, header_reserve, keep_behind),
+            target_sample_rate,
+        )
+    }
+
+    // streaming player core had buffered_bytes, need to provide it on this impl so it's accessible
+    fn buffered_bytes(&self) -> usize {
+        self.source.with(|s| s.buffered_len())
+    }
+}
+
+impl StreamingCore<WindowedMediaSource> {
+    fn windowed(total_size: Option<u64>, max_window_mb: u32, target_sample_rate: u32) -> Self {
+        let max_window_bytes = (max_window_mb as usize).saturating_mul(1024 * 1024);
+        let mut source = WindowedMediaSource::new(max_window_bytes, 512 * 1024, 1024 * 1024);
+        source.set_total_size(total_size);
+        Self::from_source(source, target_sample_rate)
+    }
+
+    fn has_pending_seek(&self) -> bool {
+        self.source.with(|s| s.has_pending_seek())
+    }
+
+    fn pending_seek_offset(&self) -> u64 {
+        self.source.with(|s| s.pending_seek_offset().unwrap_or(0))
+    }
+
+    fn clear_pending_seek(&mut self) {
+        self.source.with_mut(|s| s.clear_pending_seek())
+    }
+}
+
 #[wasm_bindgen]
 pub struct WindowedStreamingPlayer {
-    core: WindowedStreamingPlayerCore,
+    core: StreamingCore<WindowedMediaSource>,
     output_buffer: Vec<f32>,
 }
 
@@ -306,7 +412,7 @@ impl WindowedStreamingPlayer {
     #[wasm_bindgen(constructor)]
     pub fn new(total_size: Option<u64>, max_window_mb: u32) -> Self {
         Self {
-            core: WindowedStreamingPlayerCore::new(total_size, max_window_mb, DEFAULT_OUTPUT_SAMPLE_RATE),
+            core: StreamingCore::windowed(total_size, max_window_mb, DEFAULT_OUTPUT_SAMPLE_RATE),
             output_buffer: Vec::with_capacity(2048),
         }
     }
@@ -353,17 +459,23 @@ impl WindowedStreamingPlayer {
 
     #[wasm_bindgen(js_name = decodeFrames)]
     pub fn decode_frames(&mut self, n: u32) -> Result<JsValue, JsValue> {
-        match self.core.decode_frames_into(n, &mut self.output_buffer).map_err(decode_error_to_js)? {
+        match self
+            .core
+            .decode_frames_into(n, &mut self.output_buffer)
+            .map_err(decode_error_to_js)?
+        {
             StreamingFrameResult::Waiting => Ok(JsValue::NULL),
             StreamingFrameResult::EndOfStream => Err(js_string("end-of-stream")),
-            StreamingFrameResult::Success => Ok(Float32Array::from(self.output_buffer.as_slice()).into()),
+            StreamingFrameResult::Success => {
+                Ok(Float32Array::from(self.output_buffer.as_slice()).into())
+            }
         }
     }
 }
 
 #[wasm_bindgen]
 pub struct StreamingPlayer {
-    core: StreamingPlayerCore,
+    core: StreamingCore<AppendableMediaSource>,
     output_buffer: Vec<f32>,
 }
 
@@ -372,7 +484,7 @@ impl StreamingPlayer {
     #[wasm_bindgen(constructor)]
     pub fn new(target_sample_rate: Option<u32>, max_buffered_mb: Option<u32>) -> Self {
         Self {
-            core: StreamingPlayerCore::with_bounds(
+            core: StreamingCore::appendable(
                 target_sample_rate.unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE),
                 max_buffered_mb.unwrap_or(0),
             ),
@@ -426,10 +538,16 @@ impl StreamingPlayer {
 
     #[wasm_bindgen(js_name = decodeFrames)]
     pub fn decode_frames(&mut self, n: u32) -> Result<JsValue, JsValue> {
-        match self.core.decode_frames_into(n, &mut self.output_buffer).map_err(decode_error_to_js)? {
+        match self
+            .core
+            .decode_frames_into(n, &mut self.output_buffer)
+            .map_err(decode_error_to_js)?
+        {
             StreamingFrameResult::Waiting => Ok(JsValue::NULL),
             StreamingFrameResult::EndOfStream => Err(js_string("end-of-stream")),
-            StreamingFrameResult::Success => Ok(Float32Array::from(self.output_buffer.as_slice()).into()),
+            StreamingFrameResult::Success => {
+                Ok(Float32Array::from(self.output_buffer.as_slice()).into())
+            }
         }
     }
 }
@@ -440,136 +558,6 @@ fn decode_error_to_js(e: DecodeError) -> JsValue {
 
 fn js_string(s: &str) -> JsValue {
     JsValue::from_str(s)
-}
-
-struct StreamingPlayerCore {
-    source: SharedCell<AppendableMediaSource>,
-    decoder: Option<StreamingDecoder>,
-    frames_decoded: u64,
-    residual: VecDeque<f32>,
-    scratch: Vec<f32>,
-    target_sample_rate: u32,
-}
-
-impl StreamingPlayerCore {
-    #[allow(dead_code)]
-    fn new(target_sample_rate: u32) -> Self {
-        Self::with_bounds(target_sample_rate, 0)
-    }
-
-    fn with_bounds(target_sample_rate: u32, max_buffered_mb: u32) -> Self {
-        let max_bytes = (max_buffered_mb as usize).saturating_mul(1024 * 1024);
-        let header_reserve = if max_bytes == 0 { 0 } else { 512 * 1024 };
-        let keep_behind = if max_bytes == 0 { 0 } else { 1024 * 1024 };
-        let source = AppendableMediaSource::with_bounds(max_bytes, header_reserve, keep_behind);
-        Self {
-            source: SharedCell::new(source),
-            decoder: None,
-            frames_decoded: 0,
-            residual: VecDeque::new(),
-            scratch: Vec::with_capacity(2048),
-            target_sample_rate,
-        }
-    }
-
-    fn append_chunk(&mut self, chunk: &[u8]) -> Result<bool, DecodeError> {
-        self.source.with_mut(|s| s.append(chunk));
-        self.try_initialize_decoder()
-    }
-
-    fn finalize(&mut self) {
-        self.source.with_mut(|s| s.finalize());
-        let _ = self.try_initialize_decoder();
-    }
-
-    fn is_ready(&self) -> bool {
-        self.decoder.is_some()
-    }
-
-    fn seek_to_ms(&mut self, ms: f64) -> Result<(), DecodeError> {
-        let Some(decoder) = self.decoder.as_mut() else {
-            return Err(DecodeError::Symphonia("not ready".to_string()));
-        };
-
-        decoder.seek_to_ms(ms)?;
-
-        self.frames_decoded = (ms * self.target_sample_rate as f64 / 1000.0) as u64;
-        self.residual.clear();
-        Ok(())
-    }
-
-    fn buffered_bytes(&self) -> usize {
-        self.source.with(|s| s.buffered_len())
-    }
-
-    #[allow(dead_code)]
-    fn decode_frames(&mut self, n: u32) -> Result<StreamingFrameResult, DecodeError> {
-        let mut out = Vec::new();
-        self.decode_frames_into(n, &mut out)
-    }
-
-    fn decode_frames_into(
-        &mut self,
-        target_frames: u32,
-        out: &mut Vec<f32>,
-    ) -> Result<StreamingFrameResult, DecodeError> {
-        out.clear();
-
-        if self.decoder.is_none() {
-            let ready = self.try_initialize_decoder()?;
-            if !ready {
-                return Ok(if self.is_finalized() { StreamingFrameResult::EndOfStream } else { StreamingFrameResult::Waiting });
-            }
-        }
-
-        let is_finalized = self.is_finalized();
-
-        decode_frames_impl(
-            &mut self.decoder,
-            &mut self.residual,
-            &mut self.scratch,
-            &mut self.frames_decoded,
-            target_frames,
-            out,
-            false,
-            is_finalized,
-        )
-    }
-
-    fn try_initialize_decoder(&mut self) -> Result<bool, DecodeError> {
-        if self.decoder.is_some() {
-            return Ok(true);
-        }
-
-        let (buffered_len, is_finalized) = self.source.with(|s| {
-            (s.buffered_len(), s.is_finalized())
-        });
-
-        let should_probe = buffered_len >= STREAMING_PROBE_THRESHOLD_BYTES || is_finalized;
-        if !should_probe {
-            return Ok(false);
-        }
-
-        let shared_source = SharedMediaSource::new(self.source.clone());
-
-        match StreamingDecoder::from_media_source(shared_source, self.target_sample_rate) {
-            Ok(decoder) => {
-                self.decoder = Some(decoder);
-                Ok(true)
-            }
-            Err(e) => {
-                if is_finalized {
-                    Err(e)
-                } else {
-                    Ok(false)
-                }
-            }
-        }
-    }
-
-    fn is_finalized(&self) -> bool {
-        self.source.with(|s| s.is_finalized())
-    }
 }
 
 fn decode_frames_impl(
@@ -618,7 +606,11 @@ fn decode_frames_impl(
                     return Ok(StreamingFrameResult::Waiting);
                 }
                 if out.is_empty() {
-                    return Ok(if is_finalized { StreamingFrameResult::EndOfStream } else { StreamingFrameResult::Waiting });
+                    return Ok(if is_finalized {
+                        StreamingFrameResult::EndOfStream
+                    } else {
+                        StreamingFrameResult::Waiting
+                    });
                 } else {
                     break;
                 }
@@ -674,7 +666,7 @@ mod tests {
 
     #[test]
     fn streaming_player_defers_probe_until_threshold() {
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
         let wav = make_wav(100_000);
 
         assert!(!player.append_chunk(&wav[..100_000]).unwrap());
@@ -686,7 +678,7 @@ mod tests {
 
     #[test]
     fn streaming_player_decode_returns_null_before_ready() {
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
         assert!(matches!(
             player.decode_frames(1024).unwrap(),
             StreamingFrameResult::Waiting
@@ -695,7 +687,7 @@ mod tests {
 
     #[test]
     fn streaming_player_decode_returns_null_when_starved() {
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
         let wav = make_wav(100_000);
         let buffered = &wav[..300_000];
 
@@ -714,7 +706,7 @@ mod tests {
 
     #[test]
     fn streaming_player_finalize_then_drain() {
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
         let wav = make_wav(20_000);
 
         assert!(!player.append_chunk(&wav).unwrap());
@@ -739,7 +731,7 @@ mod tests {
 
     #[test]
     fn streaming_player_seek_within_buffered() {
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
         let wav = make_wav(88_200);
 
         assert!(player.append_chunk(&wav).unwrap());
@@ -748,7 +740,7 @@ mod tests {
 
     #[test]
     fn streaming_player_seek_past_buffered_during_streaming() {
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
         let wav = make_wav(132_300);
         let buffered = &wav[..300_000];
 
@@ -759,7 +751,7 @@ mod tests {
 
     #[test]
     fn streaming_player_reports_buffered_bytes() {
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
         let wav = make_wav(100_000);
 
         assert_eq!(player.buffered_bytes(), 0);
@@ -769,7 +761,7 @@ mod tests {
 
     #[test]
     fn streaming_player_seek_before_ready_returns_not_ready() {
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
 
         let error = player.seek_to_ms(1_000.0).unwrap_err();
         assert!(matches!(error, DecodeError::Symphonia(message) if message == "not ready"));
@@ -787,7 +779,8 @@ mod tests {
 
     #[test]
     fn full_file_opus_reports_48000_output_sample_rate() {
-        let decoder = StreamingDecoder::new(opus_sample_bytes(), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        let decoder =
+            StreamingDecoder::new(opus_sample_bytes(), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
 
         assert_eq!(decoder.sample_rate(), 48_000);
     }
@@ -795,7 +788,7 @@ mod tests {
     #[test]
     fn streaming_player_opus_decodes_after_finalize() {
         let bytes = opus_sample_bytes();
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
 
         assert!(!player.append_chunk(&bytes).unwrap());
         assert!(!player.is_ready());
@@ -811,7 +804,7 @@ mod tests {
     #[test]
     fn streaming_player_opus_finalize_then_drain() {
         let bytes = opus_sample_bytes();
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
 
         assert!(!player.append_chunk(&bytes).unwrap());
         player.finalize();
@@ -837,15 +830,15 @@ mod tests {
     #[test]
     fn streaming_player_opus_seek_before_finalize_returns_handled_error() {
         let bytes = opus_sample_bytes();
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
 
         assert!(!player.append_chunk(&bytes).unwrap());
-        
+
         // We can't easily force initialization for a small file without reaching threshold
-        // or finalizing. If we finalize, seek should work. 
-        // The original test intended to check that seeking on incomplete streams (if they WERE initialized) 
-        // is handled. 
-        
+        // or finalizing. If we finalize, seek should work.
+        // The original test intended to check that seeking on incomplete streams (if they WERE initialized)
+        // is handled.
+
         player.finalize();
         assert!(player.is_ready());
 
@@ -856,7 +849,7 @@ mod tests {
     #[test]
     fn streaming_player_opus_seek_and_resume_after_finalize() {
         let bytes = opus_sample_bytes();
-        let mut player = StreamingPlayerCore::new(DEFAULT_OUTPUT_SAMPLE_RATE);
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
 
         assert!(!player.append_chunk(&bytes).unwrap());
         player.finalize();
