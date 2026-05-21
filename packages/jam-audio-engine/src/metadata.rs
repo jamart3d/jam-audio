@@ -7,6 +7,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
 use symphonia::core::probe::Hint;
 use symphonia::default::get_probe;
+use crate::decoder::InMemoryMediaSource;
 
 /// Typed metadata for an audio track.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -129,38 +130,7 @@ pub fn extract_metadata_with_size(data: &[u8], total_file_size: u64) -> JsValue 
     audio_metadata_to_js_value(extract_metadata_with_size_internal(data, total_file_size))
 }
 
-struct InMemoryMediaSource {
-    inner: Cursor<Arc<[u8]>>,
-}
 
-impl InMemoryMediaSource {
-    fn new(bytes: Arc<[u8]>) -> Self {
-        Self {
-            inner: Cursor::new(bytes),
-        }
-    }
-}
-
-impl Read for InMemoryMediaSource {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.read(buf)
-    }
-}
-
-impl Seek for InMemoryMediaSource {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.inner.seek(pos)
-    }
-}
-
-impl MediaSource for InMemoryMediaSource {
-    fn is_seekable(&self) -> bool {
-        true
-    }
-    fn byte_len(&self) -> Option<u64> {
-        Some(self.inner.get_ref().len() as u64)
-    }
-}
 
 struct SizedMediaSource {
     inner: Cursor<Arc<[u8]>>,

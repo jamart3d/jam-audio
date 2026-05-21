@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use crate::opus_decoder::OpusDecoder;
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
@@ -128,7 +129,7 @@ impl StreamingDecoder {
             return Err(DecodeError::EmptyInput);
         }
 
-        Self::from_media_source(InMemoryMediaSource::new(data), target_sample_rate)
+        Self::from_media_source(InMemoryMediaSource::from_vec(data), target_sample_rate)
     }
 
     pub fn from_media_source<S>(media_source: S, target_sample_rate: u32) -> Result<Self, DecodeError>
@@ -842,15 +843,19 @@ impl MediaSource for WindowedMediaSource {
     }
 }
 
-struct InMemoryMediaSource {
-    inner: Cursor<Vec<u8>>,
+pub(crate) struct InMemoryMediaSource {
+    inner: Cursor<Arc<[u8]>>,
 }
 
 impl InMemoryMediaSource {
-    fn new(bytes: Vec<u8>) -> Self {
+    pub(crate) fn new(bytes: Arc<[u8]>) -> Self {
         Self {
             inner: Cursor::new(bytes),
         }
+    }
+
+    pub(crate) fn from_vec(bytes: Vec<u8>) -> Self {
+        Self::new(Arc::from(bytes))
     }
 }
 
@@ -1060,7 +1065,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn decode_nth_chunk_with_native_libopus(bytes: Vec<u8>, packet_index: usize) -> Vec<f32> {
         let media_stream = MediaSourceStream::new(
-            Box::new(InMemoryMediaSource::new(bytes)),
+            Box::new(InMemoryMediaSource::from_vec(bytes)),
             Default::default(),
         );
         let probed = get_probe()
