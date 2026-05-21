@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-21
+
+### Fixed
+- Improved Android Chrome PWA deeplink playback startup by resuming the `AudioContext` on the first user gesture when launch activation does not grant autoplay rights
+- Sent an explicit processor stop message before stopping worker playback to keep processor and worker state aligned
+- Shortened suspended-context resume fallback waits so deeplink startup can continue buffering while waiting for a user gesture
+
+### Added
+- Added deeplink audio startup diagnostics around context resume and worker start state
+
+### Verified
+- Worklet package test
+- Native engine test suite
+- wasm32 engine build
+- Flutter bridge cargo check
+
 ## [0.3.0] — 2026-05-20
 
 ### Added

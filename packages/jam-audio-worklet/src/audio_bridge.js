@@ -702,6 +702,36 @@ export function createJamAudioBridge({
       });
     }).catch(() => {});
 
+    // On Android Chrome PWA deeplinks the launch gesture does not grant
+    // AudioContext autoplay rights, so resume() above stays pending. Register
+    // a one-time capture-phase listener on the first user gesture (touch or
+    // click) so the context resumes as soon as the user interacts with
+    // anything on screen. The audio worker will have already buffered decoded
+    // audio by then, so playback starts immediately with no perceptible delay.
+    if (audioContext.state === 'suspended') {
+      console.log('[deeplink-diag] initAudio: context suspended, registering gesture-resume listener');
+      const resumeOnGesture = () => {
+        document.removeEventListener('click', resumeOnGesture, true);
+        document.removeEventListener('touchstart', resumeOnGesture, true);
+        document.removeEventListener('keydown', resumeOnGesture, true);
+        if (!audioContext || audioContext.state !== 'suspended') return;
+        console.log('[deeplink-diag] gesture-resume: gesture fired, calling audioContext.resume()');
+        audioContext.resume().then(() => {
+          console.log('[deeplink-diag] gesture-resume: audioContext.state=', audioContext.state);
+          emitDiagnosticsEvent({
+            type: 'audio-context-gesture-resumed',
+            label: 'Audio context resumed via first gesture',
+            timestampMs: nowMs(),
+            severity: 'info',
+          });
+          if (silentAudioEl && silentAudioEl.paused) silentAudioEl.play().catch(() => {});
+        }).catch(() => {});
+      };
+      document.addEventListener('click', resumeOnGesture, true);
+      document.addEventListener('touchstart', resumeOnGesture, true);
+      document.addEventListener('keydown', resumeOnGesture, true);
+    }
+
     await ensureWasm();
     await ensureAudioGraph();
   }
@@ -718,6 +748,7 @@ export function createJamAudioBridge({
         preserveMediaSession: true,
         performAction: async ({ preserveMediaSession }) => {
           if (playbackWorker) {
+            processorNode?.port.postMessage({ type: 'stop' });
             await sendPlaybackWorkerCommand('stop').catch(() => {});
           } else {
             stop({ preserveMediaSession });
@@ -726,6 +757,7 @@ export function createJamAudioBridge({
       });
     } else {
       if (playbackWorker) {
+        processorNode?.port.postMessage({ type: 'stop' });
         await sendPlaybackWorkerCommand('stop').catch(() => {});
       } else {
         stop({ preserveMediaSession: true });
@@ -791,23 +823,31 @@ export function createJamAudioBridge({
       await ensureAudioGraph();
       gainNode.gain.value = currentVolume;
       if (audioContext && audioContext.state === 'suspended') {
-        // Race: wait up to 2 s for the context to resume. 150 ms was too short for
-        // mobile browsers where the deep-link gesture is processed more slowly.
-        // Exits as soon as the context is running (fast on desktop / installed PWA),
-        // falls through after 2 s if permanently blocked (health monitor recovers).
+        // Await resume so the AudioContext is running before the worklet starts.
+        // On the paste-button path Chrome resolves this immediately (user gesture);
+        // on the no-MEI deeplink path it never resolves, so cap at 300 ms and let
+        // the gesture-resume listener unblock the context after the user taps.
         await Promise.race([
           audioContext.resume(),
-          new Promise((r) => setTimeout(r, 2000)),
+          new Promise((r) => setTimeout(r, 300)),
         ]).catch(() => {});
       }
       createSharedBuffers();
       setStartupPhase('creating streaming decoder');
+      const sharedStateView = new Int32Array(sharedStateBuffer);
+      console.log('[deeplink-diag] playTrackStreaming: pre-worker STOP=',
+        Atomics.load(sharedStateView, 4),
+        ' framesAvailable=', Atomics.load(sharedStateView, 2));
       await sendPlaybackWorkerCommand('playTrackStreaming', {
         pcmBuffer: sharedPcmBuffer,
         stateBuffer: sharedStateBuffer,
         frameCapacity,
         sampleRate: audioContext.sampleRate,
       });
+      console.log('[deeplink-diag] playTrackStreaming: post-worker STOP=',
+        Atomics.load(sharedStateView, 4),
+        ' framesAvailable=', Atomics.load(sharedStateView, 2),
+        ' audioContext.state=', audioContext?.state);
       setStartupPhase('prebuffering');
       processorNode.port.postMessage({
         type: 'init',
@@ -842,18 +882,18 @@ export function createJamAudioBridge({
       await ensureWasm();
       await ensureAudioGraph();
       if (audioContext && audioContext.state === 'suspended') {
-        // Race: wait up to 2 s for the context to resume. 150 ms was too short for
-        // mobile browsers where the deep-link gesture is processed more slowly.
-        // Exits as soon as the context is running (fast on desktop / installed PWA),
-        // falls through after 2 s if permanently blocked (health monitor recovers).
         await Promise.race([
           audioContext.resume(),
-          new Promise((r) => setTimeout(r, 2000)),
+          new Promise((r) => setTimeout(r, 300)),
         ]).catch(() => {});
       }
       gainNode.gain.value = currentVolume;
       createSharedBuffers();
       setStartupPhase('creating streaming decoder');
+      const sharedStateView = new Int32Array(sharedStateBuffer);
+      console.log('[deeplink-diag] playTrackBounded: pre-worker STOP=',
+        Atomics.load(sharedStateView, 4),
+        ' framesAvailable=', Atomics.load(sharedStateView, 2));
       await sendPlaybackWorkerCommand('playTrackBounded', {
         url,
         totalSize,
@@ -862,6 +902,10 @@ export function createJamAudioBridge({
         frameCapacity,
         sampleRate: audioContext.sampleRate,
       });
+      console.log('[deeplink-diag] playTrackBounded: post-worker STOP=',
+        Atomics.load(sharedStateView, 4),
+        ' framesAvailable=', Atomics.load(sharedStateView, 2),
+        ' audioContext.state=', audioContext?.state);
       setStartupPhase('prebuffering');
       processorNode.port.postMessage({
         type: 'init',
