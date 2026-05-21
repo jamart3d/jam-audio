@@ -32,5 +32,8 @@ console_error_panic_hook = { version = "0.1", optional = true }
 unopus = "0.0.1"
 opus-rs = "0.1.16"
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 [patch.crates-io]
 opus-rs = { path = "../../third_party/opus-rs" }
