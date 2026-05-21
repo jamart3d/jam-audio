@@ -3,7 +3,9 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::media_source::InMemoryMediaSource;
 use crate::opus_decoder::OpusDecoder;
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{CODEC_TYPE_NULL, CodecRegistry, CodecType, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -41,7 +43,10 @@ impl StereoResampler {
             .expect("rubato SincFixedIn params valid");
         Self {
             inner,
-            pending: [Vec::with_capacity(chunk_frames * 2), Vec::with_capacity(chunk_frames * 2)],
+            pending: [
+                Vec::with_capacity(chunk_frames * 2),
+                Vec::with_capacity(chunk_frames * 2),
+            ],
             chunk_frames,
         }
     }
@@ -181,6 +186,8 @@ pub struct StreamingDecoder {
     sample_buffer_channels: u32,
     encoder_delay_frames: u64,
     trailing_pad_frames: u64,
+    /// Frames to skip after a seek to achieve sample-accurate positioning.
+    pending_skip_frames: u64,
     /// Lazily-constructed rubato resampler; `None` when source_rate == target_rate.
     resampler: Option<StereoResampler>,
 }
@@ -211,7 +218,10 @@ impl StreamingDecoder {
         Self::from_media_source(InMemoryMediaSource::from_vec(data), target_sample_rate)
     }
 
-    pub fn from_media_source<S>(media_source: S, target_sample_rate: u32) -> Result<Self, DecodeError>
+    pub fn from_media_source<S>(
+        media_source: S,
+        target_sample_rate: u32,
+    ) -> Result<Self, DecodeError>
     where
         S: MediaSource + 'static,
     {
@@ -235,7 +245,8 @@ impl StreamingDecoder {
         }
         codec_supported_on_target(track.codec_params.codec, cfg!(target_arch = "wasm32"))?;
 
-        let is_ogg_family = track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_OPUS || track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_VORBIS;
+        let is_ogg_family = track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_OPUS
+            || track.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_VORBIS;
 
         let decoder = enabled_codecs().make(&track.codec_params, &DecoderOptions::default())?;
         let source_sample_rate = track
@@ -260,10 +271,10 @@ impl StreamingDecoder {
         };
 
         let init_source_sample_rate = source_sample_rate;
-        let raw_delay = track.codec_params.delay.unwrap_or(0) as f64;
+        let raw_delay = track.codec_params.delay.unwrap_or(0) as u64;
         let raw_padding = track.codec_params.padding.unwrap_or(0) as f64;
         let rate_ratio = target_sample_rate as f64 / init_source_sample_rate as f64;
-        let encoder_delay_frames = (raw_delay * rate_ratio).round() as u64;
+        let encoder_delay_frames = (raw_delay as f64 * rate_ratio).round() as u64;
         let trailing_pad_frames = (raw_padding * rate_ratio).round() as u64;
 
         Ok(Self {
@@ -284,6 +295,7 @@ impl StreamingDecoder {
             sample_buffer_channels: 0,
             encoder_delay_frames,
             trailing_pad_frames,
+            pending_skip_frames: raw_delay,
             resampler: None,
         })
     }
@@ -298,10 +310,14 @@ impl StreamingDecoder {
 
     /// Output channel count. The decoder normalises every source to stereo,
     /// so this is always 2. Use `source_channels()` for the upstream count.
-    pub fn output_channels(&self) -> u32 { 2 }
+    pub fn output_channels(&self) -> u32 {
+        2
+    }
 
     /// Most-recently-observed source channel count (may change per packet).
-    pub fn source_channels(&self) -> u32 { self.source_channels }
+    pub fn source_channels(&self) -> u32 {
+        self.source_channels
+    }
 
     pub fn encoder_delay_frames(&self) -> u64 {
         self.encoder_delay_frames
@@ -317,22 +333,31 @@ impl StreamingDecoder {
         use symphonia::core::formats::SeekMode;
         use symphonia::core::formats::SeekTo;
 
-        let seconds = ms / 1000.0;
-        let frac = seconds.fract();
-        let num_seconds = seconds.trunc() as u64;
+        let playback_frame = (ms * self.target_sample_rate as f64 / 1000.0).round() as u64;
+        let target_frame = playback_frame + self.encoder_delay_frames;
+        let target_seconds = target_frame as f64 / self.target_sample_rate as f64;
+
+        let frac = target_seconds.fract();
+        let num_seconds = target_seconds.trunc() as u64;
 
         let seek_time = symphonia::core::units::Time {
             seconds: num_seconds,
             frac,
         };
 
-        self.format.seek(
+        let seeked_to = self.format.seek(
             SeekMode::Accurate,
             SeekTo::Time {
                 time: seek_time,
                 track_id: Some(self.track_id),
             },
         )?;
+
+        if seeked_to.required_ts > seeked_to.actual_ts {
+            self.pending_skip_frames = seeked_to.required_ts - seeked_to.actual_ts;
+        } else {
+            self.pending_skip_frames = 0;
+        }
 
         // Ensure we avoid glitchy audio after a seek by resetting the decoder
         self.decoder.reset();
@@ -384,13 +409,29 @@ impl StreamingDecoder {
             self.source_sample_rate = spec.rate;
             self.source_channels = spec.channels.count() as u32;
 
+            let mut chunk_samples = Vec::new();
             append_interleaved_samples(
-                &mut self.intermediate_samples,
+                &mut chunk_samples,
                 decoded,
                 &mut self.sample_buffer,
                 &mut self.sample_buffer_rate,
                 &mut self.sample_buffer_channels,
             );
+
+            if self.pending_skip_frames > 0 {
+                let frames_in_chunk = chunk_samples.len() / self.source_channels as usize;
+                let skip = (self.pending_skip_frames as usize).min(frames_in_chunk);
+                let samples_to_skip = skip * self.source_channels as usize;
+
+                if samples_to_skip >= chunk_samples.len() {
+                    chunk_samples.clear();
+                } else {
+                    chunk_samples.drain(0..samples_to_skip);
+                }
+                self.pending_skip_frames -= skip as u64;
+            }
+
+            self.intermediate_samples.extend(chunk_samples);
 
             if self.intermediate_samples.len() >= target_samples_stereo {
                 break;
@@ -512,7 +553,10 @@ fn append_interleaved_samples(
     let capacity = decoded.capacity() as u64;
 
     if let Some(sb) = sample_buffer_opt {
-        if *sb_rate != spec.rate || *sb_channels != spec.channels.count() as u32 || sb.capacity() < capacity as usize {
+        if *sb_rate != spec.rate
+            || *sb_channels != spec.channels.count() as u32
+            || sb.capacity() < capacity as usize
+        {
             *sample_buffer_opt = Some(SampleBuffer::<f32>::new(capacity, spec));
             *sb_rate = spec.rate;
             *sb_channels = spec.channels.count() as u32;
@@ -663,7 +707,11 @@ impl Read for AppendableMediaSource {
 
 impl Seek for AppendableMediaSource {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let window_offset = if self.window_start == 0 { 0 } else { self.header_reserve_bytes };
+        let window_offset = if self.window_start == 0 {
+            0
+        } else {
+            self.header_reserve_bytes
+        };
         let window_len = (self.buffer.len() - window_offset) as u64;
         let current_end = self.window_start + window_len;
         let current = self.position as i128;
@@ -711,8 +759,15 @@ impl MediaSource for AppendableMediaSource {
     }
     fn byte_len(&self) -> Option<u64> {
         if self.finalized {
-            Some(self.window_start + (self.buffer.len()
-                - if self.window_start == 0 { 0 } else { self.header_reserve_bytes }) as u64)
+            Some(
+                self.window_start
+                    + (self.buffer.len()
+                        - if self.window_start == 0 {
+                            0
+                        } else {
+                            self.header_reserve_bytes
+                        }) as u64,
+            )
         } else {
             None
         }
@@ -796,11 +851,14 @@ impl WindowedMediaSource {
         if evict_from_window > 0 {
             if self.window_start == 0 {
                 if evict_from_window > self.header_reserve_bytes {
-                    self.buffer.drain(self.header_reserve_bytes..evict_from_window);
+                    self.buffer
+                        .drain(self.header_reserve_bytes..evict_from_window);
                     self.window_start = evict_from_window as u64;
                 }
             } else {
-                self.buffer.drain(self.header_reserve_bytes .. self.header_reserve_bytes + evict_from_window);
+                self.buffer.drain(
+                    self.header_reserve_bytes..self.header_reserve_bytes + evict_from_window,
+                );
                 self.window_start += evict_from_window as u64;
             }
         }
@@ -820,7 +878,8 @@ impl Read for WindowedMediaSource {
         if position < header_len as u64 {
             let available = header_len - position as usize;
             let count = available.min(buf.len());
-            buf[..count].copy_from_slice(&self.buffer[position as usize .. position as usize + count]);
+            buf[..count]
+                .copy_from_slice(&self.buffer[position as usize..position as usize + count]);
             self.position += count as u64;
             return Ok(count);
         }
@@ -832,13 +891,13 @@ impl Read for WindowedMediaSource {
         };
 
         let window_len = self.buffer.len() - window_offset_in_buffer;
-        
+
         if position >= self.window_start && position < self.window_start + window_len as u64 {
             let pos_in_window = (position - self.window_start) as usize;
             let available = window_len - pos_in_window;
             let count = available.min(buf.len());
             let start_idx = window_offset_in_buffer + pos_in_window;
-            buf[..count].copy_from_slice(&self.buffer[start_idx .. start_idx + count]);
+            buf[..count].copy_from_slice(&self.buffer[start_idx..start_idx + count]);
             self.position += count as u64;
             return Ok(count);
         }
@@ -850,7 +909,7 @@ impl Read for WindowedMediaSource {
 impl Seek for WindowedMediaSource {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         let current = self.position as i128;
-        
+
         let window_len = if self.window_start == 0 {
             self.buffer.len() as u64
         } else {
@@ -902,8 +961,10 @@ impl Seek for WindowedMediaSource {
         };
 
         let near_margin = 16 * 1024;
-        let in_window = (target_u64 >= self.window_start && target_u64 <= self.window_start + window_len)
-            || (target_u64 >= self.window_start.saturating_sub(near_margin) && target_u64 < self.window_start);
+        let in_window = (target_u64 >= self.window_start
+            && target_u64 <= self.window_start + window_len)
+            || (target_u64 >= self.window_start.saturating_sub(near_margin)
+                && target_u64 < self.window_start);
 
         if in_header || in_window {
             self.position = target_u64;
@@ -927,8 +988,6 @@ impl MediaSource for WindowedMediaSource {
         None
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -971,7 +1030,9 @@ mod tests {
     fn windowed_header_survives() {
         let mut src = WindowedMediaSource::new(200, 50, 1024 * 1024);
         let mut data = vec![0u8; 1024 * 1024 + 500];
-        for i in 0..50 { data[i] = i as u8; } // header
+        for i in 0..50 {
+            data[i] = i as u8;
+        } // header
         src.append(&data);
         src.seek(SeekFrom::Start(1024 * 1024 + 200)).unwrap();
         src.append(&[0u8; 10]); // trigger eviction
@@ -995,15 +1056,15 @@ mod tests {
         let mut src = WindowedMediaSource::new(1024 * 1024, 50, 16 * 1024);
         let data = vec![0u8; 100 * 1024];
         src.append(&data);
-        
+
         // Manually move window_start to simulate eviction
         src.window_start = 20 * 1024;
-        
+
         // Seek to 19KB (just outside 20KB window)
         // near_margin is 16KB, so 19KB is within margin (20KB - 16KB = 4KB)
         assert!(src.seek(SeekFrom::Start(19 * 1024)).is_ok());
         assert_eq!(src.position, 19 * 1024);
-        
+
         // Seek to 3KB (outside margin)
         assert!(src.seek(SeekFrom::Start(3 * 1024)).is_err());
     }
@@ -1016,7 +1077,10 @@ mod tests {
                 .field("init_source_sample_rate", &self.init_source_sample_rate)
                 .field("source_channels", &self.source_channels)
                 .field("duration_ms", &self.duration_ms)
-                .field("intermediate_samples_cap", &self.intermediate_samples.capacity())
+                .field(
+                    "intermediate_samples_cap",
+                    &self.intermediate_samples.capacity(),
+                )
                 .field("stereo_scratch_cap", &self.stereo_scratch.capacity())
                 .finish()
         }
@@ -1211,8 +1275,7 @@ mod tests {
     #[test]
     fn appendable_source_evicts_behind_read_cursor() {
         let mut src = AppendableMediaSource::with_bounds(
-            /* max_buffered_bytes = */ 1024,
-            /* header_reserve_bytes = */ 64,
+            /* max_buffered_bytes = */ 1024, /* header_reserve_bytes = */ 64,
             /* keep_behind = */ 128,
         );
 
@@ -1263,7 +1326,9 @@ mod tests {
         // and that if it's Err, it's something a caller can act on.
         match result {
             Ok(decoded) => assert!(!decoded.samples().is_empty()),
-            Err(DecodeError::EmptyInput) => panic!("midstream truncation must not present as EmptyInput"),
+            Err(DecodeError::EmptyInput) => {
+                panic!("midstream truncation must not present as EmptyInput")
+            }
             Err(_) => { /* acceptable: real error surfaced */ }
         }
     }
@@ -1290,6 +1355,50 @@ mod tests {
         assert!(
             diff <= tolerance,
             "resampler frame count off by {diff} samples (expected ~{expected_samples}, got {total}, tolerance {tolerance})"
+        );
+    }
+
+    #[test]
+    fn seek_compensates_for_encoder_delay() {
+        let bytes = include_bytes!("../testdata/opus_sample.opus").to_vec();
+
+        let mut sequential = StreamingDecoder::new(bytes.clone(), 48_000).unwrap();
+        let mut all_samples = Vec::new();
+        while let Ok(Some(chunk)) = sequential.decode_chunk(4096) {
+            all_samples.extend_from_slice(chunk.samples());
+        }
+
+        let seek_ms: f64 = 100.0;
+        let mut seeking = StreamingDecoder::new(bytes, 48_000).unwrap();
+        seeking.seek_to_ms(seek_ms).unwrap();
+
+        let chunk = seeking.decode_chunk(4096).unwrap().unwrap();
+        let seek_samples = chunk.samples();
+
+        // The requested playback time is seek_ms.
+        // all_samples already has the initial encoder delay skipped, so its index 0 is audible 0ms.
+        let target_frame = (seek_ms * 48.0).round() as usize;
+        let target_sample_idx = target_frame * 2; // stereo
+
+        let expected_samples = &all_samples[target_sample_idx..];
+
+        let compare_len = expected_samples.len().min(seek_samples.len()).min(128);
+
+        let mean_abs_error = expected_samples
+            .iter()
+            .zip(seek_samples.iter())
+            .take(compare_len)
+            .map(|(a, b)| (a - b).abs())
+            .sum::<f32>()
+            / compare_len as f32;
+
+        // Opus state convergence after a seek/reset without pre-roll can lead to non-trivial
+        // sample differences (artifacts) in the first packet. We use a larger tolerance
+        // to verify that the seek is roughly in the correct position.
+        assert!(
+            mean_abs_error < 0.2,
+            "seek did not compensate for encoder delay: mean_error={}",
+            mean_abs_error
         );
     }
 }

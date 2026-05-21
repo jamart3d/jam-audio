@@ -13,7 +13,6 @@ mod pure_rust {
     };
     use symphonia_core::errors::{Error, Result, unsupported_error};
     use symphonia_core::formats::Packet;
-    use symphonia_core::io::{BufReader, ReadBytes};
     use symphonia_core::support_codec;
     use unopus::{
         OpusDecoder as RawOpusDecoder, opus_decode_float, opus_decoder_create, opus_decoder_destroy,
@@ -32,7 +31,6 @@ mod pure_rust {
         samples_per_channel: usize,
         sample_rate: u32,
         num_channels: usize,
-        pre_skip: usize,
     }
 
     unsafe impl Send for OpusDecoder {}
@@ -57,19 +55,8 @@ mod pure_rust {
                 .field("samples_per_channel", &self.samples_per_channel)
                 .field("sample_rate", &self.sample_rate)
                 .field("num_channels", &self.num_channels)
-                .field("pre_skip", &self.pre_skip)
                 .finish()
         }
-    }
-
-    fn parse_pre_skip(buf: &[u8]) -> Result<usize> {
-        let mut reader = BufReader::new(buf);
-        let mut header = [0; 8];
-        reader.read_buf_exact(&mut header)?;
-        reader.read_byte()?;
-        reader.read_byte()?;
-        let pre_skip = reader.read_u16()?;
-        Ok(pre_skip as usize)
     }
 
     fn map_to_channels(num_channels: usize) -> Option<Channels> {
@@ -124,12 +111,6 @@ mod pure_rust {
                 return unsupported_error("opus: unsupported number of channels");
             }
 
-            let pre_skip = if let Some(extra_data) = &params.extra_data {
-                parse_pre_skip(extra_data).unwrap_or_default()
-            } else {
-                0
-            };
-
             Ok(Self {
                 params: params.to_owned(),
                 decoder: make_decoder(sample_rate, num_channels)?,
@@ -138,11 +119,10 @@ mod pure_rust {
                     DEFAULT_SAMPLES_PER_CHANNEL as u64,
                     num_channels,
                 )?,
-                pcm: [0.0; _],
+                pcm: [0.0; MAX_SAMPLES_PER_CHANNEL * 2],
                 samples_per_channel: DEFAULT_SAMPLES_PER_CHANNEL,
                 sample_rate,
                 num_channels,
-                pre_skip,
             })
         }
 
@@ -161,12 +141,6 @@ mod pure_rust {
                     }
                 }
                 self.decoder = decoder;
-                self.pre_skip = self
-                    .params
-                    .extra_data
-                    .as_deref()
-                    .and_then(|extra_data| parse_pre_skip(extra_data).ok())
-                    .unwrap_or_default();
                 self.buf.clear();
             }
         }
@@ -220,12 +194,7 @@ mod pure_rust {
                 _ => {}
             }
 
-            self.buf.trim(
-                packet.trim_start() as usize
-                    + (self.pre_skip * self.sample_rate as usize) / DEFAULT_SAMPLE_RATE,
-                packet.trim_end() as usize,
-            );
-            self.pre_skip = 0;
+            self.buf.trim(packet.trim_start() as usize, packet.trim_end() as usize);
             Ok(self.buf.as_audio_buffer_ref())
         }
 
@@ -265,9 +234,14 @@ mod pure_rust {
             let first_ptr = decoder.decoder as usize;
             decoder.reset();
             let second_ptr = decoder.decoder as usize;
-            assert_ne!(first_ptr, second_ptr, "reset should allocate a fresh decoder");
+            assert_ne!(
+                first_ptr, second_ptr,
+                "reset should allocate a fresh decoder"
+            );
             // Repeated reset should remain stable (no double-free, no leak panic).
-            for _ in 0..16 { decoder.reset(); }
+            for _ in 0..16 {
+                decoder.reset();
+            }
         }
     }
 }
