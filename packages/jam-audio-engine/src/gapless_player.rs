@@ -1,6 +1,5 @@
-use std::collections::VecDeque;
-
 use crate::decoder::{DecodeError, StreamingDecoder};
+use crate::ring_buffer::{PcmRingBuffer, DEFAULT_FRAME_CAPACITY};
 
 #[derive(Debug)]
 pub enum GaplessError {
@@ -22,7 +21,7 @@ impl std::error::Error for GaplessError {}
 pub struct GaplessPlayer {
     active: StreamingDecoder,
     next: Option<StreamingDecoder>,
-    residual: VecDeque<f32>,
+    residual: PcmRingBuffer,
     scratch: Vec<f32>,
     total_frames_decoded: u64,
     target_sample_rate: u32,
@@ -34,10 +33,12 @@ impl GaplessPlayer {
     pub fn new(bytes: Vec<u8>, target_sample_rate: u32) -> Result<Self, GaplessError> {
         let active = StreamingDecoder::new(bytes, target_sample_rate)
             .map_err(|e| GaplessError::Corrupted(e.to_string()))?;
+        let residual = PcmRingBuffer::new(DEFAULT_FRAME_CAPACITY, 2)
+            .map_err(|e| GaplessError::Corrupted(e.to_string()))?;
         Ok(Self {
             active,
             next: None,
-            residual: VecDeque::new(),
+            residual,
             scratch: Vec::with_capacity(2048),
             total_frames_decoded: 0,
             target_sample_rate,
@@ -62,7 +63,7 @@ impl GaplessPlayer {
     pub fn decode_frames_into(&mut self, out: &mut Vec<f32>, n: usize) -> Result<(), GaplessError> {
         out.clear();
 
-        if self.ended && self.residual.is_empty() {
+        if self.ended && self.residual.available_frames() == 0 {
             return Ok(());
         }
 
@@ -72,17 +73,20 @@ impl GaplessPlayer {
         }
 
         // Drain residual first
-        while !self.residual.is_empty() && out.len() < target_samples {
-            if let Some(sample) = self.residual.pop_front() {
-                out.push(sample);
-            }
+        if self.residual.available_frames() > 0 {
+            let frames_to_pop = (target_samples - out.len()) / 2;
+            let popped = self.residual.pop_interleaved(frames_to_pop);
+            out.extend_from_slice(&popped);
         }
 
         while out.len() < target_samples && !self.ended {
             let remaining_frames = (target_samples - out.len()) / 2;
 
             self.scratch.clear();
-            match self.active.decode_chunk_into(remaining_frames, &mut self.scratch) {
+            match self
+                .active
+                .decode_chunk_into(remaining_frames, &mut self.scratch)
+            {
                 Ok(true) => {
                     if self.pending_skip_frames > 0 {
                         let chunk_frames = (self.scratch.len() / 2) as u64;
@@ -96,7 +100,16 @@ impl GaplessPlayer {
                         out.extend_from_slice(&self.scratch);
                     } else {
                         out.extend_from_slice(&self.scratch[..need]);
-                        self.residual.extend(self.scratch[need..].iter().copied());
+                        let residual_samples = &self.scratch[need..];
+                        let written = self
+                            .residual
+                            .push_interleaved(residual_samples)
+                            .map_err(|e| GaplessError::Corrupted(e.to_string()))?;
+                        if written * 2 < residual_samples.len() {
+                            return Err(GaplessError::Corrupted(
+                                "residual buffer overflow".to_string(),
+                            ));
+                        }
                     }
                 }
                 Ok(false) => {
@@ -123,7 +136,9 @@ impl GaplessPlayer {
     }
 
     pub fn seek_to_ms(&mut self, ms: f64) -> Result<(), GaplessError> {
-        self.active.seek_to_ms(ms).map_err(|e| GaplessError::Corrupted(e.to_string()))?;
+        self.active
+            .seek_to_ms(ms)
+            .map_err(|e| GaplessError::Corrupted(e.to_string()))?;
         self.residual.clear();
         self.pending_skip_frames = 0;
         self.total_frames_decoded = (ms * self.target_sample_rate as f64 / 1000.0) as u64;
@@ -345,9 +360,59 @@ mod tests {
         player.inject_pending_skip_frames_for_test(1000);
         player.seek_to_ms(100.0).unwrap();
         // Assert that pending skip frames are cleared
-        assert_eq!(player.pending_skip_frames, 0, "seek should clear pending skip frames");
+        assert_eq!(
+            player.pending_skip_frames, 0,
+            "seek should clear pending skip frames"
+        );
         // Decode after seek; if pending skip leaked through, we'd lose the first 1000 frames.
         let out = player.decode_frames(256).unwrap();
-        assert_eq!(out.len(), 256 * 2, "seek should consume the encoder-delay skip");
+        assert_eq!(
+            out.len(),
+            256 * 2,
+            "seek should consume the encoder-delay skip"
+        );
+    }
+
+    #[test]
+    fn residual_overflow_across_chunk_boundaries() {
+        let track_frames = 1000usize;
+        let mut player = GaplessPlayer::new(make_wav(track_frames), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        
+        // Decode a small amount to trigger fill and some residual
+        // If we ask for 10 frames, but it decodes a larger chunk (e.g. 512 frames), 
+        // 502 frames will go to residual.
+        let _ = player.decode_frames(10).unwrap();
+        assert!(player.residual.available_frames() > 0, "should have residual after small decode");
+
+        // Now decode the rest
+        let mut total_frames = 10;
+        loop {
+            let frames = player.decode_frames(256).unwrap();
+            if frames.is_empty() {
+                break;
+            }
+            total_frames += frames.len() / 2;
+        }
+
+        let expected_frames =
+            ((track_frames as f64 * DEFAULT_OUTPUT_SAMPLE_RATE as f64) / 44_100.0).round() as usize;
+        let tolerance = (expected_frames as f64 * 0.10) as usize + 64;
+        assert!(
+            total_frames.abs_diff(expected_frames) <= tolerance,
+            "total frames {total_frames} out of tolerance range ({} ± {})",
+            expected_frames,
+            tolerance,
+        );
+    }
+
+    #[test]
+    fn seek_clears_residual() {
+        let mut player = GaplessPlayer::new(make_wav(2000), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        // Trigger residual
+        let _ = player.decode_frames(10).unwrap();
+        assert!(player.residual.available_frames() > 0);
+
+        player.seek_to_ms(10.0).unwrap();
+        assert_eq!(player.residual.available_frames(), 0, "seek should clear residual");
     }
 }
