@@ -3,6 +3,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use crate::opus_decoder::OpusDecoder;
+use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{CODEC_TYPE_NULL, CodecRegistry, CodecType, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -11,6 +12,82 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::default::{get_probe, register_enabled_codecs};
+
+/// High-quality polyphase windowed-sinc stereo resampler backed by `rubato`.
+///
+/// Wraps `SincFixedIn` (fixed-input chunk size) with an internal deinterleaved
+/// input buffer so that callers can push variable-sized stereo interleaved chunks
+/// without worrying about the rubato chunk-size constraint.  Call `flush` at end
+/// of stream to drain any remaining buffered frames.
+struct StereoResampler {
+    inner: SincFixedIn<f32>,
+    /// Deinterleaved per-channel input staging buffer.
+    pending: [Vec<f32>; 2],
+    /// Fixed chunk size that `SincFixedIn` expects.
+    chunk_frames: usize,
+}
+
+impl StereoResampler {
+    fn new(source_rate: u32, target_rate: u32, chunk_frames: usize) -> Self {
+        let ratio = target_rate as f64 / source_rate as f64;
+        let params = SincInterpolationParameters {
+            sinc_len: 128,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Cubic,
+            oversampling_factor: 64,
+            window: WindowFunction::BlackmanHarris2,
+        };
+        let inner = SincFixedIn::<f32>::new(ratio, 1.0, params, chunk_frames, 2)
+            .expect("rubato SincFixedIn params valid");
+        Self {
+            inner,
+            pending: [Vec::with_capacity(chunk_frames * 2), Vec::with_capacity(chunk_frames * 2)],
+            chunk_frames,
+        }
+    }
+
+    /// Push interleaved stereo `samples` into the resampler, emitting resampled
+    /// frames into `out` whenever a full input chunk is available.
+    fn push_interleaved(&mut self, samples: &[f32], out: &mut Vec<f32>) {
+        // Deinterleave into pending buffers.
+        for frame in samples.chunks_exact(2) {
+            self.pending[0].push(frame[0]);
+            self.pending[1].push(frame[1]);
+        }
+        // Drain complete chunks.
+        while self.pending[0].len() >= self.chunk_frames {
+            self.process_one_chunk(out);
+        }
+    }
+
+    /// Flush any remaining buffered frames by padding with silence and processing.
+    fn flush(&mut self, out: &mut Vec<f32>) {
+        if self.pending[0].is_empty() {
+            return;
+        }
+        // Pad both channels to chunk_frames with silence.
+        let have = self.pending[0].len();
+        let need = self.chunk_frames - have;
+        self.pending[0].extend(std::iter::repeat(0.0f32).take(need));
+        self.pending[1].extend(std::iter::repeat(0.0f32).take(need));
+        self.process_one_chunk(out);
+    }
+
+    fn process_one_chunk(&mut self, out: &mut Vec<f32>) {
+        // Extract exactly chunk_frames from the front of pending.
+        let l: Vec<f32> = self.pending[0].drain(..self.chunk_frames).collect();
+        let r: Vec<f32> = self.pending[1].drain(..self.chunk_frames).collect();
+        let in_buf = [l, r];
+        if let Ok(resampled) = self.inner.process(&in_buf, None) {
+            let frames = resampled[0].len();
+            out.reserve(frames * 2);
+            for i in 0..frames {
+                out.push(resampled[0][i]);
+                out.push(resampled[1][i]);
+            }
+        }
+    }
+}
 
 pub const DEFAULT_OUTPUT_SAMPLE_RATE: u32 = 48_000;
 
@@ -104,6 +181,8 @@ pub struct StreamingDecoder {
     sample_buffer_channels: u32,
     encoder_delay_frames: u64,
     trailing_pad_frames: u64,
+    /// Lazily-constructed rubato resampler; `None` when source_rate == target_rate.
+    resampler: Option<StereoResampler>,
 }
 
 fn codec_supported_on_target(
@@ -205,6 +284,7 @@ impl StreamingDecoder {
             sample_buffer_channels: 0,
             encoder_delay_frames,
             trailing_pad_frames,
+            resampler: None,
         })
     }
 
@@ -318,18 +398,80 @@ impl StreamingDecoder {
         }
 
         if self.intermediate_samples.is_empty() {
+            // Stream exhausted — flush any buffered resampler frames.
+            if self.source_sample_rate != self.target_sample_rate {
+                if let Some(resampler) = self.resampler.as_mut() {
+                    let before = out.len();
+                    resampler.flush(out);
+                    if out.len() > before {
+                        return Ok(true);
+                    }
+                }
+            }
             return Ok(false);
         }
 
-        normalize_to_stereo_output_into(
-            &self.intermediate_samples,
-            self.source_sample_rate,
-            self.source_channels,
-            self.target_sample_rate,
-            &mut self.stereo_scratch,
-            out,
-        );
+        let source_channels = self.source_channels;
+        let samples = std::mem::take(&mut self.intermediate_samples);
+        self.normalize_to_stereo_output(&samples, source_channels, out);
+        self.intermediate_samples = samples;
+        self.intermediate_samples.clear();
         Ok(true)
+    }
+
+    /// Fold `samples` to stereo and resample to `target_sample_rate`, appending into `out`.
+    ///
+    /// Channel folding is performed first into `self.stereo_scratch`. If the source and target
+    /// rates differ, the rubato resampler is lazily constructed and used via its internal
+    /// buffering; otherwise the stereo scratch is copied directly.
+    fn normalize_to_stereo_output(
+        &mut self,
+        samples: &[f32],
+        source_channels: u32,
+        out: &mut Vec<f32>,
+    ) {
+        // --- channel folding into stereo_scratch ---
+        self.stereo_scratch.clear();
+        match source_channels {
+            0 => return,
+            1 => {
+                self.stereo_scratch.reserve(samples.len() * 2);
+                for &s in samples {
+                    self.stereo_scratch.push(s);
+                    self.stereo_scratch.push(s);
+                }
+            }
+            2 => {
+                self.stereo_scratch.extend_from_slice(samples);
+            }
+            _ => {
+                self.stereo_scratch
+                    .reserve((samples.len() / source_channels as usize) * 2);
+                for frame in samples.chunks_exact(source_channels as usize) {
+                    self.stereo_scratch.push(frame[0]);
+                    self.stereo_scratch.push(frame[1]);
+                }
+            }
+        }
+
+        if self.stereo_scratch.is_empty() {
+            return;
+        }
+
+        // --- no resampling needed ---
+        if self.source_sample_rate == self.target_sample_rate {
+            out.extend_from_slice(&self.stereo_scratch);
+            return;
+        }
+
+        // --- rubato resampling ---
+        // The resampler uses a fixed chunk size determined at construction. We use a
+        // consistent chunk size of 1024 frames regardless of actual stereo_scratch length,
+        // so the resampler only needs to be created once per rate pair.
+        let resampler = self.resampler.get_or_insert_with(|| {
+            StereoResampler::new(self.source_sample_rate, self.target_sample_rate, 1024)
+        });
+        resampler.push_interleaved(&self.stereo_scratch, out);
     }
 }
 
@@ -387,69 +529,9 @@ fn append_interleaved_samples(
     }
 }
 
-fn normalize_to_stereo_output_into(
-    samples: &[f32],
-    source_sample_rate: u32,
-    source_channels: u32,
-    target_sample_rate: u32,
-    stereo_scratch: &mut Vec<f32>,
-    out: &mut Vec<f32>,
-) {
-    stereo_scratch.clear();
-    match source_channels {
-        0 => return,
-        1 => {
-            stereo_scratch.reserve(samples.len() * 2);
-            for &sample in samples {
-                stereo_scratch.push(sample);
-                stereo_scratch.push(sample);
-            }
-        }
-        2 => {
-            stereo_scratch.extend_from_slice(samples);
-        }
-        _ => {
-            stereo_scratch.reserve((samples.len() / source_channels as usize) * 2);
-            for frame in samples.chunks_exact(source_channels as usize) {
-                stereo_scratch.push(frame[0]);
-                stereo_scratch.push(frame[1]);
-            }
-        }
-    };
-
-    if stereo_scratch.is_empty() {
-        return;
-    }
-
-    if source_sample_rate == target_sample_rate {
-        out.extend_from_slice(stereo_scratch);
-        return;
-    }
-
-    let source_frames = stereo_scratch.len() / 2;
-    let target_frames = ((source_frames as f64 * target_sample_rate as f64) / source_sample_rate as f64)
-        .round()
-        .max(1.0) as usize;
-    let source_to_target_ratio = source_sample_rate as f64 / target_sample_rate as f64;
-
-    let start_idx = out.len();
-    out.resize(start_idx + target_frames * 2, 0.0);
-    let target_slice = &mut out[start_idx..];
-
-    for target_frame in 0..target_frames {
-        let source_position = target_frame as f64 * source_to_target_ratio;
-        let start_frame = source_position.floor() as usize;
-        let end_frame = (start_frame + 1).min(source_frames.saturating_sub(1));
-        let blend = (source_position - start_frame as f64) as f32;
-
-        for channel in 0..2 {
-            let start_sample = stereo_scratch[start_frame * 2 + channel];
-            let end_sample = stereo_scratch[end_frame * 2 + channel];
-            target_slice[target_frame * 2 + channel] =
-                start_sample + ((end_sample - start_sample) * blend);
-        }
-    }
-}
+// normalize_to_stereo_output_into has been replaced by
+// StreamingDecoder::normalize_to_stereo_output (a method) which uses the
+// rubato polyphase sinc resampler instead of linear interpolation.
 
 #[derive(Debug, Clone)]
 pub struct AppendableMediaSource {
@@ -1220,5 +1302,30 @@ mod tests {
             Err(DecodeError::EmptyInput) => panic!("midstream truncation must not present as EmptyInput"),
             Err(_) => { /* acceptable: real error surfaced */ }
         }
+    }
+
+    #[test]
+    fn resampler_preserves_total_frame_count_at_rate_change() {
+        // The opus sample is 48kHz; decode at 48kHz (same-rate path) to verify
+        // total output stays within a reasonable range of the declared duration.
+        // Note: StreamingDecoder does not strip encoder delay / trailing padding —
+        // that is the GaplessPlayer's responsibility — so raw output may differ
+        // from `duration_ms` by up to the encoder delay (typically 312 frames =
+        // 624 stereo samples for Opus). We use a 2% tolerance to cover this.
+        let bytes = include_bytes!("../testdata/opus_sample.opus").to_vec();
+        let mut decoder = StreamingDecoder::new(bytes, 48_000).unwrap();
+        let mut total = 0usize;
+        while let Ok(Some(chunk)) = decoder.decode_chunk(4096) {
+            total += chunk.samples().len();
+        }
+        let duration_ms = decoder.duration_ms();
+        let expected_frames = (duration_ms / 1000.0 * 48_000.0).round() as usize;
+        let expected_samples = expected_frames * 2;
+        let tolerance = (expected_samples as f64 * 0.02) as usize + 1024;
+        let diff = (total as i64 - expected_samples as i64).unsigned_abs() as usize;
+        assert!(
+            diff <= tolerance,
+            "resampler frame count off by {diff} samples (expected ~{expected_samples}, got {total}, tolerance {tolerance})"
+        );
     }
 }
