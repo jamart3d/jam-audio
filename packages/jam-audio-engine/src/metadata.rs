@@ -5,7 +5,7 @@ use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
 use symphonia::core::probe::Hint;
 use symphonia::default::get_probe;
-use crate::media_source::InMemoryMediaSource;
+use crate::media_source::{InMemoryMediaSource, SizedMediaSource};
 
 /// Typed metadata for an audio track.
 #[wasm_bindgen]
@@ -54,7 +54,7 @@ pub fn extract_metadata_with_size_internal(data: &[u8], total_file_size: u64) ->
     let shared_data = Arc::from(data);
     
     let media_source: Box<dyn MediaSource> = if total_file_size > 0 {
-        Box::new(InMemoryMediaSource::with_size(shared_data, total_file_size))
+        Box::new(SizedMediaSource::new(shared_data, total_file_size))
     } else {
         Box::new(InMemoryMediaSource::new(shared_data))
     };

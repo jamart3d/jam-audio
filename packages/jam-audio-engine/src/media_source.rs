@@ -18,8 +18,6 @@ use symphonia::core::io::MediaSource;
 /// download is available but the full file size is known.
 pub(crate) struct InMemoryMediaSource {
     inner: Cursor<Arc<[u8]>>,
-    /// If set, overrides the total size of the media for seeking and length reporting.
-    total_file_size: Option<u64>,
 }
 
 impl InMemoryMediaSource {
@@ -28,20 +26,6 @@ impl InMemoryMediaSource {
     pub(crate) fn new(bytes: Arc<[u8]>) -> Self {
         Self {
             inner: Cursor::new(bytes),
-            total_file_size: None,
-        }
-    }
-
-    /// Creates a new `InMemoryMediaSource` with an explicit total file size.
-    ///
-    /// This is necessary to spoof the file size for partially downloaded files
-    /// during metadata extraction. When seeking from the end (e.g., to read ID3v1 tags),
-    /// the offset will be calculated relative to this `total_file_size` rather than
-    /// the length of the currently buffered bytes.
-    pub(crate) fn with_size(bytes: Arc<[u8]>, total_file_size: u64) -> Self {
-        Self {
-            inner: Cursor::new(bytes),
-            total_file_size: Some(total_file_size),
         }
     }
 
@@ -59,21 +43,7 @@ impl Read for InMemoryMediaSource {
 
 impl Seek for InMemoryMediaSource {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        if let Some(total_size) = self.total_file_size {
-            match pos {
-                SeekFrom::End(n) => {
-                    let target = if n >= 0 {
-                        total_size.saturating_add(n as u64)
-                    } else {
-                        total_size.saturating_sub(n.unsigned_abs())
-                    };
-                    self.inner.seek(SeekFrom::Start(target))
-                }
-                _ => self.inner.seek(pos),
-            }
-        } else {
-            self.inner.seek(pos)
-        }
+        self.inner.seek(pos)
     }
 }
 
@@ -83,7 +53,60 @@ impl MediaSource for InMemoryMediaSource {
     }
 
     fn byte_len(&self) -> Option<u64> {
-        Some(self.total_file_size.unwrap_or_else(|| self.inner.get_ref().len() as u64))
+        Some(self.inner.get_ref().len() as u64)
+    }
+}
+
+/// An in-memory media source backed by an `Arc<[u8]>` with an explicit total file size.
+///
+/// This is necessary to spoof the file size for partially downloaded files
+/// during metadata extraction. When seeking from the end (e.g., to read ID3v1 tags),
+/// the offset will be calculated relative to this `total_file_size` rather than
+/// the length of the currently buffered bytes.
+pub(crate) struct SizedMediaSource {
+    inner: Cursor<Arc<[u8]>>,
+    total_file_size: u64,
+}
+
+impl SizedMediaSource {
+    /// Creates a new `SizedMediaSource` using the provided byte array and explicit total size.
+    pub(crate) fn new(bytes: Arc<[u8]>, total_file_size: u64) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            total_file_size,
+        }
+    }
+}
+
+impl Read for SizedMediaSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Seek for SizedMediaSource {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match pos {
+            SeekFrom::End(n) => {
+                let target = if n >= 0 {
+                    self.total_file_size.saturating_add(n as u64)
+                } else {
+                    self.total_file_size.saturating_sub(n.unsigned_abs())
+                };
+                self.inner.seek(SeekFrom::Start(target))
+            }
+            _ => self.inner.seek(pos),
+        }
+    }
+}
+
+impl MediaSource for SizedMediaSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.total_file_size)
     }
 }
 
@@ -106,10 +129,10 @@ mod tests {
     }
 
     #[test]
-    fn test_in_memory_media_source_with_size_seek_end() {
+    fn test_sized_media_source_seek_end() {
         // We have 5 bytes buffered, but the file size is spoofed as 100.
         let data: Arc<[u8]> = Arc::from(vec![1, 2, 3, 4, 5]);
-        let mut source = InMemoryMediaSource::with_size(data, 100);
+        let mut source = SizedMediaSource::new(data, 100);
 
         // Seeking from End(-10) should result in absolute position 90.
         // The underlying cursor will just accept 90 as the position.
