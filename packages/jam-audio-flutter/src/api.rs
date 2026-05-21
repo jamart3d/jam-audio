@@ -1,5 +1,5 @@
 #![allow(unexpected_cfgs)]
-use jam_audio_engine::{extract_metadata_internal, extract_artwork_internal};
+use jam_audio_engine::{extract_artwork_internal, extract_metadata_internal};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioMetadata {

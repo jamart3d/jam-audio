@@ -137,13 +137,13 @@ mod tests {
         // Seeking from End(-10) should result in absolute position 90.
         // The underlying cursor will just accept 90 as the position.
         assert_eq!(source.seek(SeekFrom::End(-10)).unwrap(), 90);
-        
+
         // Seeking from End(-150) should saturate to 0.
         assert_eq!(source.seek(SeekFrom::End(-150)).unwrap(), 0);
-        
+
         // Seeking from End(10) should saturate_add to 110.
         assert_eq!(source.seek(SeekFrom::End(10)).unwrap(), 110);
-        
+
         // Seek from start should still work normally
         assert_eq!(source.seek(SeekFrom::Start(50)).unwrap(), 50);
 

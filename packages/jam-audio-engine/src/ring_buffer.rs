@@ -272,7 +272,10 @@ mod tests {
         assert_eq!(buffer.push_interleaved(&in2).unwrap(), 4);
 
         let out2 = buffer.pop_interleaved(8);
-        let expected: Vec<f32> = (8..16).map(|i| i as f32).chain((100..108).map(|i| i as f32)).collect();
+        let expected: Vec<f32> = (8..16)
+            .map(|i| i as f32)
+            .chain((100..108).map(|i| i as f32))
+            .collect();
         assert_eq!(out2, expected);
     }
 }

@@ -1,7 +1,7 @@
-mod frb_generated;
 pub mod api;
+mod frb_generated;
 
 pub use api::*;
 pub use jam_audio_engine::{
-    decode_audio_bytes, GaplessPlayer, StreamingDecoder, WindowedMediaSource,
+    GaplessPlayer, StreamingDecoder, WindowedMediaSource, decode_audio_bytes,
 };

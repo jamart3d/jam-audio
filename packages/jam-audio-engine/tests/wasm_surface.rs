@@ -1,6 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
-use jam_audio_engine::{WasmGaplessPlayer, StreamingPlayer, WindowedStreamingPlayer};
+use jam_audio_engine::{StreamingPlayer, WasmGaplessPlayer, WindowedStreamingPlayer};
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
@@ -11,7 +11,10 @@ const OPUS: &[u8] = include_bytes!("../testdata/opus_sample.opus");
 fn gapless_player_decodes_one_chunk() {
     let mut player = WasmGaplessPlayer::new(OPUS.to_vec(), None).expect("ctor");
     let result = player.decode_frames(4096);
-    assert!(!result.is_null(), "decode_frames should return PCM on the first call");
+    assert!(
+        !result.is_null(),
+        "decode_frames should return PCM on the first call"
+    );
 }
 
 #[wasm_bindgen_test]

@@ -1,5 +1,5 @@
 use crate::decoder::{DecodeError, StreamingDecoder};
-use crate::ring_buffer::{PcmRingBuffer, DEFAULT_FRAME_CAPACITY};
+use crate::ring_buffer::{DEFAULT_FRAME_CAPACITY, PcmRingBuffer};
 
 #[derive(Debug)]
 pub enum GaplessError {
@@ -376,13 +376,17 @@ mod tests {
     #[test]
     fn residual_overflow_across_chunk_boundaries() {
         let track_frames = 1000usize;
-        let mut player = GaplessPlayer::new(make_wav(track_frames), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
-        
+        let mut player =
+            GaplessPlayer::new(make_wav(track_frames), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+
         // Decode a small amount to trigger fill and some residual
-        // If we ask for 10 frames, but it decodes a larger chunk (e.g. 512 frames), 
+        // If we ask for 10 frames, but it decodes a larger chunk (e.g. 512 frames),
         // 502 frames will go to residual.
         let _ = player.decode_frames(10).unwrap();
-        assert!(player.residual.available_frames() > 0, "should have residual after small decode");
+        assert!(
+            player.residual.available_frames() > 0,
+            "should have residual after small decode"
+        );
 
         // Now decode the rest
         let mut total_frames = 10;
@@ -413,6 +417,10 @@ mod tests {
         assert!(player.residual.available_frames() > 0);
 
         player.seek_to_ms(10.0).unwrap();
-        assert_eq!(player.residual.available_frames(), 0, "seek should clear residual");
+        assert_eq!(
+            player.residual.available_frames(),
+            0,
+            "seek should clear residual"
+        );
     }
 }

@@ -360,8 +360,16 @@ impl<S: StreamingSource> StreamingCore<S> {
 impl StreamingCore<AppendableMediaSource> {
     fn appendable(target_sample_rate: u32, max_buffered_mb: u32) -> Self {
         let max_bytes = (max_buffered_mb as usize).saturating_mul(1024 * 1024);
-        let header_reserve = if max_bytes == 0 { 0 } else { DEFAULT_HEADER_RESERVE_BYTES };
-        let keep_behind = if max_bytes == 0 { 0 } else { DEFAULT_KEEP_BEHIND_BYTES };
+        let header_reserve = if max_bytes == 0 {
+            0
+        } else {
+            DEFAULT_HEADER_RESERVE_BYTES
+        };
+        let keep_behind = if max_bytes == 0 {
+            0
+        } else {
+            DEFAULT_KEEP_BEHIND_BYTES
+        };
         Self::from_source(
             AppendableMediaSource::with_bounds(max_bytes, header_reserve, keep_behind),
             target_sample_rate,
@@ -377,7 +385,11 @@ impl StreamingCore<AppendableMediaSource> {
 impl StreamingCore<WindowedMediaSource> {
     fn windowed(total_size: Option<u64>, max_window_mb: u32, target_sample_rate: u32) -> Self {
         let max_window_bytes = (max_window_mb as usize).saturating_mul(1024 * 1024);
-        let mut source = WindowedMediaSource::new(max_window_bytes, DEFAULT_HEADER_RESERVE_BYTES, DEFAULT_KEEP_BEHIND_BYTES);
+        let mut source = WindowedMediaSource::new(
+            max_window_bytes,
+            DEFAULT_HEADER_RESERVE_BYTES,
+            DEFAULT_KEEP_BEHIND_BYTES,
+        );
         source.set_total_size(total_size);
         Self::from_source(source, target_sample_rate)
     }
@@ -585,7 +597,8 @@ fn decode_frames_impl(
         let need_frames = (target_samples - out.len()) / 2;
         state.scratch.clear();
 
-        let decode_res = state.decoder
+        let decode_res = state
+            .decoder
             .as_mut()
             .ok_or_else(|| DecodeError::Symphonia("decoder unexpectedly absent".into()))?
             .decode_chunk_into(need_frames, state.scratch);
@@ -596,7 +609,9 @@ fn decode_frames_impl(
                     out.extend_from_slice(state.scratch);
                 } else {
                     out.extend_from_slice(&state.scratch[..need_samples]);
-                    state.residual.extend(state.scratch[need_samples..].iter().copied());
+                    state
+                        .residual
+                        .extend(state.scratch[need_samples..].iter().copied());
                 }
             }
             Ok(false) => {

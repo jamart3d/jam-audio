@@ -1,11 +1,11 @@
-use wasm_bindgen::prelude::*;
+use crate::media_source::{InMemoryMediaSource, SizedMediaSource};
 use std::sync::Arc;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
 use symphonia::core::probe::Hint;
 use symphonia::default::get_probe;
-use crate::media_source::{InMemoryMediaSource, SizedMediaSource};
+use wasm_bindgen::prelude::*;
 
 /// Typed metadata for an audio track.
 #[wasm_bindgen]
@@ -52,13 +52,13 @@ pub fn extract_metadata_with_size_internal(data: &[u8], total_file_size: u64) ->
     }
 
     let shared_data = Arc::from(data);
-    
+
     let media_source: Box<dyn MediaSource> = if total_file_size > 0 {
         Box::new(SizedMediaSource::new(shared_data, total_file_size))
     } else {
         Box::new(InMemoryMediaSource::new(shared_data))
     };
-    
+
     let media_stream = MediaSourceStream::new(media_source, Default::default());
     let hint = Hint::new();
 
@@ -100,15 +100,25 @@ pub fn extract_metadata_with_size_internal(data: &[u8], total_file_size: u64) ->
 #[wasm_bindgen]
 impl AudioMetadata {
     #[wasm_bindgen(getter)]
-    pub fn title(&self) -> Option<String> { self.title.clone() }
+    pub fn title(&self) -> Option<String> {
+        self.title.clone()
+    }
     #[wasm_bindgen(getter)]
-    pub fn artist(&self) -> Option<String> { self.artist.clone() }
+    pub fn artist(&self) -> Option<String> {
+        self.artist.clone()
+    }
     #[wasm_bindgen(getter)]
-    pub fn album(&self) -> Option<String> { self.album.clone() }
+    pub fn album(&self) -> Option<String> {
+        self.album.clone()
+    }
     #[wasm_bindgen(getter = trackNumber)]
-    pub fn track_number(&self) -> Option<u32> { self.track_number }
+    pub fn track_number(&self) -> Option<u32> {
+        self.track_number
+    }
     #[wasm_bindgen(getter = durationMs)]
-    pub fn duration_ms(&self) -> Option<f64> { self.duration_ms }
+    pub fn duration_ms(&self) -> Option<f64> {
+        self.duration_ms
+    }
 }
 
 #[wasm_bindgen(js_name = extractMetadata)]
@@ -120,10 +130,6 @@ pub fn extract_metadata(data: &[u8]) -> AudioMetadata {
 pub fn extract_metadata_with_size(data: &[u8], total_file_size: u64) -> AudioMetadata {
     extract_metadata_with_size_internal(data, total_file_size)
 }
-
-
-
-
 
 pub fn extract_artwork_internal(data: &[u8]) -> Option<Vec<u8>> {
     if data.is_empty() {
@@ -187,7 +193,7 @@ mod tests {
     fn extract_metadata_internal_parses_sample_file() {
         let data = std::fs::read("testdata/opus_sample.opus").expect("failed to read sample file");
         let metadata = extract_metadata_internal(&data);
-        
+
         assert_eq!(metadata.duration_ms, Some(1020.0));
         assert!(metadata.title.is_none());
         assert!(metadata.artist.is_none());
@@ -196,7 +202,7 @@ mod tests {
     #[test]
     fn extract_metadata_with_size_internal_uses_provided_size() {
         let data = std::fs::read("testdata/opus_sample.opus").expect("failed to read sample file");
-        
+
         // For Opus, duration is usually in the container, so providing a wrong size
         // might not change duration, but we can at least verify it doesn't crash
         // and returns the same metadata if the size is correct or irrelevant.
@@ -217,17 +223,26 @@ mod tests {
             let offset = frame_idx * FRAME_LEN;
             data[offset..offset + FRAME_HEADER.len()].copy_from_slice(&FRAME_HEADER);
         }
-        
+
         // Without a larger file size hint, duration should reflect the buffered bytes only.
         let meta1 = extract_metadata_with_size_internal(&data, 0);
         let dur1 = meta1.duration_ms.unwrap_or(0.0);
-        
+
         // With 1MB total_file_size, duration should be scaled (~65s)
         let meta2 = extract_metadata_with_size_internal(&data, 1024 * 1024);
         let dur2 = meta2.duration_ms.unwrap_or(0.0);
-        
-        assert!(dur2 > dur1 * 100.0, "Duration should scale with total_file_size. dur1: {}, dur2: {}", dur1, dur2);
+
+        assert!(
+            dur2 > dur1 * 100.0,
+            "Duration should scale with total_file_size. dur1: {}, dur2: {}",
+            dur1,
+            dur2
+        );
         // 1MB @ 128kbps = 1024*1024*8 / 128000 = 65.536s
-        assert!(dur2 > 60000.0 && dur2 < 70000.0, "Duration {}ms should be approx 65s", dur2);
+        assert!(
+            dur2 > 60000.0 && dur2 < 70000.0,
+            "Duration {}ms should be approx 65s",
+            dur2
+        );
     }
 }
