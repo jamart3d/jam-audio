@@ -86,7 +86,11 @@ pub struct StreamingDecoder {
     format: Box<dyn symphonia::core::formats::FormatReader>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
+    /// Most recently observed per-packet sample rate. Treat as a runtime hint.
+    /// For encoder-delay / trailing-pad math, use `init_source_sample_rate`.
     source_sample_rate: u32,
+    #[allow(dead_code)]
+    init_source_sample_rate: u32,
     source_channels: u32,
     target_sample_rate: u32,
     duration_ms: f64,
@@ -175,9 +179,10 @@ impl StreamingDecoder {
             0.0
         };
 
+        let init_source_sample_rate = source_sample_rate;
         let raw_delay = track.codec_params.delay.unwrap_or(0) as f64;
         let raw_padding = track.codec_params.padding.unwrap_or(0) as f64;
-        let rate_ratio = target_sample_rate as f64 / source_sample_rate as f64;
+        let rate_ratio = target_sample_rate as f64 / init_source_sample_rate as f64;
         let encoder_delay_frames = (raw_delay * rate_ratio).round() as u64;
         let trailing_pad_frames = (raw_padding * rate_ratio).round() as u64;
 
@@ -186,6 +191,7 @@ impl StreamingDecoder {
             decoder,
             track_id: track.id,
             source_sample_rate,
+            init_source_sample_rate,
             source_channels,
             target_sample_rate,
             duration_ms,
@@ -953,6 +959,7 @@ mod tests {
             f.debug_struct("StreamingDecoder")
                 .field("track_id", &self.track_id)
                 .field("source_sample_rate", &self.source_sample_rate)
+                .field("init_source_sample_rate", &self.init_source_sample_rate)
                 .field("source_channels", &self.source_channels)
                 .field("duration_ms", &self.duration_ms)
                 .field("intermediate_samples_cap", &self.intermediate_samples.capacity())
