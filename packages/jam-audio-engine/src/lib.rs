@@ -239,59 +239,19 @@ impl WindowedStreamingPlayerCore {
             }
         }
 
-        let target_samples = target_frames as usize * 2;
+        let has_pending_seek = self.has_pending_seek();
+        let is_finalized = self.is_finalized();
 
-        while !self.residual.is_empty() && out.len() < target_samples {
-            if let Some(sample) = self.residual.pop_front() {
-                out.push(sample);
-            }
-        }
-
-        if out.len() == target_samples {
-            self.frames_decoded += (out.len() / 2) as u64;
-            return Ok(StreamingFrameResult::Success);
-        }
-
-        while out.len() < target_samples {
-            let need_frames = (target_samples - out.len()) / 2;
-            self.scratch.clear();
-
-            let decode_res = self.decoder
-                .as_mut()
-                .ok_or_else(|| DecodeError::Symphonia("decoder unexpectedly absent".into()))?
-                .decode_chunk_into(need_frames, &mut self.scratch);
-            match decode_res {
-                Ok(true) => {
-                    let need_samples = target_samples - out.len();
-                    if self.scratch.len() <= need_samples {
-                        out.extend_from_slice(&self.scratch);
-                    } else {
-                        out.extend_from_slice(&self.scratch[..need_samples]);
-                        self.residual.extend(self.scratch[need_samples..].iter().copied());
-                    }
-                }
-                Ok(false) => {
-                    if self.has_pending_seek() {
-                        return Ok(StreamingFrameResult::Waiting);
-                    }
-                    if out.is_empty() {
-                        return Ok(if self.is_finalized() { StreamingFrameResult::EndOfStream } else { StreamingFrameResult::Waiting });
-                    } else {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    if self.has_pending_seek() {
-                        return Ok(StreamingFrameResult::Waiting);
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-        }
-
-        self.frames_decoded += (out.len() / 2) as u64;
-        Ok(StreamingFrameResult::Success)
+        decode_frames_impl(
+            &mut self.decoder,
+            &mut self.residual,
+            &mut self.scratch,
+            &mut self.frames_decoded,
+            target_frames,
+            out,
+            has_pending_seek,
+            is_finalized,
+        )
     }
 
     fn try_initialize_decoder(&mut self, force: bool) -> Result<bool, DecodeError> {
@@ -561,52 +521,18 @@ impl StreamingPlayerCore {
             }
         }
 
-        let target_samples = target_frames as usize * 2;
+        let is_finalized = self.is_finalized();
 
-        while !self.residual.is_empty() && out.len() < target_samples {
-            if let Some(sample) = self.residual.pop_front() {
-                out.push(sample);
-            }
-        }
-
-        if out.len() == target_samples {
-            self.frames_decoded += (out.len() / 2) as u64;
-            return Ok(StreamingFrameResult::Success);
-        }
-
-        while out.len() < target_samples {
-            let need_frames = (target_samples - out.len()) / 2;
-            self.scratch.clear();
-
-            let decode_res = self.decoder
-                .as_mut()
-                .ok_or_else(|| DecodeError::Symphonia("decoder unexpectedly absent".into()))?
-                .decode_chunk_into(need_frames, &mut self.scratch);
-            match decode_res {
-                Ok(true) => {
-                    let need_samples = target_samples - out.len();
-                    if self.scratch.len() <= need_samples {
-                        out.extend_from_slice(&self.scratch);
-                    } else {
-                        out.extend_from_slice(&self.scratch[..need_samples]);
-                        self.residual.extend(self.scratch[need_samples..].iter().copied());
-                    }
-                }
-                Ok(false) => {
-                    if out.is_empty() {
-                        return Ok(if self.is_finalized() { StreamingFrameResult::EndOfStream } else { StreamingFrameResult::Waiting });
-                    } else {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-
-        self.frames_decoded += (out.len() / 2) as u64;
-        Ok(StreamingFrameResult::Success)
+        decode_frames_impl(
+            &mut self.decoder,
+            &mut self.residual,
+            &mut self.scratch,
+            &mut self.frames_decoded,
+            target_frames,
+            out,
+            false,
+            is_finalized,
+        )
     }
 
     fn try_initialize_decoder(&mut self) -> Result<bool, DecodeError> {
@@ -643,6 +569,71 @@ impl StreamingPlayerCore {
     fn is_finalized(&self) -> bool {
         self.source.with(|s| s.is_finalized())
     }
+}
+
+fn decode_frames_impl(
+    decoder: &mut Option<StreamingDecoder>,
+    residual: &mut VecDeque<f32>,
+    scratch: &mut Vec<f32>,
+    frames_decoded: &mut u64,
+    target_frames: u32,
+    out: &mut Vec<f32>,
+    has_pending_seek: bool,
+    is_finalized: bool,
+) -> Result<StreamingFrameResult, DecodeError> {
+    let target_samples = target_frames as usize * 2;
+
+    while !residual.is_empty() && out.len() < target_samples {
+        if let Some(sample) = residual.pop_front() {
+            out.push(sample);
+        }
+    }
+
+    if out.len() == target_samples {
+        *frames_decoded += (out.len() / 2) as u64;
+        return Ok(StreamingFrameResult::Success);
+    }
+
+    while out.len() < target_samples {
+        let need_frames = (target_samples - out.len()) / 2;
+        scratch.clear();
+
+        let decode_res = decoder
+            .as_mut()
+            .ok_or_else(|| DecodeError::Symphonia("decoder unexpectedly absent".into()))?
+            .decode_chunk_into(need_frames, scratch);
+        match decode_res {
+            Ok(true) => {
+                let need_samples = target_samples - out.len();
+                if scratch.len() <= need_samples {
+                    out.extend_from_slice(scratch);
+                } else {
+                    out.extend_from_slice(&scratch[..need_samples]);
+                    residual.extend(scratch[need_samples..].iter().copied());
+                }
+            }
+            Ok(false) => {
+                if has_pending_seek {
+                    return Ok(StreamingFrameResult::Waiting);
+                }
+                if out.is_empty() {
+                    return Ok(if is_finalized { StreamingFrameResult::EndOfStream } else { StreamingFrameResult::Waiting });
+                } else {
+                    break;
+                }
+            }
+            Err(e) => {
+                if has_pending_seek {
+                    return Ok(StreamingFrameResult::Waiting);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    *frames_decoded += (out.len() / 2) as u64;
+    Ok(StreamingFrameResult::Success)
 }
 
 #[cfg(test)]
