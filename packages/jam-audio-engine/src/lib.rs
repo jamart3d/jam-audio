@@ -108,20 +108,19 @@ fn gapless_error_to_js(kind: &str, message: &str) -> JsValue {
 }
 
 // ============================================================================
-// SINGLE-THREADED INVARIANT NOTE:
-// The following MediaSource wrappers (SharedWindowedMediaSource,
-// SharedAppendableMediaSource) use `Rc<RefCell<>>` and implement `Send + Sync`.
+// SINGLE-THREADED INVARIANT NOTE (WASM ONLY):
+// The following MediaSource wrapper (SharedMediaSource) uses `Rc<RefCell<>>` and
+// implements `Send + Sync` on WASM targets.
 // This is ONLY valid because the current crate runtime (Wasm) is strictly
-// single-threaded. Do NOT use these wrappers in a multithreaded native context.
+// single-threaded.
 // ============================================================================
 
-// Internal bridge between WindowedMediaSource and Symphonia
-struct SharedWindowedMediaSource {
-    inner: SharedCell<WindowedMediaSource>,
+struct SharedMediaSource<T: Read + Seek + MediaSource + 'static> {
+    inner: SharedCell<T>,
 }
 
-impl SharedWindowedMediaSource {
-    fn new(inner: SharedCell<WindowedMediaSource>) -> Self {
+impl<T: Read + Seek + MediaSource + 'static> SharedMediaSource<T> {
+    fn new(inner: SharedCell<T>) -> Self {
         Self { inner }
     }
 }
@@ -130,62 +129,23 @@ impl SharedWindowedMediaSource {
 // is not Send/Sync but no thread boundary is ever crossed at runtime.
 // Symphonia requires Send + Sync on MediaSource; this satisfies that bound.
 #[cfg(target_arch = "wasm32")]
-unsafe impl Send for SharedWindowedMediaSource {}
+unsafe impl<T: Read + Seek + MediaSource + 'static> Send for SharedMediaSource<T> {}
 #[cfg(target_arch = "wasm32")]
-unsafe impl Sync for SharedWindowedMediaSource {}
+unsafe impl<T: Read + Seek + MediaSource + 'static> Sync for SharedMediaSource<T> {}
 
-impl Read for SharedWindowedMediaSource {
+impl<T: Read + Seek + MediaSource + 'static> Read for SharedMediaSource<T> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.inner.with_mut(|s| s.read(buf))
     }
 }
 
-impl Seek for SharedWindowedMediaSource {
+impl<T: Read + Seek + MediaSource + 'static> Seek for SharedMediaSource<T> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
         self.inner.with_mut(|s| s.seek(pos))
     }
 }
 
-impl MediaSource for SharedWindowedMediaSource {
-    fn is_seekable(&self) -> bool {
-        self.inner.with(|s| s.is_seekable())
-    }
-
-    fn byte_len(&self) -> Option<u64> {
-        self.inner.with(|s| s.byte_len())
-    }
-}
-
-// Internal bridge between AppendableMediaSource and Symphonia
-struct SharedAppendableMediaSource {
-    inner: SharedCell<AppendableMediaSource>,
-}
-
-impl SharedAppendableMediaSource {
-    fn new(inner: SharedCell<AppendableMediaSource>) -> Self {
-        Self { inner }
-    }
-}
-
-// SAFETY: Same single-threaded Wasm invariant as SharedWindowedMediaSource above.
-#[cfg(target_arch = "wasm32")]
-unsafe impl Send for SharedAppendableMediaSource {}
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for SharedAppendableMediaSource {}
-
-impl Read for SharedAppendableMediaSource {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.with_mut(|s| s.read(buf))
-    }
-}
-
-impl Seek for SharedAppendableMediaSource {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.inner.with_mut(|s| s.seek(pos))
-    }
-}
-
-impl MediaSource for SharedAppendableMediaSource {
+impl<T: Read + Seek + MediaSource + 'static> MediaSource for SharedMediaSource<T> {
     fn is_seekable(&self) -> bool {
         self.inner.with(|s| s.is_seekable())
     }
@@ -350,7 +310,7 @@ impl WindowedStreamingPlayerCore {
             return Ok(false);
         }
 
-        let shared_source = SharedWindowedMediaSource::new(self.source.clone());
+        let shared_source = SharedMediaSource::new(self.source.clone());
 
         match StreamingDecoder::from_media_source(shared_source, self.target_sample_rate) {
             Ok(decoder) => {
@@ -663,7 +623,7 @@ impl StreamingPlayerCore {
             return Ok(false);
         }
 
-        let shared_source = SharedAppendableMediaSource::new(self.source.clone());
+        let shared_source = SharedMediaSource::new(self.source.clone());
 
         match StreamingDecoder::from_media_source(shared_source, self.target_sample_rate) {
             Ok(decoder) => {
