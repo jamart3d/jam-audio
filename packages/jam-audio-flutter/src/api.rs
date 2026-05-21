@@ -13,11 +13,11 @@ pub struct AudioMetadata {
 impl From<jam_audio_engine::AudioMetadata> for AudioMetadata {
     fn from(other: jam_audio_engine::AudioMetadata) -> Self {
         Self {
-            title: other.title,
-            artist: other.artist,
-            album: other.album,
-            track_number: other.track_number,
-            duration_ms: other.duration_ms,
+            title: other.title(),
+            artist: other.artist(),
+            album: other.album(),
+            track_number: other.track_number(),
+            duration_ms: other.duration_ms(),
         }
     }
 }

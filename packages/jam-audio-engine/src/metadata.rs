@@ -1,5 +1,4 @@
 use wasm_bindgen::prelude::*;
-use js_sys::{Object, Reflect};
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use symphonia::core::formats::FormatOptions;
@@ -10,18 +9,19 @@ use symphonia::default::get_probe;
 use crate::decoder::InMemoryMediaSource;
 
 /// Typed metadata for an audio track.
+#[wasm_bindgen]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AudioMetadata {
     /// Track title.
-    pub title: Option<String>,
+    title: Option<String>,
     /// Primary artist.
-    pub artist: Option<String>,
+    artist: Option<String>,
     /// Album name.
-    pub album: Option<String>,
+    album: Option<String>,
     /// Track number on the album.
-    pub track_number: Option<u32>,
+    track_number: Option<u32>,
     /// Total duration in milliseconds.
-    pub duration_ms: Option<f64>,
+    duration_ms: Option<f64>,
 }
 
 fn apply_tags(result: &mut AudioMetadata, tags: &[symphonia::core::meta::Tag], overwrite: bool) {
@@ -98,36 +98,28 @@ pub fn extract_metadata_with_size_internal(data: &[u8], total_file_size: u64) ->
     result
 }
 
-fn audio_metadata_to_js_value(metadata: AudioMetadata) -> JsValue {
-    let obj = Object::new();
-
-    if let Some(title) = metadata.title {
-        let _ = Reflect::set(&obj, &JsValue::from_str("title"), &JsValue::from_str(&title));
-    }
-    if let Some(artist) = metadata.artist {
-        let _ = Reflect::set(&obj, &JsValue::from_str("artist"), &JsValue::from_str(&artist));
-    }
-    if let Some(album) = metadata.album {
-        let _ = Reflect::set(&obj, &JsValue::from_str("album"), &JsValue::from_str(&album));
-    }
-    if let Some(track_number) = metadata.track_number {
-        let _ = Reflect::set(&obj, &JsValue::from_str("trackNumber"), &JsValue::from_f64(track_number as f64));
-    }
-    if let Some(duration_ms) = metadata.duration_ms {
-        let _ = Reflect::set(&obj, &JsValue::from_str("durationMs"), &JsValue::from_f64(duration_ms));
-    }
-
-    obj.into()
+#[wasm_bindgen]
+impl AudioMetadata {
+    #[wasm_bindgen(getter)]
+    pub fn title(&self) -> Option<String> { self.title.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn artist(&self) -> Option<String> { self.artist.clone() }
+    #[wasm_bindgen(getter)]
+    pub fn album(&self) -> Option<String> { self.album.clone() }
+    #[wasm_bindgen(getter = trackNumber)]
+    pub fn track_number(&self) -> Option<u32> { self.track_number }
+    #[wasm_bindgen(getter = durationMs)]
+    pub fn duration_ms(&self) -> Option<f64> { self.duration_ms }
 }
 
 #[wasm_bindgen(js_name = extractMetadata)]
-pub fn extract_metadata(data: &[u8]) -> JsValue {
-    audio_metadata_to_js_value(extract_metadata_internal(data))
+pub fn extract_metadata(data: &[u8]) -> AudioMetadata {
+    extract_metadata_internal(data)
 }
 
 #[wasm_bindgen(js_name = extractMetadataWithSize)]
-pub fn extract_metadata_with_size(data: &[u8], total_file_size: u64) -> JsValue {
-    audio_metadata_to_js_value(extract_metadata_with_size_internal(data, total_file_size))
+pub fn extract_metadata_with_size(data: &[u8], total_file_size: u64) -> AudioMetadata {
+    extract_metadata_with_size_internal(data, total_file_size)
 }
 
 
