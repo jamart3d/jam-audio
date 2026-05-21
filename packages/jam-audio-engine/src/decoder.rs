@@ -216,9 +216,12 @@ impl StreamingDecoder {
         self.target_sample_rate
     }
 
-    pub fn channels(&self) -> u32 {
-        2
-    }
+    /// Output channel count. The decoder normalises every source to stereo,
+    /// so this is always 2. Use `source_channels()` for the upstream count.
+    pub fn output_channels(&self) -> u32 { 2 }
+
+    /// Most-recently-observed source channel count (may change per packet).
+    pub fn source_channels(&self) -> u32 { self.source_channels }
 
     pub fn encoder_delay_frames(&self) -> u64 {
         self.encoder_delay_frames
