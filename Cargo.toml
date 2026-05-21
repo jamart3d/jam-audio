@@ -1,0 +1,25 @@
+# Workspace manifest.
+#
+# The [patch.crates-io] block lives HERE (workspace root) rather than in
+# individual package manifests.  This means:
+#   - Local development resolves opus-rs from `third_party/opus-rs` as before.
+#   - When a package is published to crates.io its consumers do NOT see this
+#     patch — the published crate uses the real crates.io `opus-rs`.
+#
+# See: https://doc.rust-lang.org/cargo/reference/workspaces.html#the-patch-section
+
+[workspace]
+members = [
+    "packages/jam-audio-engine",
+    "packages/jam-audio-flutter",
+]
+resolver = "2"
+
+[patch.crates-io]
+opus-rs = { path = "third_party/opus-rs" }
+
+# Release profile: originally in packages/jam-audio-flutter/Cargo.toml,
+# moved here because profiles in non-root packages are ignored by Cargo.
+[profile.release]
+opt-level = "s"
+lto = true
