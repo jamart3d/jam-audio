@@ -257,6 +257,13 @@ impl<S: StreamingSource> StreamingCore<S> {
     fn finalize(&mut self) {
         self.source.with_mut(|s| s.finalize_source());
         let _ = self.try_initialize_decoder(true);
+        // Decoder may have been created before finalize() was called (when the
+        // probe threshold was crossed mid-stream). Its has_known_byte_len flag
+        // would be false because byte_len() was None at creation time. Correct it
+        // now so Ogg seeks work on the complete stream.
+        if let Some(decoder) = self.decoder.as_mut() {
+            decoder.on_source_finalized();
+        }
     }
 
     fn is_ready(&self) -> bool {

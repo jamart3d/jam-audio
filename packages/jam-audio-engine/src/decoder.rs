@@ -166,7 +166,7 @@ impl From<SymphoniaError> for DecodeError {
 }
 
 pub struct StreamingDecoder {
-    format: Box<dyn symphonia::core::formats::FormatReader>,
+    format: Option<Box<dyn symphonia::core::formats::FormatReader>>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
     /// Most recently observed per-packet sample rate. Treat as a runtime hint.
@@ -179,6 +179,7 @@ pub struct StreamingDecoder {
     duration_ms: f64,
     is_ogg_family: bool,
     has_known_byte_len: bool,
+    reprobed_after_finalized: bool,
     intermediate_samples: Vec<f32>,
     stereo_scratch: Vec<f32>,
     sample_buffer: Option<SampleBuffer<f32>>,
@@ -208,6 +209,19 @@ impl StreamingDecoder {
         }
 
         Ok(())
+    }
+
+    /// Called after the owning stream source is fully finalized to unlock
+    /// Ogg seeks.
+    ///
+    /// `has_known_byte_len` is captured at decoder-creation time from
+    /// `media_source.byte_len().is_some()`. For streams initialized before
+    /// `finalize()` (files > 256 KB), the source is not yet finalized so
+    /// `byte_len()` returns `None`. This method corrects the stale flag
+    /// once the source is known to be complete.
+    pub fn on_source_finalized(&mut self) {
+        self.has_known_byte_len = true;
+        self.reprobed_after_finalized = false;
     }
 
     pub fn new(data: Vec<u8>, target_sample_rate: u32) -> Result<Self, DecodeError> {
@@ -278,7 +292,7 @@ impl StreamingDecoder {
         let trailing_pad_frames = (raw_padding * rate_ratio).round() as u64;
 
         Ok(Self {
-            format,
+            format: Some(format),
             decoder,
             track_id: track.id,
             source_sample_rate,
@@ -288,6 +302,7 @@ impl StreamingDecoder {
             duration_ms,
             is_ogg_family,
             has_known_byte_len,
+            reprobed_after_finalized: false,
             intermediate_samples: Vec::with_capacity(8192),
             stereo_scratch: Vec::with_capacity(8192),
             sample_buffer: None,
@@ -333,6 +348,22 @@ impl StreamingDecoder {
         use symphonia::core::formats::SeekMode;
         use symphonia::core::formats::SeekTo;
 
+        if self.is_ogg_family && self.has_known_byte_len && !self.reprobed_after_finalized {
+            if let Some(format_reader) = self.format.take() {
+                let mut mss = format_reader.into_inner();
+                let _ = mss.seek(SeekFrom::Start(0));
+                let hint = Hint::new();
+                let probed = get_probe().format(
+                    &hint,
+                    mss,
+                    &FormatOptions::default(),
+                    &MetadataOptions::default(),
+                )?;
+                self.format = Some(probed.format);
+                self.reprobed_after_finalized = true;
+            }
+        }
+
         let playback_frame = (ms * self.target_sample_rate as f64 / 1000.0).round() as u64;
         let target_frame = playback_frame + self.encoder_delay_frames;
         let target_seconds = target_frame as f64 / self.target_sample_rate as f64;
@@ -345,7 +376,7 @@ impl StreamingDecoder {
             frac,
         };
 
-        let seeked_to = self.format.seek(
+        let seeked_to = self.format.as_mut().unwrap().seek(
             SeekMode::Accurate,
             SeekTo::Time {
                 time: seek_time,
@@ -390,7 +421,7 @@ impl StreamingDecoder {
         let target_samples_stereo = target_frames * 2;
 
         loop {
-            let packet = match self.format.next_packet() {
+            let packet = match self.format.as_mut().unwrap().next_packet() {
                 Ok(packet) => packet,
                 Err(SymphoniaError::IoError(error))
                     if error.kind() == std::io::ErrorKind::UnexpectedEof =>
@@ -985,7 +1016,19 @@ impl MediaSource for WindowedMediaSource {
     }
 
     fn byte_len(&self) -> Option<u64> {
-        None
+        if self.finalized {
+            self.total_size.or(Some(
+                self.window_start
+                    + (self.buffer.len()
+                        - if self.window_start == 0 {
+                            0
+                        } else {
+                            self.header_reserve_bytes
+                        }) as u64,
+            ))
+        } else {
+            None
+        }
     }
 }
 
