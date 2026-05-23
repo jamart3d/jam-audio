@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-05-22
+
+### Fixed
+- Deferred the Dart playback-started callback while Android Chrome deeplink playback is buffered but the `AudioContext` is still suspended, so the UI stays in the paused state until the first user gesture actually starts audio
+- Added a short gain ramp after gesture resume to avoid the pop that can occur when suspended audio restarts into a non-zero first frame
+- Stopped the worklet before stopping the worker during track changes so stale buffered audio cannot bleed into the next session
+
+### Added
+- Added a worker-side `transitionStreamToGapless()` path to swap a streaming player into a gapless player without losing playback position continuity
+
 ## [0.3.1] — 2026-05-21
 
 ### Fixed

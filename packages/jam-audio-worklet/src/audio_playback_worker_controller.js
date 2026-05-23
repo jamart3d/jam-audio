@@ -49,6 +49,7 @@ function createPlaybackWorkerController({
   let lastRefillTickMs = 0;
   let trackStartPositionMs = 0;
   let currentTrackEndPositionMs = 0;
+  let _streamingHintDurationMs = 0;
   let transitionMonitorUntilMs = 0;
   let transitionFloorCandidate = Infinity;
   let handoffUnderrunBaseline = 0;
@@ -177,6 +178,7 @@ function createPlaybackWorkerController({
     startupCompleted = false;
     trackStartPositionMs = 0;
     currentTrackEndPositionMs = 0;
+    _streamingHintDurationMs = 0;
     transitionMonitorUntilMs = 0;
     transitionFloorCandidate = Infinity;
     handoffUnderrunBaseline = 0;
@@ -443,7 +445,7 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            currentTrackEndPositionMs = newPlayer.durationMs();
+            currentTrackEndPositionMs = newPlayer.durationMs() || _streamingHintDurationMs;
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -554,7 +556,7 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            currentTrackEndPositionMs = newPlayer.durationMs();
+            currentTrackEndPositionMs = newPlayer.durationMs() || _streamingHintDurationMs;
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -597,7 +599,7 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            currentTrackEndPositionMs = newPlayer.durationMs();
+            currentTrackEndPositionMs = newPlayer.durationMs() || _streamingHintDurationMs;
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -651,7 +653,7 @@ function createPlaybackWorkerController({
           const audibleLateGapMs = Math.max(0, signedGapMs);
           const underrunDelta = lastCompletedHandoffUnderrunDelta;
           trackStartPositionMs = transitionPositionMs;
-          currentTrackEndPositionMs = newDuration;
+          currentTrackEndPositionMs = newDuration || _streamingHintDurationMs;
           emitDiagnosticsEvent({
             type: 'track-handoff',
             label: 'Track handoff',
@@ -980,6 +982,39 @@ function createPlaybackWorkerController({
       kickRefillLoopIfNeeded();
     },
 
+    transitionStreamToGapless(audioBytes, hintDurationMs = 0) {
+      if (!streamingPlayer) {
+        return;
+      }
+      const currentDecodePositionMs = streamingPlayer.positionMs();
+      let newPlayer;
+      try {
+        newPlayer = createGaplessPlayer(audioBytes, activeSampleRate);
+      } catch (error) {
+        console.error('[worker] transitionStreamToGapless: failed to create GaplessPlayer:', error instanceof Error ? error.message : String(error));
+        return;
+      }
+      try {
+        newPlayer.seekToMs(currentDecodePositionMs);
+      } catch {
+        // Seek failed — player stays at 0, future user seeks will still work.
+      }
+      if (pendingGaplessBytes !== null) {
+        try {
+          newPlayer.loadNext(pendingGaplessBytes);
+        } catch { /* ignore */ }
+        pendingGaplessBytes = null;
+      }
+      streamingPlayer.free();
+      streamingPlayer = null;
+      streamingFinalized = false;
+      player = newPlayer;
+      _streamingHintDurationMs = hintDurationMs;
+      currentTrackEndPositionMs = newPlayer.durationMs() || hintDurationMs;
+      endedEmitted = false;
+      kickRefillLoopIfNeeded();
+    },
+
     preloadNext(audioBytes) {
       if (!player) {
         if (streamingPlayer || windowedPlayer) {
@@ -993,6 +1028,7 @@ function createPlaybackWorkerController({
         }
         return;
       }
+      console.log('[worker] preloadNext: calling player.loadNext, bytes=' + audioBytes.byteLength);
       let result;
       try {
         result = player.loadNext(audioBytes);

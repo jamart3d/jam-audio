@@ -44,6 +44,13 @@ export function createJamAudioBridge({
   let onPreloadPendingCallback = null;
   /** @type {(() => void) | null} */
   let onPlaybackStartedCallback = null;
+  // True when the worker has buffered enough to play but the AudioContext is
+  // still suspended (Android non-installed PWA deeplink). The Dart "started"
+  // callback is deferred until gesture-resume so the UI shows the play button
+  // (paused) rather than the pause button (playing) while no audio comes out.
+  let pendingPlaybackStartedOnResume = false;
+  /** @type {(() => void) | null} */
+  let onPlaybackSuspendedCallback = null;
   /** @type {(() => void) | null} */
   let onEndedCallback = null;
   /** @type {((position: number) => void) | null} */
@@ -613,8 +620,20 @@ export function createJamAudioBridge({
         emitDiagnosticsEvent(data.event);
         return;
       case 'playback-started':
-        if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
-        markPlaybackState('playing');
+        if (isAndroidTransport && audioContext?.state === 'suspended') {
+          // Buffer is ready but the AudioContext is suspended (Android Chrome
+          // browser, no installed PWA). Signal Dart to show the play button
+          // so the UI reflects that audio is buffered but not yet audible.
+          // gesture-resume fires onPlaybackStartedCallback when the user taps,
+          // transitioning the UI from play button → pause button as audio begins.
+          // Desktop and installed-PWA paths always reach the else branch.
+          pendingPlaybackStartedOnResume = true;
+          if (typeof onPlaybackSuspendedCallback === 'function') onPlaybackSuspendedCallback();
+          markPlaybackState('paused');
+        } else {
+          if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
+          markPlaybackState('playing');
+        }
         setStartupPhase('playing');
         return;
       case 'position':
@@ -702,12 +721,16 @@ export function createJamAudioBridge({
       });
     }).catch(() => {});
 
-    // On Android Chrome PWA deeplinks the launch gesture does not grant
-    // AudioContext autoplay rights, so resume() above stays pending. Register
-    // a one-time capture-phase listener on the first user gesture (touch or
-    // click) so the context resumes as soon as the user interacts with
-    // anything on screen. The audio worker will have already buffered decoded
-    // audio by then, so playback starts immediately with no perceptible delay.
+    // Fallback for when the AudioContext is still suspended after initAudio().
+    // This happens on Chrome browser (non-installed PWA) where MEI is too low
+    // to grant autoplay. On an INSTALLED Android PWA, Chrome grants
+    // unrestricted autoplay and the context is already running by this point —
+    // this block is a no-op. For non-installed users, register a one-time
+    // capture-phase listener so the context resumes on the very first
+    // interaction; the worker will have already filled the ring buffer by then,
+    // so audio starts with no perceptible delay. Do NOT remove this block —
+    // it is the only audio path for Chrome-browser (non-installed) deeplink
+    // users. Do NOT add a "tap to play" UI overlay — use this silent fallback.
     if (audioContext.state === 'suspended') {
       console.log('[deeplink-diag] initAudio: context suspended, registering gesture-resume listener');
       const resumeOnGesture = () => {
@@ -718,6 +741,25 @@ export function createJamAudioBridge({
         console.log('[deeplink-diag] gesture-resume: gesture fired, calling audioContext.resume()');
         audioContext.resume().then(() => {
           console.log('[deeplink-diag] gesture-resume: audioContext.state=', audioContext.state);
+          // Ramp gain from 0 → currentVolume over 15 ms to avoid the pop that
+          // occurs when the context resumes into a non-zero first audio frame.
+          // The ramp is imperceptible as a fade but eliminates the DC step.
+          if (gainNode) {
+            gainNode.gain.cancelScheduledValues(audioContext.currentTime);
+            gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+            gainNode.gain.linearRampToValueAtTime(
+              currentVolume,
+              audioContext.currentTime + 0.015,
+            );
+          }
+          // If the worker buffered audio while the context was suspended, the
+          // Dart "started" callback was deferred. Fire it now so the UI
+          // transitions from play button → pause button as audio begins.
+          if (pendingPlaybackStartedOnResume) {
+            pendingPlaybackStartedOnResume = false;
+            if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
+            markPlaybackState('playing');
+          }
           emitDiagnosticsEvent({
             type: 'audio-context-gesture-resumed',
             label: 'Audio context resumed via first gesture',
@@ -748,6 +790,12 @@ export function createJamAudioBridge({
         preserveMediaSession: true,
         performAction: async ({ preserveMediaSession }) => {
           if (playbackWorker) {
+            // Stop the worklet BEFORE stopping the worker. Without this, the
+            // worklet keeps consuming the old ring buffer after the worker is
+            // stopped, causing audio from the previous session (e.g. a
+            // suspended deeplink import) to bleed into the new session. The
+            // worker stop follows immediately so the buffers are cleanly
+            // replaced by createSharedBuffers() in the new playTrack call.
             processorNode?.port.postMessage({ type: 'stop' });
             await sendPlaybackWorkerCommand('stop').catch(() => {});
           } else {
@@ -757,13 +805,14 @@ export function createJamAudioBridge({
       });
     } else {
       if (playbackWorker) {
-        processorNode?.port.postMessage({ type: 'stop' });
+        processorNode?.port.postMessage({ type: 'stop' }); // see Android branch above
         await sendPlaybackWorkerCommand('stop').catch(() => {});
       } else {
         stop({ preserveMediaSession: true });
       }
     }
 
+    pendingPlaybackStartedOnResume = false;
     diagnosticsState = createDiagnosticsState();
     markPlaybackState('loading', { preserveMediaSession: true });
     setStartupPhase('initializing wasm');
@@ -944,6 +993,10 @@ export function createJamAudioBridge({
 
   function finalizeStream() {
     return sendPlaybackWorkerCommand('finalizeStream');
+  }
+
+  function transitionStreamToGapless(audioBytes, hintDurationMs = 0) {
+    return sendPlaybackWorkerCommand('transitionStreamToGapless', { audioBytes, hintDurationMs });
   }
 
   function preloadNext(audioBytes) {
@@ -1293,6 +1346,7 @@ export function createJamAudioBridge({
     getWorkerHealthStatus,
     appendChunk,
     finalizeStream,
+    transitionStreamToGapless,
 
     preloadNext,
     preloadNextBounded,
@@ -1305,6 +1359,8 @@ export function createJamAudioBridge({
     bufferedDurationMs: () => lastKnownBufferedDurationMs,
     setOnEnded: (cb) => { onEndedCallback = cb; },
     setOnPlaybackStarted: (cb) => { onPlaybackStartedCallback = cb; },
+    setOnPlaybackSuspended: (cb) => { onPlaybackSuspendedCallback = cb; },
+    getAudioContextState: () => audioContext?.state ?? 'running',
     setOnPlay: (cb) => { onPlayCallback = cb; },
     setOnPause: (cb) => { onPauseCallback = cb; },
     setOnPosition: (cb) => { onPositionCallback = cb; },

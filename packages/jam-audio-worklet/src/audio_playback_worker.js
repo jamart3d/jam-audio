@@ -107,6 +107,10 @@ export function initPlaybackWorker({
           controller.finalizeStream();
           self.postMessage({ type: 'response', requestId });
           return;
+        case 'transitionStreamToGapless':
+          controller.transitionStreamToGapless(data.audioBytes, data.hintDurationMs ?? 0);
+          self.postMessage({ type: 'response', requestId });
+          return;
         case 'pauseRefill':
           controller.pauseRefill();
           self.postMessage({ type: 'response', requestId });
