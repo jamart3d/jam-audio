@@ -895,4 +895,66 @@ mod tests {
         let result = player.append_chunk(&[]);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn streaming_player_ogg_seek_works_when_decoder_initialized_before_finalize() {
+        // Real-world Opus files are > 256 KB, so the decoder is created before
+        // finalize() is called, leaving has_known_byte_len = false. This test
+        // reproduces that scenario by repeating the sample until the probe threshold
+        // is exceeded, forcing early initialization.
+        let sample = opus_sample_bytes();
+        let mut big_chunk = Vec::with_capacity(STREAMING_PROBE_THRESHOLD_BYTES + sample.len());
+        while big_chunk.len() < STREAMING_PROBE_THRESHOLD_BYTES + sample.len() {
+            big_chunk.extend_from_slice(&sample);
+        }
+
+        let mut player = StreamingCore::appendable(DEFAULT_OUTPUT_SAMPLE_RATE, 0);
+        let ready = player.append_chunk(&big_chunk).unwrap();
+        assert!(
+            ready,
+            "decoder must initialize before finalize() for this test to be meaningful; \
+             increase big_chunk size if this fails"
+        );
+
+        player.finalize();
+
+        // Without the fix this returns Err("seek unavailable for incomplete ogg stream").
+        assert!(
+            player.seek_to_ms(50.0).is_ok(),
+            "seek should succeed on a finalized Ogg stream even when the decoder \
+             was initialized before finalize() was called"
+        );
+
+        // Verify that decoding actually resumes after the seek.
+        assert!(matches!(
+            player.decode_frames(2048),
+            Ok(StreamingFrameResult::Success)
+        ));
+    }
+
+    #[test]
+    fn windowed_streaming_player_ogg_seek_works_after_finalize() {
+        let sample = opus_sample_bytes();
+        let mut big_chunk = Vec::with_capacity(STREAMING_PROBE_THRESHOLD_BYTES + sample.len());
+        while big_chunk.len() < STREAMING_PROBE_THRESHOLD_BYTES + sample.len() {
+            big_chunk.extend_from_slice(&sample);
+        }
+
+        let total = big_chunk.len() as u64;
+        let mut player = StreamingCore::windowed(Some(total), 8, DEFAULT_OUTPUT_SAMPLE_RATE);
+        let ready = player.append_chunk(&big_chunk).unwrap();
+        assert!(ready, "decoder must initialize before finalize()");
+
+        player.finalize();
+
+        assert!(
+            player.seek_to_ms(50.0).is_ok(),
+            "windowed player Ogg seek must succeed after finalize"
+        );
+
+        assert!(matches!(
+            player.decode_frames(2048),
+            Ok(StreamingFrameResult::Success)
+        ));
+    }
 }
