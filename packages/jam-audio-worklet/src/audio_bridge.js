@@ -31,6 +31,8 @@ export function createJamAudioBridge({
   let playbackWorkerRequestId = 0;
   const pendingWorkerRequests = new Map();
   let diagnosticsSnapshotTimerId;
+  let diagnosticsSnapshotEnabled = false;
+  let diagnosticsMode = 'minimal';
   let heartbeatIntervalId;
   let heartbeatLastKnownPositionSec = 0;
   let heartbeatLastKnownDurationSec = 0;
@@ -340,6 +342,10 @@ export function createJamAudioBridge({
   }
 
   function startDiagnosticsLoop() {
+    if (!diagnosticsSnapshotEnabled) {
+      stopDiagnosticsLoop();
+      return;
+    }
     stopDiagnosticsLoop();
     emitDiagnosticsSnapshot();
     diagnosticsSnapshotTimerId = window.setInterval(() => {
@@ -352,6 +358,20 @@ export function createJamAudioBridge({
       window.clearInterval(diagnosticsSnapshotTimerId);
       diagnosticsSnapshotTimerId = undefined;
     }
+  }
+
+  function setDiagnosticsSnapshotEnabled(enabled) {
+    diagnosticsSnapshotEnabled = !!enabled;
+    if (diagnosticsSnapshotEnabled) {
+      startDiagnosticsLoop();
+    } else {
+      stopDiagnosticsLoop();
+    }
+  }
+
+  function setDiagnosticsMode(mode) {
+    diagnosticsMode = mode || 'minimal';
+    void sendPlaybackWorkerCommand('setDiagnosticsMode', { mode: diagnosticsMode }).catch(() => {});
   }
 
   /**
@@ -1370,6 +1390,8 @@ export function createJamAudioBridge({
     setOnTrackChanged: (cb) => { onTrackChangedCallback = cb; },
     setOnDiagnosticsSnapshot: (cb) => { onDiagnosticsSnapshotCallback = cb; },
     setOnDiagnosticsEvent: (cb) => { onDiagnosticsEventCallback = cb; },
+    setDiagnosticsSnapshotEnabled,
+    setDiagnosticsMode,
     setOnPlaybackError: (cb) => { onPlaybackErrorCallback = cb; },
     setOnPreloadError: (cb) => { onPreloadErrorCallback = cb; },
     setOnPreloadPending: (cb) => { onPreloadPendingCallback = cb; },

@@ -43,7 +43,7 @@ export function initPlaybackWorker({
     setIntervalFn: (callback, intervalMs) => self.setInterval(callback, intervalMs),
     clearIntervalFn: (timerId) => self.clearInterval(timerId),
     performanceNow: () => performance.now(),
-    nowMs: () => Math.round(performance.now()),
+    nowMs: () => Date.now(),
   });
 
   self.addEventListener('error', (event) => {
@@ -98,6 +98,10 @@ export function initPlaybackWorker({
           self.postMessage({ type: 'response', requestId });
           return;
         }
+        case 'setDiagnosticsMode':
+          controller.setDiagnosticsMode(data.mode);
+          self.postMessage({ type: 'response', requestId });
+          return;
         case 'appendChunk': {
           const result = controller.appendChunk(data.audioBytes);
           self.postMessage({ type: 'response', requestId, payload: result });

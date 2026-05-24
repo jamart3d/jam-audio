@@ -49,6 +49,8 @@ function createPlaybackWorkerController({
   let lastRefillTickMs = 0;
   let trackStartPositionMs = 0;
   let currentTrackEndPositionMs = 0;
+  let currentTrackEndPositionKnown = false;
+  let currentTrackEndPositionHandled = false;
   let _streamingHintDurationMs = 0;
   let transitionMonitorUntilMs = 0;
   let transitionFloorCandidate = Infinity;
@@ -59,6 +61,7 @@ function createPlaybackWorkerController({
   let endedEmitted = false;
   let lastChunkReceivedAt = 0;
   let isStalled = false;
+  let consecutiveZeroRefills = 0;
   let currentSessionId = 0;
   let diagnostics = createWorkerDiagnostics();
 
@@ -85,11 +88,31 @@ function createPlaybackWorkerController({
     },
   });
 
-  const emitDiagnosticsEvent = core.emitDiagnosticsEvent;
+  const coreEmitDiagnosticsEvent = core.emitDiagnosticsEvent;
   const emitDiagnosticsSync = core.emitDiagnosticsSync;
+
+  let diagnosticsMode = 'minimal';
+
+  function setDiagnosticsMode(mode) {
+    diagnosticsMode = ['off', 'minimal', 'normal', 'extended'].includes(mode)
+      ? mode
+      : 'minimal';
+  }
+
+  const noisyEventTypes = new Set(['refill-complete', 'media-session-heartbeat', 'readahead-status', 'decode-waiting', 'refill-starvation-diagnostic']);
+
+  function emitDiagnosticsEvent(event) {
+    if (diagnosticsMode === 'extended' || !noisyEventTypes.has(event.type)) {
+      coreEmitDiagnosticsEvent(event);
+    }
+  }
 
   function currentPlayer() {
     return windowedPlayer ?? streamingPlayer ?? player;
+  }
+
+  function playerHasEnded(candidatePlayer) {
+    return typeof candidatePlayer?.hasEnded === 'function' && candidatePlayer.hasEnded();
   }
 
   let isBelowLowWaterMark = false;
@@ -178,6 +201,8 @@ function createPlaybackWorkerController({
     startupCompleted = false;
     trackStartPositionMs = 0;
     currentTrackEndPositionMs = 0;
+    currentTrackEndPositionKnown = false;
+    currentTrackEndPositionHandled = false;
     _streamingHintDurationMs = 0;
     transitionMonitorUntilMs = 0;
     transitionFloorCandidate = Infinity;
@@ -188,9 +213,16 @@ function createPlaybackWorkerController({
     endedEmitted = false;
     lastChunkReceivedAt = 0;
     isStalled = false;
+    consecutiveZeroRefills = 0;
     pendingGaplessBytes = null;
     pendingGaplessSampleRate = 0;
     currentSessionId++;
+  }
+
+  function setCurrentTrackEndPosition(durationMs, isKnown = durationMs > 0) {
+    currentTrackEndPositionMs = durationMs > 0 ? durationMs : 0;
+    currentTrackEndPositionKnown = isKnown;
+    currentTrackEndPositionHandled = false;
   }
 
   const stopRefillLoop = core.stopRefillLoop;
@@ -290,7 +322,7 @@ function createPlaybackWorkerController({
     const framesAvailable = optionalFrames ?? diagnostics.framesAvailable;
     const bufferReady =
       framesAvailable >= PLAYBACK_START_FRAMES ||
-      (((streamingFinalized || (player && player.hasEnded())) && framesAvailable > 0));
+      (((streamingFinalized || playerHasEnded(player)) && framesAvailable > 0));
 
     if (!activePlayer || startupCompleted || !bufferReady) {
       return;
@@ -381,6 +413,7 @@ function createPlaybackWorkerController({
       }
 
       if (result instanceof Float32Array && result.length > 0) {
+        consecutiveZeroRefills = 0;
         diagnostics.pendingSeekDistanceMs = 0;
         if (lastChunkReceivedAt > 0) {
           const lag = performanceNow() - lastChunkReceivedAt;
@@ -390,6 +423,33 @@ function createPlaybackWorkerController({
             isStalled = false;
           }
           lastChunkReceivedAt = 0;
+        }
+      } else {
+        const isEOFOrFinalizedDrain = isStreaming
+          ? streamingFinalized
+          : playerHasEnded(activePlayer);
+        if (isCritical && !isEOFOrFinalizedDrain) {
+          consecutiveZeroRefills++;
+          if (consecutiveZeroRefills === 10 || (consecutiveZeroRefills > 10 && consecutiveZeroRefills % 50 === 0)) {
+            if (diagnosticsMode === 'extended') {
+              const bufferFillPercent = frameCapacity > 0
+                ? Number(((framesAvailable / frameCapacity) * 100).toFixed(1))
+                : 0;
+
+              emitDiagnosticsEvent({
+                type: 'refill-starvation-diagnostic',
+                label: 'Refill starvation detected',
+                timestampMs: nowMs(),
+                severity: 'warning',
+                framesAvailable,
+                bufferFillPercent,
+                refillGapMs: diagnostics.lastRefillGapMs,
+                zeroFillRun: consecutiveZeroRefills,
+              });
+            }
+          }
+        } else {
+          consecutiveZeroRefills = 0;
         }
       }
 
@@ -445,7 +505,10 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            currentTrackEndPositionMs = newPlayer.durationMs() || _streamingHintDurationMs;
+            setCurrentTrackEndPosition(
+              newPlayer.durationMs() || _streamingHintDurationMs,
+              newPlayer.durationMs() > 0 || _streamingHintDurationMs > 0,
+            );
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -501,7 +564,10 @@ function createPlaybackWorkerController({
               }
 
               trackStartPositionMs = transitionPositionMs;
-              currentTrackEndPositionMs = newPlayer.durationMs();
+              setCurrentTrackEndPosition(
+                newPlayer.durationMs() || _streamingHintDurationMs,
+                newPlayer.durationMs() > 0 || _streamingHintDurationMs > 0,
+              );
               handoffUnderrunBaseline = diagnostics.underrunCount;
               handoffStartedAtMs = nowMs();
               diagnostics.transitionGapMs = 0;
@@ -532,7 +598,7 @@ function createPlaybackWorkerController({
         if (activePlayer !== player) {
           return;
         }
-        if (activePlayer.hasEnded()) {
+        if (playerHasEnded(activePlayer)) {
           handleEndOfStream();
         }
         return;
@@ -556,7 +622,10 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            currentTrackEndPositionMs = newPlayer.durationMs() || _streamingHintDurationMs;
+            setCurrentTrackEndPosition(
+              newPlayer.durationMs() || _streamingHintDurationMs,
+              newPlayer.durationMs() > 0 || _streamingHintDurationMs > 0,
+            );
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -599,7 +668,10 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            currentTrackEndPositionMs = newPlayer.durationMs() || _streamingHintDurationMs;
+            setCurrentTrackEndPosition(
+              newPlayer.durationMs() || _streamingHintDurationMs,
+              newPlayer.durationMs() > 0 || _streamingHintDurationMs > 0,
+            );
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -622,56 +694,64 @@ function createPlaybackWorkerController({
           return;
         }
         const newDuration = activePlayer.durationMs();
-        const transitionPositionMs = activePlayer.positionMs();
-        const crossedTrackBoundary =
-          transitionPositionMs >=
-          currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
         if (
-          newDuration !== currentTrackEndPositionMs &&
-          crossedTrackBoundary
+          !currentTrackEndPositionKnown &&
+          (newDuration > 0 || _streamingHintDurationMs > 0)
         ) {
-          const currentFillPercent = frameCapacity > 0 ? (framesAvailable / frameCapacity) * 100 : 0;
-          if (currentFillPercent < HANDOFF_FILL_THRESHOLD_PERCENT) {
-            if (handoffPendingUntilMs === 0) {
-              handoffPendingUntilMs = nowMs() + HANDOFF_RETRY_WINDOW_MS;
-            }
-            if (nowMs() < handoffPendingUntilMs) {
-              return; // retry next tick
+          setCurrentTrackEndPosition(
+            newDuration || _streamingHintDurationMs,
+            true,
+          );
+        }
+        const transitionPositionMs = activePlayer.positionMs();
+        if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
+          const crossedTrackBoundary =
+            transitionPositionMs >=
+            currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+          if (crossedTrackBoundary) {
+            const currentFillPercent = frameCapacity > 0 ? (framesAvailable / frameCapacity) * 100 : 0;
+            if (currentFillPercent < HANDOFF_FILL_THRESHOLD_PERCENT) {
+              if (handoffPendingUntilMs === 0) {
+                handoffPendingUntilMs = nowMs() + HANDOFF_RETRY_WINDOW_MS;
+              }
+              if (nowMs() < handoffPendingUntilMs) {
+                return; // retry next tick
+              }
+              handoffPendingUntilMs = 0;
+              stopRefillLoop();
+              diagnostics.transitionGapMs = null;
+              emitMessage({ type: 'playback-error', message: 'handoff_unsafe' });
+              return;
             }
             handoffPendingUntilMs = 0;
-            stopRefillLoop();
-            diagnostics.transitionGapMs = null;
-            emitMessage({ type: 'playback-error', message: 'handoff_unsafe' });
-            return;
+            diagnostics.transitionGapMs =
+              transitionPositionMs - currentTrackEndPositionMs;
+            handoffUnderrunBaseline = diagnostics.underrunCount;
+            handoffStartedAtMs = nowMs();
+            const signedGapMs = diagnostics.transitionGapMs;
+            const audibleLateGapMs = Math.max(0, signedGapMs);
+            const underrunDelta = lastCompletedHandoffUnderrunDelta;
+            trackStartPositionMs = transitionPositionMs;
+            currentTrackEndPositionHandled = true;
+            emitDiagnosticsEvent({
+              type: 'track-handoff',
+              label: 'Track handoff',
+              timestampMs: handoffStartedAtMs,
+              severity:
+                audibleLateGapMs > 0 || underrunDelta > 0 ? 'warning' : 'info',
+              signedGapMs,
+              audibleLateGapMs,
+              transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
+              underrunDelta,
+            });
+            emitMessage({
+              type: 'track-changed',
+              transitionPositionMs: Math.floor(transitionPositionMs),
+            });
+            emitMessage({ type: 'duration', durationMs: Math.floor(newDuration) });
+            transitionMonitorUntilMs = handoffStartedAtMs + 500;
+            transitionFloorCandidate = Infinity;
           }
-          handoffPendingUntilMs = 0;
-          diagnostics.transitionGapMs =
-            transitionPositionMs - currentTrackEndPositionMs;
-          handoffUnderrunBaseline = diagnostics.underrunCount;
-          handoffStartedAtMs = nowMs();
-          const signedGapMs = diagnostics.transitionGapMs;
-          const audibleLateGapMs = Math.max(0, signedGapMs);
-          const underrunDelta = lastCompletedHandoffUnderrunDelta;
-          trackStartPositionMs = transitionPositionMs;
-          currentTrackEndPositionMs = newDuration || _streamingHintDurationMs;
-          emitDiagnosticsEvent({
-            type: 'track-handoff',
-            label: 'Track handoff',
-            timestampMs: handoffStartedAtMs,
-            severity:
-              audibleLateGapMs > 0 || underrunDelta > 0 ? 'warning' : 'info',
-            signedGapMs,
-            audibleLateGapMs,
-            transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
-            underrunDelta,
-          });
-          emitMessage({
-            type: 'track-changed',
-            transitionPositionMs: Math.floor(transitionPositionMs),
-          });
-          emitMessage({ type: 'duration', durationMs: Math.floor(newDuration) });
-          transitionMonitorUntilMs = handoffStartedAtMs + 500;
-          transitionFloorCandidate = Infinity;
         }
       }
 
@@ -745,6 +825,7 @@ function createPlaybackWorkerController({
   }
 
   return {
+    setDiagnosticsMode,
     playTrack(audioBytes, buffers) {
       stopRefillLoop();
       resetPlaybackState();
@@ -771,8 +852,9 @@ function createPlaybackWorkerController({
         });
         return;
       }
-      currentTrackEndPositionMs = player.durationMs();
-      emitMessage({ type: 'duration', durationMs: Math.floor(player.durationMs()) });
+      const durationMs = player.durationMs();
+      setCurrentTrackEndPosition(durationMs, durationMs > 0);
+      emitMessage({ type: 'duration', durationMs: Math.floor(durationMs) });
       emitDiagnosticsSync({
         startupTimingsMs: {
           decoderCreate: Number((performanceNow() - startedAt).toFixed(2)),
@@ -1009,8 +1091,12 @@ function createPlaybackWorkerController({
       streamingPlayer = null;
       streamingFinalized = false;
       player = newPlayer;
+      trackStartPositionMs = currentDecodePositionMs;
       _streamingHintDurationMs = hintDurationMs;
-      currentTrackEndPositionMs = newPlayer.durationMs() || hintDurationMs;
+      setCurrentTrackEndPosition(
+        newPlayer.durationMs() || hintDurationMs,
+        newPlayer.durationMs() > 0 || hintDurationMs > 0,
+      );
       endedEmitted = false;
       kickRefillLoopIfNeeded();
     },
@@ -1097,7 +1183,8 @@ function createPlaybackWorkerController({
           Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
         }
         trackStartPositionMs = 0;
-        currentTrackEndPositionMs = activePlayer.durationMs();
+        const durationMs = activePlayer.durationMs();
+        setCurrentTrackEndPosition(durationMs, durationMs > 0);
         endedEmitted = false;
         emitDiagnosticsEvent({
           type: 'seek',

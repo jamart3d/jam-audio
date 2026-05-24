@@ -386,3 +386,367 @@ test('transportMute silences the processor state until transportUnmute clears it
   controller.transportUnmute();
   assert.equal(sharedState[4], 0, 'STOP_INDEX should be cleared during transport unmute');
 });
+
+test('late duration promotion still emits exactly one handoff', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let duration = 0;
+  let position = 0;
+  let tick = 0;
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        tick += 1;
+        if (tick === 1) {
+          return new Float32Array(CHANNELS * 10);
+        }
+        if (tick === 2) {
+          duration = 1000;
+          position = 900;
+        }
+        if (tick === 3) {
+          position = 1015;
+        }
+        return new Float32Array(CHANNELS * 10);
+      },
+      durationMs() { return duration; },
+      positionMs() { return position; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+
+  sharedState[2] = 50;
+  intervalCallback();
+
+  sharedState[2] = 50;
+  intervalCallback();
+
+  sharedState[2] = 50;
+  intervalCallback();
+
+  sharedState[2] = 50;
+  intervalCallback();
+
+  const handoffEvents = messages.filter(
+    (message) =>
+      message.type === 'diagnostics-event' &&
+      message.event.type === 'track-handoff',
+  );
+
+  assert.equal(handoffEvents.length, 1);
+  assert.equal(handoffEvents[0].event.signedGapMs, 15);
+});
+
+test('streaming bridge hint stays one-shot after late duration promotion', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let duration = 0;
+  let position = 0;
+  let tick = 0;
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        tick += 1;
+        if (tick === 1) {
+          position = 1005;
+        }
+        if (tick === 2) {
+          duration = 1000;
+          position = 1015;
+        }
+        return new Float32Array(CHANNELS * 10);
+      },
+      durationMs() { return duration; },
+      positionMs() { return position; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs(value) { position = value; },
+      free() {},
+    }),
+    createStreamingPlayer: () => ({
+      appendChunk() { return true; },
+      durationMs() { return 0; },
+      positionMs() { return 900; },
+      isReady() { return true; },
+      isFinalized() { return false; },
+      finalize() {},
+      free() {},
+      decodeFrames() { return new Float32Array(CHANNELS * 10); },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.playTrackStreaming({
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+  controller.transitionStreamToGapless(new Uint8Array([4, 5, 6]), 1000);
+
+  sharedState[2] = 50;
+  intervalCallback();
+
+  sharedState[2] = 50;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter(
+      (message) =>
+        message.type === 'diagnostics-event' &&
+        message.event.type === 'track-handoff',
+    ).length,
+    1,
+  );
+});
+
+test('worker emits refill-starvation diagnostic at low rate', () => {
+  const messages = [];
+  let intervalCallback = null;
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        return null;
+      },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+
+  // Call the interval callback repeatedly to trigger refills that return null
+  for (let i = 0; i < 15; i++) {
+    intervalCallback();
+  }
+
+  const starvationEvents = messages.filter(
+    (message) =>
+      message.type === 'diagnostics-event' &&
+      message.event.type === 'refill-starvation-diagnostic',
+  );
+
+  // Since threshold is 10, i=0..14 should trigger exactly 1 starvation event (at count 10)
+  assert.equal(starvationEvents.length, 1);
+  const event = starvationEvents[0].event;
+  assert.equal(typeof event.framesAvailable, 'number');
+  assert.equal(typeof event.bufferFillPercent, 'number');
+  assert.equal(typeof event.refillGapMs, 'number');
+  assert.equal(event.zeroFillRun, 10);
+});
+
+test('worker suppresses refill-starvation diagnostic during gapless EOF drain', () => {
+  const messages = [];
+  let intervalCallback = null;
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        return null;
+      },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return true; },
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+
+  sharedState[2] = 50;
+
+  for (let i = 0; i < 15; i++) {
+    intervalCallback();
+  }
+
+  const starvationEvents = messages.filter(
+    (message) =>
+      message.type === 'diagnostics-event' &&
+      message.event.type === 'refill-starvation-diagnostic',
+  );
+
+  assert.equal(starvationEvents.length, 0);
+});
+
+test('worker suppresses refill-starvation diagnostic during finalized streaming drain', () => {
+  const messages = [];
+  let intervalCallback = null;
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => null,
+    createStreamingPlayer: () => ({
+      appendChunk() { return true; },
+      durationMs() { return 0; },
+      positionMs() { return 30000; },
+      isReady() { return true; },
+      isFinalized() { return true; },
+      finalize() {},
+      free() {},
+      decodeFrames() {
+        return new Float32Array(0);
+      },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  controller.playTrackStreaming({
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+  controller.finalizeStream();
+
+  sharedState[2] = 50;
+
+  for (let i = 0; i < 15; i++) {
+    intervalCallback();
+  }
+
+  const starvationEvents = messages.filter(
+    (message) =>
+      message.type === 'diagnostics-event' &&
+      message.event.type === 'refill-starvation-diagnostic',
+  );
+
+  assert.equal(starvationEvents.length, 0);
+});
+
+test('worker diagnostics stay gated outside extended mode', () => {
+  const messages = [];
+  let intervalCallback = null;
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        return null;
+      },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  // Set to minimal or normal
+  controller.setDiagnosticsMode('normal');
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+
+  // Call the interval callback repeatedly
+  for (let i = 0; i < 15; i++) {
+    intervalCallback();
+  }
+
+  const starvationEvents = messages.filter(
+    (message) =>
+      message.type === 'diagnostics-event' &&
+      message.event.type === 'refill-starvation-diagnostic',
+  );
+
+  assert.equal(starvationEvents.length, 0);
+});
