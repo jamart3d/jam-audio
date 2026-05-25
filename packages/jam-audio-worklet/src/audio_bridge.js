@@ -97,6 +97,20 @@ export function createJamAudioBridge({
     await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
   }
 
+  function scheduleDeclickRampToCurrentVolume(reason) {
+    if (!audioContext || !gainNode) return;
+    const now = audioContext.currentTime;
+    gainNode.gain.cancelScheduledValues(now);
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(currentVolume, now + DECLICK_DURATION_S);
+    emitDiagnosticsEvent({
+      type: 'startup-declick-ramp',
+      label: `Startup declick ramp scheduled (${reason})`,
+      timestampMs: nowMs(),
+      severity: 'info',
+    });
+  }
+
   async function waitForWorkerTransportQuiet() {
     if (!playbackWorker) return;
     await sendPlaybackWorkerCommand('transportMute').catch(() => {});
@@ -739,6 +753,7 @@ export function createJamAudioBridge({
         severity: 'info',
         durationMs,
       });
+      scheduleDeclickRampToCurrentVolume('initAudio-startup');
     }).catch(() => {});
 
     // Fallback for when the AudioContext is still suspended after initAudio().
@@ -850,7 +865,7 @@ export function createJamAudioBridge({
     setTrackAudioOnSilentElement(audioBytes);
     try {
       await initAudio();
-      if (gainNode) gainNode.gain.value = currentVolume;
+      if (gainNode) scheduleDeclickRampToCurrentVolume('playTrack-startup');
       createSharedBuffers();
       setStartupPhase('creating decoder');
       await sendPlaybackWorkerCommand('playTrack', {
@@ -890,7 +905,6 @@ export function createJamAudioBridge({
       ensureCrossOriginIsolation();
       await ensureWasm();
       await ensureAudioGraph();
-      gainNode.gain.value = currentVolume;
       if (audioContext && audioContext.state === 'suspended') {
         // Await resume so the AudioContext is running before the worklet starts.
         // On the paste-button path Chrome resolves this immediately (user gesture);
@@ -900,6 +914,7 @@ export function createJamAudioBridge({
           audioContext.resume(),
           new Promise((r) => setTimeout(r, 300)),
         ]).catch(() => {});
+        scheduleDeclickRampToCurrentVolume('playTrackStreaming-startup');
       }
       createSharedBuffers();
       setStartupPhase('creating streaming decoder');
@@ -955,8 +970,8 @@ export function createJamAudioBridge({
           audioContext.resume(),
           new Promise((r) => setTimeout(r, 300)),
         ]).catch(() => {});
+        scheduleDeclickRampToCurrentVolume('playTrackBounded-startup');
       }
-      gainNode.gain.value = currentVolume;
       createSharedBuffers();
       setStartupPhase('creating streaming decoder');
       const sharedStateView = new Int32Array(sharedStateBuffer);
