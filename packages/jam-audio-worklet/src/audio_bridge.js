@@ -87,6 +87,11 @@ export function createJamAudioBridge({
   let isAppOwnedResumeInFlight = false;
   let lastPositionEventTs = 0;
 
+  let queueTrackIds = [];
+  let activeTrackIndex = 0;
+  let activeTrackId = null;
+  let activeTrackTitle = '';
+
   let playbackSessionGeneration = 0;
   let playbackSessionChain = Promise.resolve();
 
@@ -104,6 +109,51 @@ export function createJamAudioBridge({
 
   function isCurrentPlaybackSession(sessionGeneration) {
     return sessionGeneration === playbackSessionGeneration;
+  }
+
+  function saveSessionMetadataToLocalStorage() {
+    try {
+      if (typeof window === 'undefined' || !window.localStorage) return;
+      const storage = window.localStorage;
+      if (!activeTrackId) return;
+
+      storage.setItem('jamdisc-session-track-id', activeTrackId);
+      storage.setItem('jamdisc-session-track-title', activeTrackTitle || '');
+      const posMs = diagnosticsState.positionMs || 0;
+      storage.setItem('jamdisc-session-position-ms', posMs.toString());
+      storage.setItem('jamdisc-session-track-index', activeTrackIndex.toString());
+      storage.setItem('jamdisc-session-has-queue', (queueTrackIds && queueTrackIds.length > 0).toString());
+      storage.setItem('jamdisc-session-timestamp', Date.now().toString());
+    } catch (e) {
+      console.error('[audio_bridge] Failed to save session to localStorage from JS:', e);
+    }
+  }
+
+  function clearSessionMetadataFromLocalStorage() {
+    try {
+      if (typeof window === 'undefined' || !window.localStorage) return;
+      const storage = window.localStorage;
+      storage.removeItem('jamdisc-session-track-id');
+      storage.removeItem('jamdisc-session-track-title');
+      storage.removeItem('jamdisc-session-position-ms');
+      storage.removeItem('jamdisc-session-track-index');
+      storage.removeItem('jamdisc-session-has-queue');
+      storage.removeItem('jamdisc-session-timestamp');
+    } catch (e) {
+      console.error('[audio_bridge] Failed to clear session metadata from localStorage:', e);
+    }
+  }
+
+  function setSessionQueue(trackIds, currentIndex) {
+    queueTrackIds = trackIds || [];
+    activeTrackIndex = currentIndex || 0;
+    if (queueTrackIds.length > 0 && activeTrackIndex >= 0 && activeTrackIndex < queueTrackIds.length) {
+      activeTrackId = queueTrackIds[activeTrackIndex];
+      saveSessionMetadataToLocalStorage();
+    } else {
+      activeTrackId = null;
+      clearSessionMetadataFromLocalStorage();
+    }
   }
 
   const isAndroidTransport = /Android/i.test(navigator.userAgent ?? '');
@@ -726,6 +776,12 @@ export function createJamAudioBridge({
         diagnosticsState.positionMs = 0;
         diagnosticsState.decodedPositionMs = 0;
         processorNode?.port.postMessage({ type: 'reset_position' });
+        if (queueTrackIds && queueTrackIds.length > 0) {
+          activeTrackIndex = Math.min(activeTrackIndex + 1, queueTrackIds.length - 1);
+          activeTrackId = queueTrackIds[activeTrackIndex];
+        }
+        activeTrackTitle = '';
+        saveSessionMetadataToLocalStorage();
         if (typeof onTrackChangedCallback === 'function') {
           onTrackChangedCallback({
             transitionPositionMs: data.transitionPositionMs ?? 0,
@@ -1126,6 +1182,7 @@ export function createJamAudioBridge({
   function seek(positionMs) {
     diagnosticsState.transitionGapMs = null;
     diagnosticsState.positionMs = positionMs;
+    saveSessionMetadataToLocalStorage();
     if (typeof onPositionCallback === 'function') {
       onPositionCallback(positionMs);
     }
@@ -1352,6 +1409,8 @@ export function createJamAudioBridge({
   }
 
   function updateMediaSession(title, artist, album, artworkUrl) {
+    activeTrackTitle = title || '';
+    saveSessionMetadataToLocalStorage();
     if (!('mediaSession' in navigator)) return;
     navigator.mediaSession.metadata = new MediaMetadata({
       title,
@@ -1575,6 +1634,7 @@ export function createJamAudioBridge({
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', () => {
         const visible = document.visibilityState === 'visible';
+        saveSessionMetadataToLocalStorage();
         emitDiagnosticsEvent({
           type: 'visibility-changed',
           label: `Document visibility changed to ${visible ? 'visible' : 'hidden'}`,
@@ -1593,6 +1653,7 @@ export function createJamAudioBridge({
     }
 
     window.addEventListener('pagehide', () => {
+      saveSessionMetadataToLocalStorage();
       emitDiagnosticsEvent({
         type: 'page-hidden',
         label: 'Window pagehide event fired',
@@ -1671,6 +1732,7 @@ export function createJamAudioBridge({
     updatePlaybackState,
     updatePositionState,
     updateMediaSession,
+    setSessionQueue,
     initAudio,
     initEngine: async () => { await ensureWasm(); },
     __test__: {
