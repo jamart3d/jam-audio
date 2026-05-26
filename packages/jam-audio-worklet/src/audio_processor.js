@@ -110,6 +110,14 @@ class JamAudioProcessor extends AudioWorkletProcessor {
       }
     }
 
+    if (this.state.length > 5) {
+      Atomics.store(this.state, 5, this.totalFramesRendered);
+    }
+    if (this.state.length > 6) {
+      this.heartbeatCount = (this.heartbeatCount || 0) + 1;
+      Atomics.store(this.state, 6, this.heartbeatCount);
+    }
+
     return true;
   }
 }

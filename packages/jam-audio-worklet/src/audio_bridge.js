@@ -84,6 +84,26 @@ export function createJamAudioBridge({
   let currentTrackBlobUrl = null;
   let boundedAnchorEndedHandler = null;
   let isAppOwnedResumeInFlight = false;
+  let lastPositionEventTs = 0;
+
+  let playbackSessionGeneration = 0;
+  let playbackSessionChain = Promise.resolve();
+
+  function enqueueLatestPlaybackSession(action) {
+    const sessionGeneration = ++playbackSessionGeneration;
+    const run = playbackSessionChain
+      .catch(() => {})
+      .then(async () => {
+        if (sessionGeneration !== playbackSessionGeneration) return;
+        await action(sessionGeneration);
+      });
+    playbackSessionChain = run.catch(() => {});
+    return run;
+  }
+
+  function isCurrentPlaybackSession(sessionGeneration) {
+    return sessionGeneration === playbackSessionGeneration;
+  }
 
   const isAndroidTransport = /Android/i.test(navigator.userAgent ?? '');
 
@@ -325,6 +345,15 @@ export function createJamAudioBridge({
     if (typeof onDiagnosticsSnapshotCallback !== 'function') {
       return;
     }
+    if (diagnosticsMode === 'extended') {
+      diagnosticsState.bridgePositionEventAgeMs = lastPositionEventTs > 0 ? nowMs() - lastPositionEventTs : null;
+      diagnosticsState.hiddenMediaPlaying = silentAudioEl ? !silentAudioEl.paused : false;
+      diagnosticsState.audioContextState = audioContext ? audioContext.state : 'none';
+    } else {
+      diagnosticsState.bridgePositionEventAgeMs = null;
+      diagnosticsState.hiddenMediaPlaying = null;
+      diagnosticsState.audioContextState = null;
+    }
     onDiagnosticsSnapshotCallback(
       JSON.stringify(buildSnapshot(diagnosticsState, nowMs())),
     );
@@ -542,6 +571,7 @@ export function createJamAudioBridge({
             bufferFillPercent: diagnosticsState.bufferFillPercent,
           });
         } else if (event.data.type === 'position') {
+          lastPositionEventTs = nowMs();
           const positionMs = (event.data.framesRendered / audioContext.sampleRate) * 1000;
           diagnosticsState.positionMs = Math.round(positionMs);
           if (typeof onPositionCallback === 'function') {
@@ -586,6 +616,17 @@ export function createJamAudioBridge({
     if (payload.historyPoint) {
       pushHistoryPoint(diagnosticsState, payload.historyPoint);
     }
+    if (diagnosticsMode === 'extended') {
+      diagnosticsState.readIndex = payload.readIndex !== undefined ? payload.readIndex : null;
+      diagnosticsState.writeIndex = payload.writeIndex !== undefined ? payload.writeIndex : null;
+      diagnosticsState.framesRendered = payload.framesRendered !== undefined ? payload.framesRendered : null;
+      diagnosticsState.workletHeartbeatCount = payload.workletHeartbeatCount !== undefined ? payload.workletHeartbeatCount : null;
+    } else {
+      diagnosticsState.readIndex = null;
+      diagnosticsState.writeIndex = null;
+      diagnosticsState.framesRendered = null;
+      diagnosticsState.workletHeartbeatCount = null;
+    }
   }
 
   function createSharedBuffers() {
@@ -594,7 +635,7 @@ export function createJamAudioBridge({
     sharedPcmBuffer = new SharedArrayBuffer(
       frameCapacity * CHANNELS * Float32Array.BYTES_PER_ELEMENT,
     );
-    sharedStateBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 5);
+    sharedStateBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 7);
     diagnosticsState.framesAvailable = 0;
     diagnosticsState.frameCapacity = frameCapacity;
     diagnosticsState.bufferFillPercent = 0;
@@ -630,9 +671,10 @@ export function createJamAudioBridge({
   function sendPlaybackWorkerCommand(type, payload = {}) {
     const worker = ensurePlaybackWorker();
     const requestId = playbackWorkerRequestId++;
+    const startTime = performance.now();
     worker.postMessage({ type, requestId, ...payload });
     return new Promise((resolve, reject) => {
-      pendingWorkerRequests.set(requestId, { resolve, reject });
+      pendingWorkerRequests.set(requestId, { resolve, reject, startTime });
     });
   }
 
@@ -643,6 +685,8 @@ export function createJamAudioBridge({
         const pending = pendingWorkerRequests.get(data.requestId);
         if (!pending) return;
         pendingWorkerRequests.delete(data.requestId);
+        const duration = performance.now() - pending.startTime;
+        diagnosticsState.workerCommandRoundTripMs = duration;
         if (data.error) pending.reject(new Error(data.error));
         else pending.resolve(data.payload);
         return;
@@ -680,7 +724,12 @@ export function createJamAudioBridge({
         diagnosticsState.positionMs = 0;
         diagnosticsState.decodedPositionMs = 0;
         processorNode?.port.postMessage({ type: 'reset_position' });
-        if (typeof onTrackChangedCallback === 'function') onTrackChangedCallback(data.transitionPositionMs ?? 0);
+        if (typeof onTrackChangedCallback === 'function') {
+          onTrackChangedCallback({
+            transitionPositionMs: data.transitionPositionMs ?? 0,
+            durationMs: data.durationMs ?? 0,
+          });
+        }
         return;
       case 'ended':
         if (typeof onEndedCallback === 'function') onEndedCallback();
@@ -862,156 +911,178 @@ export function createJamAudioBridge({
 
   async function playTrack(audioBytes) {
     await beginPlaybackSession();
-    setTrackAudioOnSilentElement(audioBytes);
-    try {
-      await initAudio();
-      if (gainNode) scheduleDeclickRampToCurrentVolume('playTrack-startup');
-      createSharedBuffers();
-      setStartupPhase('creating decoder');
-      await sendPlaybackWorkerCommand('playTrack', {
-        audioBytes,
-        pcmBuffer: sharedPcmBuffer,
-        stateBuffer: sharedStateBuffer,
-        frameCapacity,
-        sampleRate: audioContext.sampleRate,
-      });
-      setStartupPhase('prebuffering');
-      processorNode.port.postMessage({
-        type: 'init',
-        pcmBuffer: sharedPcmBuffer,
-        stateBuffer: sharedStateBuffer,
-        frameCapacity,
-        channels: CHANNELS,
-      });
-    } catch (error) {
-      markPlaybackState('error');
-      setStartupPhase('error');
-      emitDiagnosticsEvent({
-        type: 'playback-startup-error',
-        label: 'Playback startup error',
-        timestampMs: nowMs(),
-        severity: 'error',
-        message: error instanceof Error ? error.message : String(error),
-      });
-      emitDiagnosticsSnapshot();
-      stopDiagnosticsLoop();
-      throw error;
-    }
+    return enqueueLatestPlaybackSession(async (sessionGeneration) => {
+      if (!isCurrentPlaybackSession(sessionGeneration)) return;
+      setTrackAudioOnSilentElement(audioBytes);
+      try {
+        await initAudio();
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        if (gainNode) scheduleDeclickRampToCurrentVolume('playTrack-startup');
+        createSharedBuffers();
+        setStartupPhase('creating decoder');
+        await sendPlaybackWorkerCommand('playTrack', {
+          audioBytes,
+          pcmBuffer: sharedPcmBuffer,
+          stateBuffer: sharedStateBuffer,
+          frameCapacity,
+          sampleRate: audioContext.sampleRate,
+        });
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        setStartupPhase('prebuffering');
+        processorNode.port.postMessage({
+          type: 'init',
+          pcmBuffer: sharedPcmBuffer,
+          stateBuffer: sharedStateBuffer,
+          frameCapacity,
+          channels: CHANNELS,
+        });
+      } catch (error) {
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        markPlaybackState('error');
+        setStartupPhase('error');
+        emitDiagnosticsEvent({
+          type: 'playback-startup-error',
+          label: 'Playback startup error',
+          timestampMs: nowMs(),
+          severity: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        emitDiagnosticsSnapshot();
+        stopDiagnosticsLoop();
+        throw error;
+      }
+    });
   }
 
   async function playTrackStreaming() {
     await beginPlaybackSession();
-    try {
-      ensureCrossOriginIsolation();
-      await ensureWasm();
-      await ensureAudioGraph();
-      if (audioContext && audioContext.state === 'suspended') {
-        // Await resume so the AudioContext is running before the worklet starts.
-        // On the paste-button path Chrome resolves this immediately (user gesture);
-        // on the no-MEI deeplink path it never resolves, so cap at 300 ms and let
-        // the gesture-resume listener unblock the context after the user taps.
-        await Promise.race([
-          audioContext.resume(),
-          new Promise((r) => setTimeout(r, 300)),
-        ]).catch(() => {});
+    return enqueueLatestPlaybackSession(async (sessionGeneration) => {
+      if (!isCurrentPlaybackSession(sessionGeneration)) return;
+      try {
+        ensureCrossOriginIsolation();
+        await ensureWasm();
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        await ensureAudioGraph();
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        if (audioContext && audioContext.state === 'suspended') {
+          // Await resume so the AudioContext is running before the worklet starts.
+          // On the paste-button path Chrome resolves this immediately (user gesture);
+          // on the no-MEI deeplink path it never resolves, so cap at 300 ms and let
+          // the gesture-resume listener unblock the context after the user taps.
+          await Promise.race([
+            audioContext.resume(),
+            new Promise((r) => setTimeout(r, 300)),
+          ]).catch(() => {});
+        }
         scheduleDeclickRampToCurrentVolume('playTrackStreaming-startup');
+        createSharedBuffers();
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        setStartupPhase('creating streaming decoder');
+        const sharedStateView = new Int32Array(sharedStateBuffer);
+        console.log('[deeplink-diag] playTrackStreaming: pre-worker STOP=',
+          Atomics.load(sharedStateView, 4),
+          ' framesAvailable=', Atomics.load(sharedStateView, 2));
+        await sendPlaybackWorkerCommand('playTrackStreaming', {
+          pcmBuffer: sharedPcmBuffer,
+          stateBuffer: sharedStateBuffer,
+          frameCapacity,
+          sampleRate: audioContext.sampleRate,
+        });
+        console.log('[deeplink-diag] playTrackStreaming: post-worker STOP=',
+          Atomics.load(sharedStateView, 4),
+          ' framesAvailable=', Atomics.load(sharedStateView, 2),
+          ' audioContext.state=', audioContext?.state);
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        setStartupPhase('prebuffering');
+        processorNode.port.postMessage({
+          type: 'init',
+          pcmBuffer: sharedPcmBuffer,
+          stateBuffer: sharedStateBuffer,
+          frameCapacity,
+          channels: CHANNELS,
+        });
+      } catch (error) {
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        markPlaybackState('error');
+        setStartupPhase('error');
+        emitDiagnosticsEvent({
+          type: 'playback-startup-error',
+          label: 'Playback startup error',
+          timestampMs: nowMs(),
+          severity: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        emitDiagnosticsSnapshot();
+        stopDiagnosticsLoop();
+        throw error;
       }
-      createSharedBuffers();
-      setStartupPhase('creating streaming decoder');
-      const sharedStateView = new Int32Array(sharedStateBuffer);
-      console.log('[deeplink-diag] playTrackStreaming: pre-worker STOP=',
-        Atomics.load(sharedStateView, 4),
-        ' framesAvailable=', Atomics.load(sharedStateView, 2));
-      await sendPlaybackWorkerCommand('playTrackStreaming', {
-        pcmBuffer: sharedPcmBuffer,
-        stateBuffer: sharedStateBuffer,
-        frameCapacity,
-        sampleRate: audioContext.sampleRate,
-      });
-      console.log('[deeplink-diag] playTrackStreaming: post-worker STOP=',
-        Atomics.load(sharedStateView, 4),
-        ' framesAvailable=', Atomics.load(sharedStateView, 2),
-        ' audioContext.state=', audioContext?.state);
-      setStartupPhase('prebuffering');
-      processorNode.port.postMessage({
-        type: 'init',
-        pcmBuffer: sharedPcmBuffer,
-        stateBuffer: sharedStateBuffer,
-        frameCapacity,
-        channels: CHANNELS,
-      });
-    } catch (error) {
-      markPlaybackState('error');
-      setStartupPhase('error');
-      emitDiagnosticsEvent({
-        type: 'playback-startup-error',
-        label: 'Playback startup error',
-        timestampMs: nowMs(),
-        severity: 'error',
-        message: error instanceof Error ? error.message : String(error),
-      });
-      emitDiagnosticsSnapshot();
-      stopDiagnosticsLoop();
-      throw error;
-    }
+    });
   }
 
   async function playTrackBounded(url, totalSize) {
     await beginPlaybackSession();
-    if (enableBoundedUrlAnchorExperiment) {
-      setBoundedTrackAudioOnSilentElement(url);
-    }
-    try {
-      ensureCrossOriginIsolation();
-      await ensureWasm();
-      await ensureAudioGraph();
-      if (audioContext && audioContext.state === 'suspended') {
-        await Promise.race([
-          audioContext.resume(),
-          new Promise((r) => setTimeout(r, 300)),
-        ]).catch(() => {});
-        scheduleDeclickRampToCurrentVolume('playTrackBounded-startup');
+    return enqueueLatestPlaybackSession(async (sessionGeneration) => {
+      if (!isCurrentPlaybackSession(sessionGeneration)) return;
+      if (enableBoundedUrlAnchorExperiment) {
+        setBoundedTrackAudioOnSilentElement(url);
       }
-      createSharedBuffers();
-      setStartupPhase('creating streaming decoder');
-      const sharedStateView = new Int32Array(sharedStateBuffer);
-      console.log('[deeplink-diag] playTrackBounded: pre-worker STOP=',
-        Atomics.load(sharedStateView, 4),
-        ' framesAvailable=', Atomics.load(sharedStateView, 2));
-      await sendPlaybackWorkerCommand('playTrackBounded', {
-        url,
-        totalSize,
-        pcmBuffer: sharedPcmBuffer,
-        stateBuffer: sharedStateBuffer,
-        frameCapacity,
-        sampleRate: audioContext.sampleRate,
-      });
-      console.log('[deeplink-diag] playTrackBounded: post-worker STOP=',
-        Atomics.load(sharedStateView, 4),
-        ' framesAvailable=', Atomics.load(sharedStateView, 2),
-        ' audioContext.state=', audioContext?.state);
-      setStartupPhase('prebuffering');
-      processorNode.port.postMessage({
-        type: 'init',
-        pcmBuffer: sharedPcmBuffer,
-        stateBuffer: sharedStateBuffer,
-        frameCapacity,
-        channels: CHANNELS,
-      });
-    } catch (error) {
-      markPlaybackState('error');
-      setStartupPhase('error');
-      emitDiagnosticsEvent({
-        type: 'playback-startup-error',
-        label: 'Playback startup error',
-        timestampMs: nowMs(),
-        severity: 'error',
-        message: error instanceof Error ? error.message : String(error),
-      });
-      emitDiagnosticsSnapshot();
-      stopDiagnosticsLoop();
-      throw error;
-    }
+      try {
+        ensureCrossOriginIsolation();
+        await ensureWasm();
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        await ensureAudioGraph();
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        if (audioContext && audioContext.state === 'suspended') {
+          await Promise.race([
+            audioContext.resume(),
+            new Promise((r) => setTimeout(r, 300)),
+          ]).catch(() => {});
+        }
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        scheduleDeclickRampToCurrentVolume('playTrackBounded-startup');
+        createSharedBuffers();
+        setStartupPhase('creating streaming decoder');
+        const sharedStateView = new Int32Array(sharedStateBuffer);
+        console.log('[deeplink-diag] playTrackBounded: pre-worker STOP=',
+          Atomics.load(sharedStateView, 4),
+          ' framesAvailable=', Atomics.load(sharedStateView, 2));
+        await sendPlaybackWorkerCommand('playTrackBounded', {
+          url,
+          totalSize,
+          pcmBuffer: sharedPcmBuffer,
+          stateBuffer: sharedStateBuffer,
+          frameCapacity,
+          sampleRate: audioContext.sampleRate,
+        });
+        console.log('[deeplink-diag] playTrackBounded: post-worker STOP=',
+          Atomics.load(sharedStateView, 4),
+          ' framesAvailable=', Atomics.load(sharedStateView, 2),
+          ' audioContext.state=', audioContext?.state);
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        setStartupPhase('prebuffering');
+        processorNode.port.postMessage({
+          type: 'init',
+          pcmBuffer: sharedPcmBuffer,
+          stateBuffer: sharedStateBuffer,
+          frameCapacity,
+          channels: CHANNELS,
+        });
+      } catch (error) {
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        markPlaybackState('error');
+        setStartupPhase('error');
+        emitDiagnosticsEvent({
+          type: 'playback-startup-error',
+          label: 'Playback startup error',
+          timestampMs: nowMs(),
+          severity: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        emitDiagnosticsSnapshot();
+        stopDiagnosticsLoop();
+        throw error;
+      }
+    });
   }
 
   async function appendChunk(chunk) {
@@ -1150,10 +1221,32 @@ export function createJamAudioBridge({
     return await sendPlaybackWorkerCommand('getHealthStatus');
   }
 
-  function stop(options = {}) {
+  async function stop(options = {}) {
+    playbackSessionGeneration += 1;
     const { preserveMediaSession = false } = options;
-    if (processorNode) processorNode.port.postMessage({ type: 'stop' });
-    if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
+
+    // Declick: ramp gain to zero before cutting audio to avoid a pop.
+    // Mirrors pause() pattern. rampGainToValue() returns early if gain is
+    // already at/near zero (e.g. stop()-after-pause()), so no double-ramp occurs.
+    if (gainNode && audioContext) {
+      if (isAndroidTransport) {
+        await runMutedAndroidTransportTransition({
+          transitionKind: 'stop',
+          preserveMediaSession,
+          performAction: async () => {
+            if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+            if (playbackWorker) await sendPlaybackWorkerCommand('stop').catch(() => {});
+          },
+        });
+      } else {
+        await rampGainToValue(0, DECLICK_DURATION_S);
+        if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+        if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
+      }
+    } else {
+      if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+      if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
+    }
 
     clearBoundedAnchorEndedHandler();
     restoreSilentAnchor();
@@ -1372,6 +1465,149 @@ export function createJamAudioBridge({
     return { hiddenMediaPlaying, audioContextState, hiddenMediaError };
   }
 
+  async function nudgeWorker() {
+    try {
+      await sendPlaybackWorkerCommand('nudge');
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function resetPositionHeartbeat() {
+    lastPositionEventTs = nowMs();
+    if (processorNode) {
+      processorNode.port.postMessage({ type: 'reset_position' });
+    }
+  }
+
+  async function rebindWorkletNode() {
+    if (!audioContext || !gainNode) return;
+    const oldNode = processorNode;
+    if (oldNode) {
+      try {
+        oldNode.disconnect(gainNode);
+      } catch (e) {
+        console.warn('rebindWorkletNode: disconnect failed', e);
+      }
+    }
+    processorNode = new AudioWorkletNode(audioContext, 'jam-audio-processor', {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [CHANNELS],
+    });
+    processorNode.connect(gainNode);
+    if (oldNode) {
+      processorNode.port.onmessage = oldNode.port.onmessage;
+    }
+    processorNode.port.postMessage({
+      type: 'init',
+      pcmBuffer: sharedPcmBuffer,
+      stateBuffer: sharedStateBuffer,
+      frameCapacity,
+      channels: CHANNELS,
+    });
+  }
+
+  function scheduleSynchronousDeclickToZero() {
+    // Synchronous gain schedule for unload paths (beforeunload/pagehide).
+    // rampGainToValue() uses setTimeout and cannot resolve during unload;
+    // AudioNode scheduling is honored by the audio thread regardless of main-thread
+    // lifecycle, so this four-line form IS effective as a teardown declick.
+    if (!audioContext || !gainNode) return;
+    if (audioContext.state === 'closed') return;
+    const now = audioContext.currentTime;
+    gainNode.gain.cancelScheduledValues(now);
+    gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+    gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
+    if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+  }
+
+  async function prepareForReload() {
+    // 1. Kill the silent audio element immediately.
+    //    The looping silent <audio> element (volume 0.001) is the primary source
+    //    of the pop on Android PWA when audio is paused — it plays even at rest.
+    if (silentAudioEl) {
+      silentAudioEl.volume = 0;
+      silentAudioEl.pause();
+    }
+    // 2. Ramp gain to zero — declick for any in-flight audio.
+    //    rampGainToValue() returns early if already at/near zero.
+    if (gainNode && audioContext && audioContext.state === 'running') {
+      await rampGainToValue(0, DECLICK_DURATION_S);
+    }
+    // 3. Stop the worklet processor — no more frames.
+    if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+    // 4. Close the AudioContext — releases OS audio hardware cleanly before
+    //    the browser would forcibly do so during navigation.
+    if (audioContext) {
+      try { await audioContext.close(); } catch {}
+    }
+  }
+
+  function registerTeardownListeners() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    const handleTeardown = () => scheduleSynchronousDeclickToZero();
+    window.addEventListener('pagehide', handleTeardown, { capture: true });
+    window.addEventListener('beforeunload', handleTeardown, { capture: true });
+  }
+
+  registerTeardownListeners();
+
+  function registerLifecycleListeners() {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', () => {
+        const visible = document.visibilityState === 'visible';
+        emitDiagnosticsEvent({
+          type: 'visibility-changed',
+          label: `Document visibility changed to ${visible ? 'visible' : 'hidden'}`,
+          timestampMs: nowMs(),
+          severity: 'info',
+          details: {
+            documentVisible: visible,
+            audioContextState: audioContext ? audioContext.state : 'none',
+            positionMs: diagnosticsState.positionMs,
+            workerPlaying: diagnosticsState.workerPlaying,
+            workerEos: diagnosticsState.workerEos,
+            workerReady: diagnosticsState.workerReady,
+          },
+        });
+      });
+    }
+
+    window.addEventListener('pagehide', () => {
+      emitDiagnosticsEvent({
+        type: 'page-hidden',
+        label: 'Window pagehide event fired',
+        timestampMs: nowMs(),
+        severity: 'info',
+        details: {
+          documentVisible: typeof document !== 'undefined' ? document.visibilityState === 'visible' : true,
+          audioContextState: audioContext ? audioContext.state : 'none',
+          workerPlaying: diagnosticsState.workerPlaying,
+        },
+      });
+    }, { capture: true });
+
+    window.addEventListener('pageshow', () => {
+      emitDiagnosticsEvent({
+        type: 'page-shown',
+        label: 'Window pageshow event fired',
+        timestampMs: nowMs(),
+        severity: 'info',
+        details: {
+          documentVisible: typeof document !== 'undefined' ? document.visibilityState === 'visible' : true,
+          audioContextState: audioContext ? audioContext.state : 'none',
+          workerPlaying: diagnosticsState.workerPlaying,
+          positionMs: diagnosticsState.positionMs,
+        },
+      });
+    }, { capture: true });
+  }
+
+  registerLifecycleListeners();
+
   const bridgeApi = {
     playTrack,
     playTrackStreaming,
@@ -1382,6 +1618,9 @@ export function createJamAudioBridge({
     appendChunk,
     finalizeStream,
     transitionStreamToGapless,
+    nudgeWorker,
+    resetPositionHeartbeat,
+    rebindWorkletNode,
 
     preloadNext,
     preloadNextBounded,
@@ -1389,6 +1628,7 @@ export function createJamAudioBridge({
     pause,
     resume,
     stop,
+    prepareForReload,
     setVolume,
     setBufferedDurationMs,
     bufferedDurationMs: () => lastKnownBufferedDurationMs,

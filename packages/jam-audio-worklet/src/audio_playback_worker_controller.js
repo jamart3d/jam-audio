@@ -59,6 +59,8 @@ function createPlaybackWorkerController({
   let handoffPendingUntilMs = 0;
   let lastCompletedHandoffUnderrunDelta = 0;
   let endedEmitted = false;
+  let preloadHoldUntilMs = 0;
+  let preloadHoldActive = false;
   let lastChunkReceivedAt = 0;
   let isStalled = false;
   let consecutiveZeroRefills = 0;
@@ -73,15 +75,31 @@ function createPlaybackWorkerController({
     clearIntervalFn,
     getDiagnostics: () => diagnostics,
     getFrameCapacity: () => frameCapacity,
-    getExtraSyncPayload: () => ({
-      lowWaterMarkCount: diagnostics.lowWaterMarkCount,
-      recoveryModeActive: diagnostics.recoveryModeActive,
-      activeBoundedWindowSize: diagnostics.activeBoundedWindowSize,
-      retainedBytes: diagnostics.retainedBytes,
-      pendingSeekDistanceMs: diagnostics.pendingSeekDistanceMs,
-      fetchToDecodeLagMs: diagnostics.fetchToDecodeLagMs,
-      resumeAfterStallLatencyMs: diagnostics.resumeAfterStallLatencyMs,
-    }),
+    getExtraSyncPayload: () => {
+      const payload = {
+        lowWaterMarkCount: diagnostics.lowWaterMarkCount,
+        recoveryModeActive: diagnostics.recoveryModeActive,
+        activeBoundedWindowSize: diagnostics.activeBoundedWindowSize,
+        retainedBytes: diagnostics.retainedBytes,
+        pendingSeekDistanceMs: diagnostics.pendingSeekDistanceMs,
+        fetchToDecodeLagMs: diagnostics.fetchToDecodeLagMs,
+        resumeAfterStallLatencyMs: diagnostics.resumeAfterStallLatencyMs,
+      };
+      if (diagnosticsMode === 'extended') {
+        if (sharedState) {
+          payload.readIndex = Atomics.load(sharedState, READ_INDEX);
+          payload.writeIndex = Atomics.load(sharedState, WRITE_INDEX);
+          payload.framesRendered = sharedState.length > 5 ? Atomics.load(sharedState, 5) : null;
+          payload.workletHeartbeatCount = sharedState.length > 6 ? Atomics.load(sharedState, 6) : null;
+        } else {
+          payload.readIndex = null;
+          payload.writeIndex = null;
+          payload.framesRendered = null;
+          payload.workletHeartbeatCount = null;
+        }
+      }
+      return payload;
+    },
     getRefillTimerId: () => refillTimerId,
     setRefillTimerId: (value) => {
       refillTimerId = value;
@@ -211,6 +229,8 @@ function createPlaybackWorkerController({
     handoffPendingUntilMs = 0;
     lastCompletedHandoffUnderrunDelta = 0;
     endedEmitted = false;
+    preloadHoldUntilMs = 0;
+    preloadHoldActive = false;
     lastChunkReceivedAt = 0;
     isStalled = false;
     consecutiveZeroRefills = 0;
@@ -315,6 +335,23 @@ function createPlaybackWorkerController({
       framesAvailable: diagnostics.framesAvailable,
       bufferFillPercent: diagnostics.bufferFillPercent,
     });
+    if (diagnostics._isStreamingReinit && diagnostics._reInitStartMs > 0) {
+      const reInitReadyMs = performanceNow();
+      const audibleLateGapMs = Math.max(0, reInitReadyMs - diagnostics._reInitStartMs);
+      emitDiagnosticsEvent({
+        type: 'track-handoff',
+        label: 'Track handoff (streaming reinit)',
+        timestampMs: nowMs(),
+        severity: audibleLateGapMs > 100 ? 'warning' : 'info',
+        signedGapMs: audibleLateGapMs,
+        audibleLateGapMs,
+        isStreamingReinit: true,
+        transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
+        underrunDelta: 0,
+      });
+      diagnostics._isStreamingReinit = false;
+      diagnostics._reInitStartMs = 0;
+    }
   }
 
   function maybeStartPlaybackIfBuffered(optionalFrames) {
@@ -337,6 +374,26 @@ function createPlaybackWorkerController({
 
   function emitEnded() {
     if (endedEmitted) {
+      return;
+    }
+    // Layer A hold window: if no gapless bytes are pending, wait up to 500ms
+    // for them to arrive before falling through to streaming reinit.
+    if (pendingGaplessBytes === null && !preloadHoldActive) {
+      preloadHoldActive = true;
+      preloadHoldUntilMs = nowMs() + 500;
+      return; // hold — do not emit yet
+    }
+    if (pendingGaplessBytes === null && preloadHoldActive) {
+      if (nowMs() < preloadHoldUntilMs) {
+        return; // still within hold window — do not emit yet
+      }
+      // Hold window expired — fall through to streaming reinit
+      preloadHoldActive = false;
+    }
+    // pendingGaplessBytes is not null: the streaming→gapless bridge will
+    // handle the handoff on the next refill tick. Do not emit ended.
+    if (pendingGaplessBytes !== null) {
+      preloadHoldActive = false;
       return;
     }
     endedEmitted = true;
@@ -516,8 +573,13 @@ function createPlaybackWorkerController({
             streamingPlayer = null;
             streamingFinalized = false;
             player = newPlayer;
-            emitMessage({ type: 'track-changed', transitionPositionMs: Math.floor(transitionPositionMs) });
-            emitMessage({ type: 'duration', durationMs: Math.floor(newPlayer.durationMs()) });
+            const nextDurationMs = Math.floor(newPlayer.durationMs() || _streamingHintDurationMs || 0);
+            emitMessage({
+              type: 'track-changed',
+              transitionPositionMs: Math.floor(transitionPositionMs),
+              durationMs: nextDurationMs,
+            });
+            emitMessage({ type: 'duration', durationMs: nextDurationMs });
             emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, end-of-stream path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
             return;
           }
@@ -577,8 +639,13 @@ function createPlaybackWorkerController({
               streamingFinalized = false;
               player = newPlayer;
 
-              emitMessage({ type: 'track-changed', transitionPositionMs: Math.floor(transitionPositionMs) });
-              emitMessage({ type: 'duration', durationMs: Math.floor(newPlayer.durationMs()) });
+              const nextDurationMs = Math.floor(newPlayer.durationMs() || _streamingHintDurationMs || 0);
+              emitMessage({
+                type: 'track-changed',
+                transitionPositionMs: Math.floor(transitionPositionMs),
+                durationMs: nextDurationMs,
+              });
+              emitMessage({ type: 'duration', durationMs: nextDurationMs });
               emitDiagnosticsEvent({
                 type: 'track-handoff',
                 label: 'Track handoff (streaming→gapless)',
@@ -633,8 +700,13 @@ function createPlaybackWorkerController({
             streamingPlayer = null;
             streamingFinalized = false;
             player = newPlayer;
-            emitMessage({ type: 'track-changed', transitionPositionMs: Math.floor(transitionPositionMs) });
-            emitMessage({ type: 'duration', durationMs: Math.floor(newPlayer.durationMs()) });
+            const nextDurationMs = Math.floor(newPlayer.durationMs() || _streamingHintDurationMs || 0);
+            emitMessage({
+              type: 'track-changed',
+              transitionPositionMs: Math.floor(transitionPositionMs),
+              durationMs: nextDurationMs,
+            });
+            emitMessage({ type: 'duration', durationMs: nextDurationMs });
             emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, non-array path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
             return;
           }
@@ -679,8 +751,13 @@ function createPlaybackWorkerController({
             streamingPlayer = null;
             streamingFinalized = false;
             player = newPlayer;
-            emitMessage({ type: 'track-changed', transitionPositionMs: Math.floor(transitionPositionMs) });
-            emitMessage({ type: 'duration', durationMs: Math.floor(newPlayer.durationMs()) });
+            const nextDurationMs = Math.floor(newPlayer.durationMs() || _streamingHintDurationMs || 0);
+            emitMessage({
+              type: 'track-changed',
+              transitionPositionMs: Math.floor(transitionPositionMs),
+              durationMs: nextDurationMs,
+            });
+            emitMessage({ type: 'duration', durationMs: nextDurationMs });
             emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, zero-length path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
             return;
           }
@@ -744,11 +821,13 @@ function createPlaybackWorkerController({
               transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
               underrunDelta,
             });
+            const nextDurationMs = Math.floor(newDuration || 0);
             emitMessage({
               type: 'track-changed',
               transitionPositionMs: Math.floor(transitionPositionMs),
+              durationMs: nextDurationMs,
             });
-            emitMessage({ type: 'duration', durationMs: Math.floor(newDuration) });
+            emitMessage({ type: 'duration', durationMs: nextDurationMs });
             transitionMonitorUntilMs = handoffStartedAtMs + 500;
             transitionFloorCandidate = Infinity;
           }
@@ -994,6 +1073,9 @@ function createPlaybackWorkerController({
     },
 
     playTrackStreaming(buffers) {
+      const isReinit = !!(player || streamingPlayer || windowedPlayer);
+      const reInitStartMs = isReinit ? performanceNow() : 0;
+
       stopRefillLoop();
       resetPlaybackState();
       diagnostics = createWorkerDiagnostics({
@@ -1024,6 +1106,10 @@ function createPlaybackWorkerController({
           decoderCreate: Number((performanceNow() - startedAt).toFixed(2)),
         },
       });
+      if (isReinit) {
+        diagnostics._reInitStartMs = reInitStartMs;
+        diagnostics._isStreamingReinit = true;
+      }
     },
 
     appendChunk(chunk) {
@@ -1268,12 +1354,26 @@ function createPlaybackWorkerController({
         : false;
       const pendingSeek = (windowedPlayer?.hasPendingSeek()) ?? false;
 
-      return {
+      const health = {
         framesAvailable,
         decoderReady: !!(windowedPlayer || streamingPlayer || player),
         endOfStream,
         pendingSeek,
       };
+
+      if (sharedState) {
+        health.readIndex = Atomics.load(sharedState, READ_INDEX);
+        health.writeIndex = Atomics.load(sharedState, WRITE_INDEX);
+        health.framesRendered = sharedState.length > 5 ? Atomics.load(sharedState, 5) : null;
+        health.workletHeartbeatCount = sharedState.length > 6 ? Atomics.load(sharedState, 6) : null;
+      } else {
+        health.readIndex = null;
+        health.writeIndex = null;
+        health.framesRendered = null;
+        health.workletHeartbeatCount = null;
+      }
+
+      return health;
     },
   };
 }
