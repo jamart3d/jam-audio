@@ -83,6 +83,7 @@ export function createJamAudioBridge({
   let silentAudioEl = null;
   let currentTrackBlobUrl = null;
   let boundedAnchorEndedHandler = null;
+  let silentPlayHandler = null;
   let isAppOwnedResumeInFlight = false;
   let lastPositionEventTs = 0;
 
@@ -208,14 +209,15 @@ export function createJamAudioBridge({
 
     document.body.appendChild(silentAudioEl);
 
-    silentAudioEl.addEventListener('play', () => {
+    silentPlayHandler = () => {
       if (isAppOwnedResumeInFlight) {
         return;
       }
       if (audioContext && audioContext.state === 'suspended') {
         audioContext.resume().catch(() => {});
       }
-    });
+    };
+    silentAudioEl.addEventListener('play', silentPlayHandler);
   }
 
   function setTrackAudioOnSilentElement(bytes) {
@@ -1530,14 +1532,28 @@ export function createJamAudioBridge({
     if (silentAudioEl) {
       silentAudioEl.volume = 0;
       silentAudioEl.pause();
+      if (silentPlayHandler) {
+        silentAudioEl.removeEventListener('play', silentPlayHandler);
+        silentPlayHandler = null;
+      }
+      silentAudioEl.onplay = null; // Prevent auto-resume race
     }
-    // 2. Ramp gain to zero — declick for any in-flight audio.
-    //    rampGainToValue() returns early if already at/near zero.
-    if (gainNode && audioContext && audioContext.state === 'running') {
-      await rampGainToValue(0, DECLICK_DURATION_S);
-    }
-    // 3. Stop the worklet processor — no more frames.
+
+    // 2. Stop the worklet processor first — it zeroes its output buffer.
     if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+
+    // 3. Ramp + wait regardless of suspended/running state.
+    if (gainNode && audioContext && audioContext.state !== 'closed') {
+      if (audioContext.state === 'running') {
+        const now = audioContext.currentTime;
+        gainNode.gain.cancelScheduledValues(now);
+        gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+        gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
+      }
+      await new Promise((r) => setTimeout(r, DECLICK_DURATION_S * 1000));
+      try { processorNode?.disconnect(); } catch {} // AFTER ramp
+    }
+
     // 4. Close the AudioContext — releases OS audio hardware cleanly before
     //    the browser would forcibly do so during navigation.
     if (audioContext) {
