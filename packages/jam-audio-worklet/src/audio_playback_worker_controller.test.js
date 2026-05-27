@@ -1132,5 +1132,107 @@ test('extended diagnostics returns correct indices and heartbeat when using size
   assert.equal(syncMsgExtended.payload.workletHeartbeatCount, 999);
 });
 
+test('gapless handoff: second track boundary fires track-changed for third track', () => {
+  // Regression test for the double-play bug (log15.txt):
+  // Track 1 (TJ, duration 1000ms) → Track 2 (MaMU, duration 800ms) → Track 3 (DEMI)
+  // After the first handoff fires, JS must reset its boundary detector so
+  // the second handoff can fire when MaMU ends.
+  const messages = [];
+  let intervalCallback = null;
 
+  // Three Rust-internal states:
+  //   phase 0: decoding TJ (returns frames, durationMs=1000, positionMs climbs to ~1000)
+  //   phase 1: TJ just ended, Rust swapped active→MaMU (durationMs=800, positionMs continues from ~1000)
+  //   phase 2: MaMU just ended, Rust swapped active→DEMI (durationMs=1200, positionMs continues)
+  let decodePhase = 0;
+  let totalPosition = 0;
 
+  const pcmBuffer = new SharedArrayBuffer(500 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  // Seed enough frames so the buffer fill percent stays above HANDOFF_FILL_THRESHOLD_PERCENT (25%)
+  Atomics.store(sharedState, 2, 300); // framesAvailable
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames(n) {
+        totalPosition += 10;
+        return new Float32Array(CHANNELS * n);
+      },
+      durationMs() {
+        // Phase 0: TJ playing → returns 1000
+        // Phase 1: after first internal swap → returns 800 (MaMU)
+        // Phase 2: after second internal swap → returns 1200 (DEMI)
+        if (decodePhase === 0) return 1000;
+        if (decodePhase === 1) return 800;
+        return 1200;
+      },
+      positionMs() {
+        return totalPosition;
+      },
+      hasEnded() { return false; },
+      loadNext() {
+        // Dart calls this when preloading the next track.
+        // The internal swap happens in Rust; from JS, loadNext() is a no-op result.
+        return null;
+      },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (msg) => messages.push(msg),
+    setIntervalFn: (cb) => { intervalCallback = cb; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  // Start track 1 (TJ, duration 1000ms).
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 400,
+    sampleRate: 48000,
+  });
+
+  // Preload track 2 (MaMU) — tells JS worker next track is ready.
+  controller.preloadNext(new Uint8Array([2]));
+
+  // Simulate refill ticks while TJ plays (position well below boundary).
+  totalPosition = 500;
+  Atomics.store(sharedState, 2, 300);
+  intervalCallback(); // tick — no handoff yet (500 < 1000-50)
+
+  // Simulate crossing TJ's boundary: position ≥ 1000 - TRACK_HANDOFF_TOLERANCE_MS (50).
+  // At this point the Rust player has internally swapped to MaMU, so durationMs() → 800.
+  totalPosition = 1005;
+  decodePhase = 1; // Rust has swapped; durationMs() now returns MaMU's duration (800)
+  Atomics.store(sharedState, 2, 300);
+  intervalCallback(); // tick — FIRST handoff should fire
+
+  const firstHandoff = messages.filter(m => m.type === 'track-changed');
+  assert.equal(firstHandoff.length, 1, 'first track-changed must fire at TJ→MaMU boundary');
+
+  // Preload track 3 (DEMI).
+  controller.preloadNext(new Uint8Array([3]));
+
+  // Simulate crossing MaMU's boundary.
+  // TJ ended at absolute position ~1005; MaMU duration is 800ms.
+  // MaMU's absolute boundary = 1005 + 800 = 1805ms.
+  // At this point the Rust player has swapped to DEMI, so durationMs() → 1200.
+  totalPosition = 1810;
+  decodePhase = 2; // Rust has swapped; durationMs() now returns DEMI's duration (1200)
+  Atomics.store(sharedState, 2, 300);
+  intervalCallback(); // tick — SECOND handoff must fire
+
+  const allHandoffs = messages.filter(m => m.type === 'track-changed');
+  assert.equal(
+    allHandoffs.length,
+    2,
+    'second track-changed must fire at MaMU→DEMI boundary (regression: was 1 before fix)',
+  );
+  assert.equal(allHandoffs[1].durationMs, 1200, 'second track-changed must carry DEMI duration');
+});

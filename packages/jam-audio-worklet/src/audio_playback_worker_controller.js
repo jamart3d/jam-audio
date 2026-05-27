@@ -830,6 +830,15 @@ function createPlaybackWorkerController({
             emitMessage({ type: 'duration', durationMs: nextDurationMs });
             transitionMonitorUntilMs = handoffStartedAtMs + 500;
             transitionFloorCandidate = Infinity;
+            // Reset the boundary detector for the next gapless handoff.
+            // After the Rust-internal track swap, activePlayer.durationMs() returns
+            // the new track's duration (not the old track's). The new absolute
+            // end position is transitionPositionMs (= old end) + newDuration.
+            // setCurrentTrackEndPosition resets currentTrackEndPositionHandled = false
+            // so the next boundary crossing will fire a second track-changed.
+            if (newDuration > 0) {
+              setCurrentTrackEndPosition(transitionPositionMs + newDuration, true);
+            }
           }
         }
       }

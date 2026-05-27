@@ -145,10 +145,16 @@ export function createJamAudioBridge({
   }
 
   function setSessionQueue(trackIds, currentIndex) {
+    const oldTrackId = activeTrackId;
     queueTrackIds = trackIds || [];
     activeTrackIndex = currentIndex || 0;
     if (queueTrackIds.length > 0 && activeTrackIndex >= 0 && activeTrackIndex < queueTrackIds.length) {
       activeTrackId = queueTrackIds[activeTrackIndex];
+      if (activeTrackId !== oldTrackId) {
+        diagnosticsState.positionMs = 0;
+        diagnosticsState.decodedPositionMs = 0;
+        processorNode?.port.postMessage({ type: 'reset_position' });
+      }
       saveSessionMetadataToLocalStorage();
     } else {
       activeTrackId = null;
@@ -598,7 +604,7 @@ export function createJamAudioBridge({
 
     if (!gainNode) {
       gainNode = audioContext.createGain();
-      gainNode.gain.value = currentVolume;
+      gainNode.gain.value = 0; // Initialize to silent to avoid startup pops/clicks during eager context creation
       gainNode.connect(audioContext.destination);
     }
 
@@ -1096,9 +1102,9 @@ export function createJamAudioBridge({
             new Promise((r) => setTimeout(r, 300)),
           ]).catch(() => {});
         }
-        if (!isCurrentPlaybackSession(sessionGeneration)) return;
         scheduleDeclickRampToCurrentVolume('playTrackBounded-startup');
         createSharedBuffers();
+        if (!isCurrentPlaybackSession(sessionGeneration)) return;
         setStartupPhase('creating streaming decoder');
         const sharedStateView = new Int32Array(sharedStateBuffer);
         console.log('[deeplink-diag] playTrackBounded: pre-worker STOP=',
@@ -1634,7 +1640,9 @@ export function createJamAudioBridge({
     if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
       document.addEventListener('visibilitychange', () => {
         const visible = document.visibilityState === 'visible';
-        saveSessionMetadataToLocalStorage();
+        setTimeout(() => {
+          saveSessionMetadataToLocalStorage();
+        }, 50);
         emitDiagnosticsEvent({
           type: 'visibility-changed',
           label: `Document visibility changed to ${visible ? 'visible' : 'hidden'}`,
