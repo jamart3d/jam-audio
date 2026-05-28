@@ -396,9 +396,10 @@ export function createJamAudioBridge({
   }
 
   function emitDiagnosticsEvent(event) {
-    pushEvent(diagnosticsState, event);
+    const emitEvent = { ...event, timestampMs: Date.now() };
+    pushEvent(diagnosticsState, emitEvent);
     if (typeof onDiagnosticsEventCallback === 'function') {
-      onDiagnosticsEventCallback(JSON.stringify(event));
+      onDiagnosticsEventCallback(JSON.stringify(emitEvent));
     }
   }
 
