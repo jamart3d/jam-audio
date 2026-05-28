@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-05-27
+
+### Added
+- Added worklet diagnostics for AudioContext state changes, visibility changes, track-change durations, playback heartbeats, and teardown/reload behavior
+- Saved worklet session metadata to localStorage so startup and playback state can be inspected across sessions
+
+### Changed
+- Standardized worklet diagnostic timestamps on wall-clock time
+- Added startup declick ramping and initialized declick silence for safer playback startup and handoff transitions
+
+### Fixed
+- Reset gapless end-of-stream handoff state more defensively to avoid stale transition state after playback completion
+- Improved worklet reload and teardown declick behavior
+
 ## [0.3.2] — 2026-05-22
 
 ### Fixed
