@@ -14,6 +14,7 @@ Browser and Flutter media APIs offer convenience but limited control. For music 
 - **Flutter bridge** — the same engine exposed to Flutter via `flutter_rust_bridge` for mobile and desktop
 - **Low-latency worklet** — a dedicated `AudioWorklet` processor keeps the audio thread isolated from the main thread
 - **PWA Persistence** — integrated heartbeat and anchor diagnostic mechanism to maintain Media Session notifications on mobile platforms (Android)
+- **Runtime diagnostics** — bridge snapshots and lifecycle events expose AudioContext state, playback health, handoff timing, and visibility changes for production troubleshooting
 
 ## Architecture
 
@@ -21,7 +22,7 @@ The pipeline is split into three main packages to ensure a clean separation betw
 
 - `jam-audio-engine`: The core Rust audio engine. Handles decoding, metadata extraction, ring buffering, and gapless playback.
 - `jam-audio-flutter`: Flutter-specific bindings for the engine using `flutter_rust_bridge`.
-- `jam-audio-worklet`: Generic JavaScript `AudioWorklet` bridge and processor for low-latency web playback. Includes the canonical Media Session heartbeat implementation in `src/audio_bridge.js` to ensure PWA persistence on mobile platforms.
+- `jam-audio-worklet`: Generic JavaScript `AudioWorklet` bridge and processor for low-latency web playback. Includes the canonical Media Session heartbeat implementation in `src/audio_bridge.js` to ensure PWA persistence on mobile platforms, plus diagnostics callbacks for playback health and lifecycle inspection.
 
 ## Requirements
 
