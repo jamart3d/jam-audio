@@ -59,6 +59,7 @@ function createPlaybackWorkerController({
   let handoffPendingUntilMs = 0;
   let lastCompletedHandoffUnderrunDelta = 0;
   let endedEmitted = false;
+  let _pendingHandoffBasePositionMs = -1;
   let preloadHoldUntilMs = 0;
   let preloadHoldActive = false;
   let lastChunkReceivedAt = 0;
@@ -155,7 +156,7 @@ function createPlaybackWorkerController({
     const isCritical = framesAvailable < CRITICAL_THRESHOLD_FRAMES && frameCapacity > 0;
     if (isCritical !== diagnostics.recoveryModeActive) {
       diagnostics.recoveryModeActive = isCritical;
-      if (isCritical) {
+      if (isCritical && startupCompleted) {
         emitDiagnosticsEvent({
           type: 'recovery-mode-entered',
           label: 'Entering recovery mode (low headroom)',
@@ -221,6 +222,7 @@ function createPlaybackWorkerController({
     currentTrackEndPositionMs = 0;
     currentTrackEndPositionKnown = false;
     currentTrackEndPositionHandled = false;
+    _pendingHandoffBasePositionMs = -1;
     _streamingHintDurationMs = 0;
     transitionMonitorUntilMs = 0;
     transitionFloorCandidate = Infinity;
@@ -775,10 +777,21 @@ function createPlaybackWorkerController({
           !currentTrackEndPositionKnown &&
           (newDuration > 0 || _streamingHintDurationMs > 0)
         ) {
-          setCurrentTrackEndPosition(
-            newDuration || _streamingHintDurationMs,
-            true,
-          );
+          const resolvedDuration = newDuration || _streamingHintDurationMs;
+          const endPositionMs =
+            _pendingHandoffBasePositionMs >= 0
+              ? _pendingHandoffBasePositionMs + resolvedDuration
+              : resolvedDuration;
+          setCurrentTrackEndPosition(endPositionMs, true);
+          if (_pendingHandoffBasePositionMs >= 0) {
+            // Emit a corrected duration for the track whose duration was unknown
+            // at handoff time. Dart uses this to schedule the next preload.
+            emitMessage({
+              type: 'duration',
+              durationMs: Math.floor(resolvedDuration),
+            });
+            _pendingHandoffBasePositionMs = -1;
+          }
         }
         const transitionPositionMs = activePlayer.positionMs();
         if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
@@ -837,7 +850,19 @@ function createPlaybackWorkerController({
             // setCurrentTrackEndPosition resets currentTrackEndPositionHandled = false
             // so the next boundary crossing will fire a second track-changed.
             if (newDuration > 0) {
+              // Duration known at handoff time: set absolute boundary directly.
               setCurrentTrackEndPosition(transitionPositionMs + newDuration, true);
+              _pendingHandoffBasePositionMs = -1;
+            } else {
+              // Duration unknown at handoff time (VBR MP3, Ogg without headers).
+              // Save the base so the per-tick discovery block can resolve the
+              // absolute boundary once durationMs() returns a positive value.
+              // setCurrentTrackEndPosition(0, false) resets:
+              //   currentTrackEndPositionHandled = false  (via setCurrentTrackEndPosition)
+              //   currentTrackEndPositionKnown   = false  (isKnown arg)
+              // so the discovery block will fire on the next tick with a real duration.
+              _pendingHandoffBasePositionMs = transitionPositionMs;
+              setCurrentTrackEndPosition(0, false);
             }
           }
         }
@@ -898,6 +923,7 @@ function createPlaybackWorkerController({
     } else {
       updateBufferMetrics();
       emitDiagnosticsSync();
+      maybeStartPlaybackIfBuffered();
     }
   }
 

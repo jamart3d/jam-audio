@@ -1236,3 +1236,188 @@ test('gapless handoff: second track boundary fires track-changed for third track
   );
   assert.equal(allHandoffs[1].durationMs, 1200, 'second track-changed must carry DEMI duration');
 });
+
+test('gapless handoff fires for third track when new-track durationMs is 0 at boundary', () => {
+  // Regression test for: when durationMs() returns 0 at handoff time (VBR MP3 /
+  // Ogg without embedded duration), the boundary detector for the NEXT handoff
+  // must still be armed. Without the fix, currentTrackEndPositionHandled stays
+  // true and the third track-changed never fires.
+  const messages = [];
+  let intervalCallback = null;
+
+  // Track A: 1000ms. Track B: duration unknown at handoff (returns 0), resolves
+  // to 2000ms a couple ticks later. Track C: just needs preload to be accepted.
+  let position = 0;
+  let handoff1Done = false;
+  let durationDiscoveryTick = 0;
+
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        return new Float32Array(CHANNELS * 10);
+      },
+      durationMs() {
+        if (!handoff1Done) return 1000;        // track A: known duration
+        if (durationDiscoveryTick < 2) return 0; // track B: unknown at handoff
+        return 2000;                             // track B: discovered after 2 ticks
+      },
+      positionMs() {
+        return position;
+      },
+      hasEnded() {
+        return false;
+      },
+      loadNext() {
+        return null;
+      },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100 });
+
+  // Buffer at 50 frames (above HANDOFF_FILL_THRESHOLD_PERCENT) for all handoffs.
+  sharedState[2] = 50;
+
+  // Preload track B (sets loadNext, duration stays 1000 until handoff).
+  controller.preloadNext(new Uint8Array([9]));
+
+  // Tick 1: position=0, before boundary — no track-changed.
+  intervalCallback();
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    0,
+    'no track-changed before boundary',
+  );
+
+  // Handoff 1 (A→B): position crosses 1000ms. durationMs() returns 0 for track B.
+  position = 1005;
+  handoff1Done = true; // durationMs() now returns 0
+  sharedState[2] = 50;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    1,
+    'handoff 1 (A→B) must fire track-changed',
+  );
+
+  // Ticks 2–3 post-handoff: durationMs still 0 (durationDiscoveryTick < 2).
+  durationDiscoveryTick++;
+  sharedState[2] = 50;
+  intervalCallback(); // tick 2 — no second track-changed yet
+  durationDiscoveryTick++;
+  sharedState[2] = 50;
+  intervalCallback(); // tick 3 — durationMs now returns 2000; boundary should be set to 3005
+
+  // Tick 4: position crosses the resolved boundary (1005 + 2000 - tolerance).
+  // Preload track C first so fill check passes.
+  controller.preloadNext(new Uint8Array([42]));
+  position = 3010;
+  sharedState[2] = 50;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    2,
+    'handoff 2 (B→C) must fire after deferred duration discovery arms the boundary detector',
+  );
+
+  // A corrected duration message must be emitted once the real duration is known.
+  const correctedDuration = messages.findLast(
+    (m) => m.type === 'duration' && m.durationMs === 2000,
+  );
+  assert.ok(
+    correctedDuration !== undefined,
+    'corrected duration message (durationMs=2000) must be emitted when track B duration resolves',
+  );
+});
+
+test('recovery-mode-entered is suppressed before startup completes but fires post-startup', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let now = 100;
+
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const infinitePlayer = {
+    decodeFrames() {
+      return new Float32Array(0);
+    },
+    durationMs() { return 120000; },
+    positionMs() { return 0; },
+    hasEnded() { return false; },
+    loadNext() { return null; },
+    seekToMs() {},
+    free() {},
+  };
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => infinitePlayer,
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => now,
+    nowMs: () => Math.round(now),
+  });
+
+  controller.playTrack(new Uint8Array([1, 2, 3]), {
+    pcmBuffer: new SharedArrayBuffer(100000 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer,
+    frameCapacity: 100000,
+  });
+
+  // Phase 1: startup phase — framesAvailable=0 is below CRITICAL_THRESHOLD_FRAMES (44100)
+  // and startupCompleted is false.  The event must NOT fire.
+  messages.length = 0;
+  sharedState[2] = 0;
+  intervalCallback();
+
+  assert.ok(
+    messages.every(
+      (m) => !(m.type === 'diagnostics-event' && m.event?.type === 'recovery-mode-entered'),
+    ),
+    'recovery-mode-entered must not fire before startup completes',
+  );
+
+  // Phase 2: complete startup — raise framesAvailable to capacity (100000) to bypass refill loop.
+  sharedState[2] = 100000;
+  messages.length = 0;
+  intervalCallback();
+
+  // Phase 3: post-startup — drop frames back below CRITICAL_THRESHOLD_FRAMES.
+  sharedState[2] = 0;
+  messages.length = 0;
+  intervalCallback();
+
+  assert.ok(
+    messages.some(
+      (m) => m.type === 'diagnostics-event' && m.event?.type === 'recovery-mode-entered',
+    ),
+    'recovery-mode-entered must fire post-startup when frames drop below critical threshold',
+  );
+});
+

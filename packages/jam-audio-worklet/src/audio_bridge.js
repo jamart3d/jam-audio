@@ -185,6 +185,9 @@ export function createJamAudioBridge({
       label: `Startup declick ramp scheduled (${reason})`,
       timestampMs: nowMs(),
       severity: 'info',
+      gainNodeValue: gainNode?.gain?.value ?? null,
+      targetVolume: currentVolume,
+      audioContextState: audioContext?.state ?? 'none',
     });
   }
 
@@ -606,6 +609,14 @@ export function createJamAudioBridge({
       gainNode = audioContext.createGain();
       gainNode.gain.value = 0; // Initialize to silent to avoid startup pops/clicks during eager context creation
       gainNode.connect(audioContext.destination);
+      emitDiagnosticsEvent({
+        type: 'gain-node-connected',
+        label: 'gainNode connected to AudioContext destination',
+        timestampMs: nowMs(),
+        severity: 'info',
+        gainNodeValue: gainNode.gain.value,
+        audioContextState: audioContext.state,
+      });
     }
 
     if (!processorNode) {
@@ -820,9 +831,26 @@ export function createJamAudioBridge({
   }
 
   async function initAudio() {
+    emitDiagnosticsEvent({
+      type: 'init-audio-entered',
+      label: 'initAudio() called',
+      timestampMs: nowMs(),
+      severity: 'info',
+      audioContextState: audioContext?.state ?? 'none',
+      gainNodeValue: gainNode?.gain?.value ?? null,
+    });
     ensureCrossOriginIsolation();
     ensureSilentAudio();
-    silentAudioEl.play().catch((err) => {
+    silentAudioEl.play().then(() => {
+      emitDiagnosticsEvent({
+        type: 'silent-audio-play-resolved',
+        label: 'Silent audio play resolved (hardware may activate here)',
+        timestampMs: nowMs(),
+        severity: 'info',
+        audioContextState: audioContext?.state ?? 'none',
+        gainNodeValue: gainNode?.gain?.value ?? null,
+      });
+    }).catch((err) => {
       emitDiagnosticsEvent({
         type: 'silent-audio-play-failed',
         label: 'Silent audio play failed',
@@ -835,6 +863,19 @@ export function createJamAudioBridge({
     if (!audioContext) {
       setStartupPhase('initializing audio graph');
       audioContext = new AudioContext();
+      if (typeof audioContext.addEventListener === 'function') {
+        audioContext.addEventListener('statechange', () => {
+          emitDiagnosticsEvent({
+            type: 'audiocontext-state-changed',
+            label: `AudioContext state: ${audioContext.state}`,
+            timestampMs: nowMs(),
+            severity: 'info',
+            state: audioContext.state,
+            currentTime: audioContext.currentTime,
+            gainNodeValue: gainNode?.gain?.value ?? null,
+          });
+        });
+      }
       emitDiagnosticsEvent({
         type: 'audio-context-created',
         label: 'Audio context created',
