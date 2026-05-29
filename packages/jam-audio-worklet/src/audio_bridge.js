@@ -184,6 +184,25 @@ export function createJamAudioBridge({
     await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
   }
 
+  function forceGainToZero(reason) {
+    if (!audioContext || !gainNode || audioContext.state === 'closed') return;
+    const now = audioContext.currentTime;
+    gainNode.gain.cancelScheduledValues(now);
+    gainNode.gain.setValueAtTime(0, now);
+    emitDiagnosticsEvent({
+      type: 'gain-forced-zero',
+      label: `Gain forced to zero (${reason})`,
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: {
+        reason,
+        audioContextState: audioContext.state,
+        gainNodeValue: gainNode.gain.value,
+      },
+    });
+  }
+
+
   function scheduleDeclickRampToCurrentVolume(reason) {
     if (!audioContext || !gainNode) return;
     const now = audioContext.currentTime;
@@ -582,6 +601,19 @@ export function createJamAudioBridge({
     if (!audioContext) {
       setStartupPhase('initializing audio graph');
       audioContext = new AudioContext();
+      if (typeof audioContext.addEventListener === 'function') {
+        audioContext.addEventListener('statechange', () => {
+          emitDiagnosticsEvent({
+            type: 'audiocontext-state-changed',
+            label: `AudioContext state: ${audioContext.state}`,
+            timestampMs: nowMs(),
+            severity: 'info',
+            state: audioContext.state,
+            currentTime: audioContext.currentTime,
+            gainNodeValue: gainNode?.gain?.value ?? null,
+          });
+        });
+      }
       emitDiagnosticsEvent({
         type: 'audio-context-created',
         label: 'Audio context created',
@@ -590,6 +622,7 @@ export function createJamAudioBridge({
         sampleRate: audioContext.sampleRate,
       });
     }
+
 
     if (!workletReadyPromise) {
       const startedAt = performance.now();
@@ -854,6 +887,9 @@ export function createJamAudioBridge({
     });
     ensureCrossOriginIsolation();
     ensureSilentAudio();
+    await ensureWasm();
+    await ensureAudioGraph();
+    forceGainToZero('initAudio-before-silent-anchor');
     silentAudioEl.play().then(() => {
       emitDiagnosticsEvent({
         type: 'silent-audio-play-resolved',
@@ -862,6 +898,7 @@ export function createJamAudioBridge({
         severity: 'info',
         audioContextState: audioContext?.state ?? 'none',
         gainNodeValue: gainNode?.gain?.value ?? null,
+        hasGainNode: Boolean(gainNode),
       });
     }).catch((err) => {
       emitDiagnosticsEvent({
@@ -872,31 +909,6 @@ export function createJamAudioBridge({
         error: err?.message,
       });
     });
-
-    if (!audioContext) {
-      setStartupPhase('initializing audio graph');
-      audioContext = new AudioContext();
-      if (typeof audioContext.addEventListener === 'function') {
-        audioContext.addEventListener('statechange', () => {
-          emitDiagnosticsEvent({
-            type: 'audiocontext-state-changed',
-            label: `AudioContext state: ${audioContext.state}`,
-            timestampMs: nowMs(),
-            severity: 'info',
-            state: audioContext.state,
-            currentTime: audioContext.currentTime,
-            gainNodeValue: gainNode?.gain?.value ?? null,
-          });
-        });
-      }
-      emitDiagnosticsEvent({
-        type: 'audio-context-created',
-        label: 'Audio context created',
-        timestampMs: nowMs(),
-        severity: 'info',
-        sampleRate: audioContext.sampleRate,
-      });
-    }
 
     const resumeStartedAt = performance.now();
     emitDiagnosticsEvent({
@@ -975,9 +987,6 @@ export function createJamAudioBridge({
       document.addEventListener('touchstart', resumeOnGesture, true);
       document.addEventListener('keydown', resumeOnGesture, true);
     }
-
-    await ensureWasm();
-    await ensureAudioGraph();
   }
 
   async function beginPlaybackSession({ transitionKind = 'track-replace' } = {}) {
@@ -1632,19 +1641,49 @@ export function createJamAudioBridge({
 
   function scheduleSynchronousDeclickToZero() {
     // Synchronous gain schedule for unload paths (beforeunload/pagehide).
-    // rampGainToValue() uses setTimeout and cannot resolve during unload;
-    // AudioNode scheduling is honored by the audio thread regardless of main-thread
-    // lifecycle, so this four-line form IS effective as a teardown declick.
-    if (!audioContext || !gainNode) return;
-    if (audioContext.state === 'closed') return;
-    const now = audioContext.currentTime;
-    gainNode.gain.cancelScheduledValues(now);
-    gainNode.gain.setValueAtTime(gainNode.gain.value, now);
-    gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
+    // setTimeout-based ramps are unreliable during unload, but AudioNode
+    // scheduling is honored by the audio thread.
+    emitDiagnosticsEvent({
+      type: 'teardown-declick-started',
+      label: 'Teardown declick started',
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: {
+        audioContextState: audioContext ? audioContext.state : 'none',
+        gainNodeValue: gainNode?.gain?.value ?? null,
+        hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
+      },
+    });
+
+    if (silentAudioEl) {
+      silentAudioEl.volume = 0;
+      try { silentAudioEl.pause(); } catch {}
+      try { silentAudioEl.currentTime = 0; } catch {}
+    }
+
+    if (audioContext && gainNode && audioContext.state !== 'closed') {
+      const now = audioContext.currentTime;
+      gainNode.gain.cancelScheduledValues(now);
+      gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+      gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
+    }
+
     if (processorNode) processorNode.port.postMessage({ type: 'stop' });
   }
 
   async function prepareForReload() {
+    emitDiagnosticsEvent({
+      type: 'prepare-for-reload-started',
+      label: 'Prepare for reload started',
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: {
+        audioContextState: audioContext ? audioContext.state : 'none',
+        gainNodeValue: gainNode?.gain?.value ?? null,
+        hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
+      },
+    });
+
     // 1. Kill the silent audio element immediately.
     //    The looping silent <audio> element (volume 0.001) is the primary source
     //    of the pop on Android PWA when audio is paused — it plays even at rest.
@@ -1678,6 +1717,18 @@ export function createJamAudioBridge({
     if (audioContext) {
       try { await audioContext.close(); } catch {}
     }
+
+    emitDiagnosticsEvent({
+      type: 'prepare-for-reload-completed',
+      label: 'Prepare for reload completed',
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: {
+        audioContextState: audioContext ? audioContext.state : 'none',
+        gainNodeValue: gainNode?.gain?.value ?? null,
+        hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
+      },
+    });
   }
 
   function registerTeardownListeners() {
