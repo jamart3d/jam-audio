@@ -85,6 +85,7 @@ export function createJamAudioBridge({
   let boundedAnchorEndedHandler = null;
   let silentPlayHandler = null;
   let isAppOwnedResumeInFlight = false;
+  let mediaSessionResumeRequested = false;
   let lastPositionEventTs = 0;
 
   let queueTrackIds = [];
@@ -298,6 +299,20 @@ export function createJamAudioBridge({
     document.body.appendChild(silentAudioEl);
 
     silentPlayHandler = () => {
+      if (mediaSessionResumeRequested) {
+        mediaSessionResumeRequested = false;
+        if (audioContext && audioContext.state === 'suspended') {
+          audioContext.resume().catch(() => {});
+        }
+        emitDiagnosticsEvent({
+          type: 'media-session-play-triggered',
+          label: 'audioContext.resume() via Media Session anchor play event',
+          timestampMs: nowMs(),
+          severity: 'info',
+          audioContextState: audioContext?.state ?? 'none',
+        });
+        return;
+      }
       if (isAppOwnedResumeInFlight) {
         return;
       }
@@ -1273,19 +1288,34 @@ export function createJamAudioBridge({
       await runMutedAndroidTransportTransition({
         transitionKind: 'pause',
         preserveMediaSession: true,
-        performAction: async () => {
-          await audioContext.suspend();
-        },
+        // Keep-warm: context stays running at gain=0. No DAC power-cycle = no pop.
+        // runMutedAndroidTransportTransition ramps gain to zero and calls
+        // waitForWorkerTransportQuiet() → transportMute (STOP_INDEX=1) before
+        // performAction runs. The worklet outputs silence without advancing
+        // READ_INDEX when STOP_INDEX=1. On resume, transportUnmute clears
+        // STOP_INDEX=0 and the worklet resumes from the exact frame it left off.
+        performAction: async () => {},
       });
     } else {
       await rampGainToValue(0, DECLICK_DURATION_S);
-      await audioContext.suspend();
-      if (playbackWorker) void sendPlaybackWorkerCommand('pauseRefill').catch(() => {});
+      // Keep-warm: no audioContext suspend call — context stays running at gain=0.
+      // transportMute sets STOP_INDEX=1 so the worklet outputs silence without
+      // advancing READ_INDEX (ring-buffer position frozen). This subsumes
+      // pauseRefill (also stops the refill loop). transportUnmute on resume
+      // clears STOP_INDEX=0 and restarts the refill loop.
+      if (playbackWorker) void sendPlaybackWorkerCommand('transportMute').catch(() => {});
     }
 
     markPlaybackState('paused');
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
-    emitDiagnosticsEvent({ type: 'pause', label: 'Paused', timestampMs: nowMs(), severity: 'info' });
+    emitDiagnosticsEvent({
+      type: 'pause',
+      label: 'Paused (keep-warm: context running, gain=0)',
+      timestampMs: nowMs(),
+      severity: 'info',
+      audioContextState: audioContext?.state ?? 'none',
+      gainNodeValue: gainNode?.gain?.value ?? null,
+    });
   }
 
   async function resume() {
@@ -1301,17 +1331,23 @@ export function createJamAudioBridge({
           fadeIn: true,
           skipInitialRamp: true,
           performAction: async () => {
-            if (audioContext.state === 'suspended') await audioContext.resume();
+            // Keep-warm: audioContext is never suspended after pause(), so no
+            // audioContext resume call is needed. Gain is unfrozen by the fadeIn
+            // path in runMutedAndroidTransportTransition (transportUnmute + ramp).
             if (silentAudioEl) await silentAudioEl.play().catch(() => {});
           },
         });
       } else {
+        // Keep-warm: context was never suspended, so no audioContext.resume() needed.
+        // transportMute was called during pause (STOP_INDEX=1 froze the worklet).
+        // transportUnmute clears STOP_INDEX=0 and restarts the refill loop so audio
+        // can flow before the gain ramp reaches currentVolume.
+        if (playbackWorker) void sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.cancelScheduledValues(now);
           gainNode.gain.setValueAtTime(0, now);
         }
-        if (audioContext.state === 'suspended') await audioContext.resume();
         if (silentAudioEl) await silentAudioEl.play().catch(() => {});
         if (gainNode) {
           const now = audioContext.currentTime;
@@ -1493,7 +1529,19 @@ export function createJamAudioBridge({
     });
 
     navigator.mediaSession.setActionHandler('play', () => {
+      emitDiagnosticsEvent({
+        type: 'media-session-play-handler-entered',
+        label: 'Media Session play action handler entered',
+        timestampMs: nowMs(),
+        severity: 'info',
+        audioContextState: audioContext?.state ?? 'none',
+      });
       runMediaAction('play', () => {
+        mediaSessionResumeRequested = true;
+        if (silentAudioEl) {
+          silentAudioEl.pause();
+          silentAudioEl.play().catch(() => {});
+        }
         if (typeof onPlayCallback === 'function') onPlayCallback();
         else {
           console.warn(`[${namespace}] onPlayCallback not registered, falling back to low-level resume()`);
