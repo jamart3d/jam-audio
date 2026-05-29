@@ -162,6 +162,16 @@ export function createJamAudioBridge({
     }
   }
 
+  function getPlaybackSessionSnapshot() {
+    return {
+      activeTrackIndex,
+      activeTrackId,
+      positionMs: diagnosticsState.positionMs || 0,
+      decodedPositionMs: diagnosticsState.decodedPositionMs || 0,
+      queueLength: queueTrackIds ? queueTrackIds.length : 0,
+    };
+  }
+
   const isAndroidTransport = /Android/i.test(navigator.userAgent ?? '');
 
   async function rampGainToValue(targetValue, durationSeconds) {
@@ -804,6 +814,8 @@ export function createJamAudioBridge({
           onTrackChangedCallback({
             transitionPositionMs: data.transitionPositionMs ?? 0,
             durationMs: data.durationMs ?? 0,
+            activeTrackIndex,
+            activeTrackId,
           });
         }
         return;
@@ -1783,6 +1795,7 @@ export function createJamAudioBridge({
     updatePositionState,
     updateMediaSession,
     setSessionQueue,
+    getPlaybackSessionSnapshot,
     initAudio,
     initEngine: async () => { await ensureWasm(); },
     __test__: {
