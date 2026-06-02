@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-06-02
+
+### Added
+- Added ended-emission diagnostics to explain hold-window, suppressed-gapless, duplicate, and final ended paths
+- Added track-handoff target gap fields and direct playback-worker controller coverage for gapless end-of-stream behavior
+
+### Fixed
+- Suppressed premature ended emissions when the next gapless track is already loaded
+- Recreated the hidden media anchor after unrecoverable media element errors and hardened blob URL replacement
+- Deduplicated concurrent `initAudio()` calls and made silent-anchor playback timeouts observable in diagnostics
+- Skipped teardown declick scheduling once the `AudioContext` is already closed during rapid reload cleanup
+- Restored the shared playback-worker controller core file required by the worklet controller import
+
+### Verified
+- Worklet package test
+- Playback worker controller test
+- Engine cargo check
+- Flutter bridge cargo check
+
 ## [0.3.3] — 2026-05-27
 
 ### Added
