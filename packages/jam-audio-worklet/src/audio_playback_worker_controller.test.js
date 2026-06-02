@@ -921,6 +921,79 @@ test('hold window falls through to ended after 500ms if preload never arrives', 
   );
 });
 
+test('ended emission diagnostics explain hold and final emit path', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let position = 0;
+  let nowValue = 0;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (position >= 1000) {
+          return null;
+        }
+        position += 50;
+        return new Float32Array(2);
+      },
+      durationMs() { return 1000; },
+      positionMs() { return position; },
+      hasEnded() { return position >= 1000; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => nowValue,
+    nowMs: () => nowValue,
+  });
+
+  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+
+  for (let i = 0; i < 30; i++) {
+    sharedState[2] = 50;
+    intervalCallback();
+  }
+
+  sharedState[2] = 0;
+  intervalCallback();
+
+  nowValue = 600;
+  sharedState[2] = 0;
+  intervalCallback();
+
+  const endedDiagnostics = messages
+    .filter((message) => message.type === 'diagnostics-event')
+    .map((message) => message.event)
+    .filter((event) => event.type === 'ended-emission-state');
+
+  assert.ok(
+    endedDiagnostics.some((event) => event.action === 'hold-started'),
+    'first terminal tick should report hold-started',
+  );
+  assert.ok(
+    endedDiagnostics.some((event) => event.action === 'emitted'),
+    'hold expiry should report final ended emission',
+  );
+  assert.ok(messages.some((message) => message.type === 'ended'));
+});
+
 test('playTrackStreaming as transition emits track-handoff with isStreamingReinit=true', () => {
   const messages = [];
   const diagnosticsEvents = [];
@@ -1420,4 +1493,291 @@ test('recovery-mode-entered is suppressed before startup completes but fires pos
     'recovery-mode-entered must fire post-startup when frames drop below critical threshold',
   );
 });
+
+test('track-handoff diagnostics include signed gap, audible gap, floor, and underrun delta', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let now = 100;
+  let duration = 1000;
+  let position = 0;
+  let player = null;
+  const pcmBuffer = new SharedArrayBuffer(
+    100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT,
+  );
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => {
+      player = {
+        decodeFrames() {
+          if (this._returnEmpty) {
+            return new Float32Array(0);
+          }
+          if (this._triggerTransition) {
+            duration = this._nextDuration;
+            position = this._nextPosition;
+            this._triggerTransition = false;
+          }
+          return new Float32Array(CHANNELS * 10);
+        },
+        durationMs() {
+          return duration;
+        },
+        positionMs() {
+          return position;
+        },
+        hasEnded() {
+          return false;
+        },
+        loadNext() {
+          return null;
+        },
+        seekToMs() {},
+        free() {},
+        _returnEmpty: false,
+        _triggerTransition: false,
+        _nextDuration: 0,
+        _nextPosition: 0,
+      };
+      return player;
+    },
+    createStreamingPlayer: () => ({
+      appendChunk() { return false; },
+      durationMs() { return 0; },
+      positionMs() { return 0; },
+      isReady() { return false; },
+      isFinalized() { return false; },
+      finalize() {},
+      free() {},
+      decodeFrames() { return null; },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => now,
+    nowMs: () => Math.round(now),
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+
+  // First handoff starts the transition monitor window.
+  sharedState[2] = 50;
+  player._nextDuration = 1200;
+  player._nextPosition = 1015;
+  player._triggerTransition = true;
+  intervalCallback();
+
+  // Record a 41% floor during that monitor window.
+  now = 400;
+  sharedState[2] = 41;
+  player._returnEmpty = true;
+  intervalCallback();
+
+  // Close the window so the next handoff can report the prior floor.
+  now = 701;
+  sharedState[2] = 41;
+  intervalCallback();
+
+  // Second handoff should include the completed prior window's floor.
+  now = 702;
+  sharedState[2] = 50;
+  player._returnEmpty = false;
+  player._nextDuration = 1400;
+  player._nextPosition = 2230;
+  player._triggerTransition = true;
+  intervalCallback();
+
+  const handoffEvents = messages.filter(
+    (message) =>
+      message.type === 'diagnostics-event' &&
+      message.event.type === 'track-handoff',
+  );
+
+  assert.equal(handoffEvents.length, 2);
+  assert.deepEqual(
+    {
+      type: handoffEvents[1].event.type,
+      signedGapMs: handoffEvents[1].event.signedGapMs,
+      audibleLateGapMs: handoffEvents[1].event.audibleLateGapMs,
+      underrunDelta: handoffEvents[1].event.underrunDelta,
+      transitionFloorPercent: handoffEvents[1].event.transitionFloorPercent,
+    },
+    {
+      type: 'track-handoff',
+      signedGapMs: 15,
+      audibleLateGapMs: 15,
+      underrunDelta: 0,
+      transitionFloorPercent: 41,
+    },
+  );
+
+  assert.equal(handoffEvents[0].event.targetSignedGapMs, 0);
+  assert.equal(handoffEvents[0].event.targetLeadMs, 0);
+});
+
+test('emitEnded is suppressed when gaplessPlayerNextLoaded is set via loadNext', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let position = 0;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (position >= 1000) return null;
+        position += 50;
+        return new Float32Array(2);
+      },
+      durationMs() { return 1000; },
+      positionMs() { return position; },
+      hasEnded() { return position >= 1000; },
+      loadNext() { return null; }, // success — sets gaplessPlayerNextLoaded
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100 });
+
+  // Preload next track — loadNext succeeds, flag becomes true
+  controller.preloadNext(new Uint8Array([9]));
+
+  // Advance position directly to EOF (1000ms) without running intermediate ticks
+  // to avoid automatic transition/handoff in the refill loop.
+  position = 1000;
+
+  // Simulate buffer drain to zero to trigger emitEnded via handleEndOfStream
+  sharedState[2] = 0;
+  intervalCallback();
+
+  // ended must NOT be emitted — gaplessPlayerNextLoaded suppresses it
+  assert.equal(
+    messages.some((m) => m.type === 'ended'),
+    false,
+    'ended must not be emitted when gaplessPlayerNextLoaded is true',
+  );
+
+  // suppressed-pending-gapless must appear in diagnostics
+  const suppressedEvents = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .filter((e) => e.type === 'ended-emission-state' && e.action === 'suppressed-pending-gapless');
+  assert.ok(
+    suppressedEvents.length > 0,
+    'suppressed-pending-gapless diagnostic must fire when gaplessPlayerNextLoaded suppresses ended',
+  );
+
+  // hold-started must NOT appear — we skip the hold window entirely when the flag is set
+  const holdStartedEvents = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .filter((e) => e.type === 'ended-emission-state' && e.action === 'hold-started');
+  assert.equal(
+    holdStartedEvents.length,
+    0,
+    'hold-started must not fire when gaplessPlayerNextLoaded is already true',
+  );
+});
+
+test('ended fires after gapless boundary clears gaplessPlayerNextLoaded when no further preload arrives', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let position = 0;
+  let duration = 1000;
+  let nowValue = 100;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (position >= duration) return null;
+        position += 50;
+        return new Float32Array(2);
+      },
+      durationMs() { return duration; },
+      positionMs() { return position; },
+      hasEnded() { return position >= duration; },
+      loadNext() {
+        duration = 2000;
+        return null; // success
+      },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => nowValue,
+    nowMs: () => nowValue,
+  });
+
+  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100 });
+
+  // Preload next — flag set to true
+  controller.preloadNext(new Uint8Array([9]));
+
+  // Advance position past track boundary (1000ms) to trigger crossedTrackBoundary
+  // handoff, which emits track-changed and clears gaplessPlayerNextLoaded
+  sharedState[2] = 50;
+  for (let i = 0; i < 25; i++) { // position will exceed 1000ms
+    sharedState[2] = 50;
+    intervalCallback();
+  }
+
+  // track-changed must have been emitted (handoff happened)
+  assert.ok(
+    messages.some((m) => m.type === 'track-changed'),
+    'track-changed must fire when crossing gapless boundary',
+  );
+
+  // Advance position to the end of the second track (2000ms)
+  position = 2000;
+
+  // Now drive the second track (duration=2000) to end — with 0 frames, triggering emitEnded
+  // No further preloadNext is called — gaplessPlayerNextLoaded was cleared.
+  sharedState[2] = 0; // no frames left
+  intervalCallback(); // starts hold window
+
+  // Advance time past the 500ms hold window (nowValue = 700)
+  nowValue = 700;
+  sharedState[2] = 0;
+  intervalCallback(); // hold window expires and ended is emitted
+
+  assert.ok(
+    messages.some((m) => m.type === 'ended'),
+    'ended must be emitted after boundary clears flag and no further preload arrives',
+  );
+});
+
+
+
 

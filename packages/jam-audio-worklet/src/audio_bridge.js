@@ -325,12 +325,12 @@ export function createJamAudioBridge({
 
   function setTrackAudioOnSilentElement(bytes) {
     ensureSilentAudio();
+    const blob = new Blob([bytes], { type: 'audio/mpeg' });
+    const newBlobUrl = URL.createObjectURL(blob);
     if (currentTrackBlobUrl) {
       URL.revokeObjectURL(currentTrackBlobUrl);
-      currentTrackBlobUrl = null;
     }
-    const blob = new Blob([bytes], { type: 'audio/mpeg' });
-    currentTrackBlobUrl = URL.createObjectURL(blob);
+    currentTrackBlobUrl = newBlobUrl;
 
     emitDiagnosticsEvent({
       type: 'hidden-media-asset-ready',
@@ -350,12 +350,12 @@ export function createJamAudioBridge({
     // Only set if we don't have a track-specific blob URL yet,
     // or if we want to "upgrade" from silent.wav.
     // In streaming, we start with silent.wav and upgrade to first chunk.
+    const blob = new Blob([bytes], { type: 'audio/mpeg' });
+    const newBlobUrl = URL.createObjectURL(blob);
     if (currentTrackBlobUrl) {
       URL.revokeObjectURL(currentTrackBlobUrl);
-      currentTrackBlobUrl = null;
     }
-    const blob = new Blob([bytes], { type: 'audio/mpeg' });
-    currentTrackBlobUrl = URL.createObjectURL(blob);
+    currentTrackBlobUrl = newBlobUrl;
 
     emitDiagnosticsEvent({
       type: 'hidden-media-asset-ready',
@@ -373,9 +373,34 @@ export function createJamAudioBridge({
     ensureSilentAudio();
     clearBoundedAnchorEndedHandler();
 
+    // Revoke any prior blob URL after ensuring the function has a clean slate.
+    // currentTrackBlobUrl is managed separately from the bounded URL itself.
     if (currentTrackBlobUrl) {
       URL.revokeObjectURL(currentTrackBlobUrl);
       currentTrackBlobUrl = null;
+    }
+
+    // If the element is in an unrecoverable state (non-null .error), recreate it
+    // so .play() has a clean slate. This guards against recovery storms where
+    // a prior blob failure left the element with MEDIA_ERR_SRC_NOT_SUPPORTED.
+    if (silentAudioEl && silentAudioEl.error) {
+      emitDiagnosticsEvent({
+        type: 'hidden-media-anchor-recreated',
+        label: 'Silent anchor element recreated due to unrecoverable media error',
+        timestampMs: nowMs(),
+        severity: 'warn',
+        details: {
+          errorCode: silentAudioEl.error?.code ?? null,
+        },
+      });
+      if (silentPlayHandler) {
+        silentAudioEl.removeEventListener('play', silentPlayHandler);
+        silentPlayHandler = null;
+      }
+      try { silentAudioEl.pause(); } catch {}
+      try { document.body.removeChild(silentAudioEl); } catch {}
+      silentAudioEl = null;
+      ensureSilentAudio();
     }
 
     if (enableBoundedUrlAnchorExperiment) {
@@ -868,6 +893,15 @@ export function createJamAudioBridge({
         }
         return;
       case 'ended':
+        emitDiagnosticsEvent({
+          type: 'bridge-ended-callback',
+          label: 'Bridge ended callback received',
+          timestampMs: nowMs(),
+          severity: 'info',
+          audioContextState: audioContext?.state ?? 'unknown',
+          activeTrackIndex,
+          activeTrackId,
+        });
         if (typeof onEndedCallback === 'function') onEndedCallback();
         return;
       case 'playback-error':
@@ -891,6 +925,8 @@ export function createJamAudioBridge({
     }
   }
 
+  let initAudioInFlightPromise = null;
+
   async function initAudio() {
     emitDiagnosticsEvent({
       type: 'init-audio-entered',
@@ -900,30 +936,69 @@ export function createJamAudioBridge({
       audioContextState: audioContext?.state ?? 'none',
       gainNodeValue: gainNode?.gain?.value ?? null,
     });
+    if (initAudioInFlightPromise) {
+      return initAudioInFlightPromise;
+    }
+    initAudioInFlightPromise = _initAudioImpl().finally(() => {
+      initAudioInFlightPromise = null;
+    });
+    return initAudioInFlightPromise;
+  }
+
+  async function _initAudioImpl() {
     ensureCrossOriginIsolation();
     ensureSilentAudio();
     await ensureWasm();
     await ensureAudioGraph();
     forceGainToZero('initAudio-before-silent-anchor');
-    silentAudioEl.play().then(() => {
-      emitDiagnosticsEvent({
-        type: 'silent-audio-play-resolved',
-        label: 'Silent audio play resolved (hardware may activate here)',
-        timestampMs: nowMs(),
-        severity: 'info',
-        audioContextState: audioContext?.state ?? 'none',
-        gainNodeValue: gainNode?.gain?.value ?? null,
-        hasGainNode: Boolean(gainNode),
-      });
-    }).catch((err) => {
-      emitDiagnosticsEvent({
-        type: 'silent-audio-play-failed',
-        label: 'Silent audio play failed',
-        timestampMs: nowMs(),
-        severity: 'warn',
-        error: err?.message,
-      });
+    // Race silentAudioEl.play() against a 3 s timeout so a stuck browser
+    // media element is always observable in diagnostics.
+    // clearTimeout is called on settlement so no lingering timer outlives the call.
+    const SILENT_PLAY_TIMEOUT_MS = 3000;
+    const silentPlayTimeoutSymbol = Symbol('silent-play-timeout');
+    let silentPlayTimeoutId;
+    const silentPlayTimeoutPromise = new Promise((resolve) => {
+      silentPlayTimeoutId = setTimeout(
+        () => resolve(silentPlayTimeoutSymbol),
+        SILENT_PLAY_TIMEOUT_MS,
+      );
     });
+    // Fire-and-forget: initAudio() must not block on this.
+    Promise.race([silentAudioEl.play().then(() => 'resolved'), silentPlayTimeoutPromise])
+      .then((result) => {
+        clearTimeout(silentPlayTimeoutId);
+        if (result === silentPlayTimeoutSymbol) {
+          emitDiagnosticsEvent({
+            type: 'silent-audio-play-timeout',
+            label: `Silent audio play did not resolve within ${SILENT_PLAY_TIMEOUT_MS} ms`,
+            timestampMs: nowMs(),
+            severity: 'warn',
+            audioContextState: audioContext?.state ?? 'none',
+            gainNodeValue: gainNode?.gain?.value ?? null,
+          });
+        } else {
+          emitDiagnosticsEvent({
+            type: 'silent-audio-play-resolved',
+            label: 'Silent audio play resolved (hardware may activate here)',
+            timestampMs: nowMs(),
+            severity: 'info',
+            audioContextState: audioContext?.state ?? 'none',
+            gainNodeValue: gainNode?.gain?.value ?? null,
+            hasGainNode: Boolean(gainNode),
+          });
+        }
+      })
+      .catch((err) => {
+        clearTimeout(silentPlayTimeoutId);
+        emitDiagnosticsEvent({
+          type: 'silent-audio-play-failed',
+          label: 'Silent audio play failed',
+          timestampMs: nowMs(),
+          severity: 'warn',
+          error: err?.message,
+        });
+      });
+
 
     const resumeStartedAt = performance.now();
     emitDiagnosticsEvent({
@@ -1691,6 +1766,12 @@ export function createJamAudioBridge({
     // Synchronous gain schedule for unload paths (beforeunload/pagehide).
     // setTimeout-based ramps are unreliable during unload, but AudioNode
     // scheduling is honored by the audio thread.
+
+    // Skip entirely if the AudioContext is already closed — this happens on a
+    // double page-reload within 4 seconds where prepareForReload() already
+    // closed the context and cleaned up the element and processor.
+    if (audioContext && audioContext.state === 'closed') return;
+
     emitDiagnosticsEvent({
       type: 'teardown-declick-started',
       label: 'Teardown declick started',
@@ -1899,6 +1980,7 @@ export function createJamAudioBridge({
     initEngine: async () => { await ensureWasm(); },
     __test__: {
       setBoundedTrackAudioOnSilentElement,
+      setTrackAudioOnSilentElement,
     },
   };
 

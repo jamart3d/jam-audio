@@ -69,6 +69,7 @@ function createPlaybackWorkerController({
   let diagnostics = createWorkerDiagnostics();
 
   let pendingGaplessBytes = null;
+  let gaplessPlayerNextLoaded = false;
   let pendingGaplessSampleRate = 0;
   let activeSampleRate = 48000;
   const core = createSharedPlaybackWorkerControllerCore({
@@ -124,6 +125,23 @@ function createPlaybackWorkerController({
     if (diagnosticsMode === 'extended' || !noisyEventTypes.has(event.type)) {
       coreEmitDiagnosticsEvent(event);
     }
+  }
+
+  function emitEndedEmissionState(action) {
+    emitDiagnosticsEvent({
+      type: 'ended-emission-state',
+      label: 'Ended emission state',
+      timestampMs: nowMs(),
+      severity: 'info',
+      action,
+      endedEmitted,
+      pendingGaplessBytes: pendingGaplessBytes === null ? 'none' : 'present',
+      gaplessPlayerNextLoaded,
+      preloadHoldActive,
+      preloadHoldRemainingMs: preloadHoldActive
+        ? Math.max(0, preloadHoldUntilMs - nowMs())
+        : 0,
+    });
   }
 
   function currentPlayer() {
@@ -238,6 +256,7 @@ function createPlaybackWorkerController({
     consecutiveZeroRefills = 0;
     pendingGaplessBytes = null;
     pendingGaplessSampleRate = 0;
+    gaplessPlayerNextLoaded = false;
     currentSessionId++;
   }
 
@@ -347,6 +366,8 @@ function createPlaybackWorkerController({
         severity: audibleLateGapMs > 100 ? 'warning' : 'info',
         signedGapMs: audibleLateGapMs,
         audibleLateGapMs,
+        targetSignedGapMs: 0,
+        targetLeadMs: 0,
         isStreamingReinit: true,
         transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
         underrunDelta: 0,
@@ -374,31 +395,48 @@ function createPlaybackWorkerController({
     emitPlaybackStarted();
   }
 
+  function clearPreloadHoldTimer() {}
+  function schedulePreloadHoldExpiry() {}
+
   function emitEnded() {
     if (endedEmitted) {
+      clearPreloadHoldTimer();
+      emitEndedEmissionState('duplicate-ignored');
       return;
     }
-    // Layer A hold window: if no gapless bytes are pending, wait up to 500ms
-    // for them to arrive before falling through to streaming reinit.
-    if (pendingGaplessBytes === null && !preloadHoldActive) {
+    // Combine both "next track is ready" signals into one flag so all three
+    // branches below share the same predicate.
+    const nextTrackPending = pendingGaplessBytes !== null || gaplessPlayerNextLoaded;
+
+    // Layer A hold window: if no next-track signal is present yet, wait up to 500ms
+    // for it to arrive before falling through to streaming reinit.
+    if (!nextTrackPending && !preloadHoldActive) {
       preloadHoldActive = true;
       preloadHoldUntilMs = nowMs() + 500;
-      return; // hold — do not emit yet
+      emitEndedEmissionState('hold-started');
+      schedulePreloadHoldExpiry();
+      return;
     }
-    if (pendingGaplessBytes === null && preloadHoldActive) {
+    if (!nextTrackPending && preloadHoldActive) {
       if (nowMs() < preloadHoldUntilMs) {
-        return; // still within hold window — do not emit yet
+        emitEndedEmissionState('hold-active');
+        schedulePreloadHoldExpiry();
+        return;
       }
       // Hold window expired — fall through to streaming reinit
       preloadHoldActive = false;
     }
-    // pendingGaplessBytes is not null: the streaming→gapless bridge will
+    // nextTrackPending: the gapless player (or streaming→gapless bridge) will
     // handle the handoff on the next refill tick. Do not emit ended.
-    if (pendingGaplessBytes !== null) {
+    if (nextTrackPending) {
       preloadHoldActive = false;
+      clearPreloadHoldTimer();
+      emitEndedEmissionState('suppressed-pending-gapless');
       return;
     }
     endedEmitted = true;
+    clearPreloadHoldTimer();
+    emitEndedEmissionState('emitted');
     emitMessage({ type: 'ended' });
   }
 
@@ -582,7 +620,7 @@ function createPlaybackWorkerController({
               durationMs: nextDurationMs,
             });
             emitMessage({ type: 'duration', durationMs: nextDurationMs });
-            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, end-of-stream path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, end-of-stream path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, targetSignedGapMs: 0, targetLeadMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
             return;
           }
           handleEndOfStream();
@@ -655,6 +693,8 @@ function createPlaybackWorkerController({
                 severity: 'info',
                 signedGapMs: 0,
                 audibleLateGapMs: 0,
+                targetSignedGapMs: 0,
+                targetLeadMs: 0,
                 transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
                 underrunDelta: 0,
               });
@@ -709,7 +749,7 @@ function createPlaybackWorkerController({
               durationMs: nextDurationMs,
             });
             emitMessage({ type: 'duration', durationMs: nextDurationMs });
-            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, non-array path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, non-array path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, targetSignedGapMs: 0, targetLeadMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
             return;
           }
           handleEndOfStream();
@@ -760,7 +800,7 @@ function createPlaybackWorkerController({
               durationMs: nextDurationMs,
             });
             emitMessage({ type: 'duration', durationMs: nextDurationMs });
-            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, zero-length path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, zero-length path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, targetSignedGapMs: 0, targetLeadMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
             return;
           }
           handleEndOfStream();
@@ -831,6 +871,8 @@ function createPlaybackWorkerController({
                 audibleLateGapMs > 0 || underrunDelta > 0 ? 'warning' : 'info',
               signedGapMs,
               audibleLateGapMs,
+              targetSignedGapMs: 0,
+              targetLeadMs: 0,
               transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
               underrunDelta,
             });
@@ -843,6 +885,7 @@ function createPlaybackWorkerController({
             emitMessage({ type: 'duration', durationMs: nextDurationMs });
             transitionMonitorUntilMs = handoffStartedAtMs + 500;
             transitionFloorCandidate = Infinity;
+            gaplessPlayerNextLoaded = false;
             // Reset the boundary detector for the next gapless handoff.
             // After the Rust-internal track swap, activePlayer.durationMs() returns
             // the new track's duration (not the old track's). The new absolute
@@ -1205,6 +1248,7 @@ function createPlaybackWorkerController({
       if (pendingGaplessBytes !== null) {
         try {
           newPlayer.loadNext(pendingGaplessBytes);
+          gaplessPlayerNextLoaded = true;
         } catch { /* ignore */ }
         pendingGaplessBytes = null;
       }
@@ -1252,6 +1296,7 @@ function createPlaybackWorkerController({
           message: result.message ?? 'preload failed',
         });
       } else {
+        gaplessPlayerNextLoaded = true;
         emitMessage({ type: 'preload-pending' });
       }
     },
