@@ -946,59 +946,86 @@ export function createJamAudioBridge({
   }
 
   async function _initAudioImpl() {
+    // Idempotency gate: if the audio graph is already fully live (context
+    // running, gain node and processor node both wired), skip all cold-start
+    // work. This prevents a warm second call (e.g. skipToPrevious 100ms after
+    // the first) from cancelling an in-flight declick ramp mid-ramp via
+    // forceGainToZero — which causes an audible click (P0). It also prevents
+    // the 3s silent-anchor timeout from arming on desktop where the
+    // AudioContext is already running at startup (P2).
+    //
+    // The condition uses observable state rather than a boolean flag so it
+    // self-heals: if audioContext is later suspended (browser autoplay policy),
+    // the gate is false and the next initAudio() runs the full cold-start path.
+    //
+    // On the very first call, gainNode and processorNode are both null (created
+    // inside ensureAudioGraph), so the gate is bypassed and the full cold-start
+    // path runs normally.
+    if (audioContext?.state === 'running' && gainNode && processorNode) {
+      emitDiagnosticsEvent({
+        type: 'init-audio-skipped-already-running',
+        label: 'initAudio skipped: audio graph already running',
+        timestampMs: nowMs(),
+        severity: 'info',
+        audioContextState: audioContext.state,
+        gainNodeValue: gainNode?.gain?.value ?? null,
+      });
+      return;
+    }
     ensureCrossOriginIsolation();
     ensureSilentAudio();
     await ensureWasm();
     await ensureAudioGraph();
     forceGainToZero('initAudio-before-silent-anchor');
-    // Race silentAudioEl.play() against a 3 s timeout so a stuck browser
-    // media element is always observable in diagnostics.
-    // clearTimeout is called on settlement so no lingering timer outlives the call.
-    const SILENT_PLAY_TIMEOUT_MS = 3000;
-    const silentPlayTimeoutSymbol = Symbol('silent-play-timeout');
-    let silentPlayTimeoutId;
-    const silentPlayTimeoutPromise = new Promise((resolve) => {
-      silentPlayTimeoutId = setTimeout(
-        () => resolve(silentPlayTimeoutSymbol),
-        SILENT_PLAY_TIMEOUT_MS,
-      );
-    });
-    // Fire-and-forget: initAudio() must not block on this.
-    Promise.race([silentAudioEl.play().then(() => 'resolved'), silentPlayTimeoutPromise])
-      .then((result) => {
-        clearTimeout(silentPlayTimeoutId);
-        if (result === silentPlayTimeoutSymbol) {
+    if (audioContext?.state !== 'running') {
+      // Race silentAudioEl.play() against a 3 s timeout so a stuck browser
+      // media element is always observable in diagnostics.
+      // clearTimeout is called on settlement so no lingering timer outlives the call.
+      const SILENT_PLAY_TIMEOUT_MS = 3000;
+      const silentPlayTimeoutSymbol = Symbol('silent-play-timeout');
+      let silentPlayTimeoutId;
+      const silentPlayTimeoutPromise = new Promise((resolve) => {
+        silentPlayTimeoutId = setTimeout(
+          () => resolve(silentPlayTimeoutSymbol),
+          SILENT_PLAY_TIMEOUT_MS,
+        );
+      });
+      // Fire-and-forget: initAudio() must not block on this.
+      Promise.race([silentAudioEl.play().then(() => 'resolved'), silentPlayTimeoutPromise])
+        .then((result) => {
+          clearTimeout(silentPlayTimeoutId);
+          if (result === silentPlayTimeoutSymbol) {
+            emitDiagnosticsEvent({
+              type: 'silent-audio-play-timeout',
+              label: `Silent audio play did not resolve within ${SILENT_PLAY_TIMEOUT_MS} ms`,
+              timestampMs: nowMs(),
+              severity: 'warn',
+              audioContextState: audioContext?.state ?? 'none',
+              gainNodeValue: gainNode?.gain?.value ?? null,
+            });
+          } else {
+            emitDiagnosticsEvent({
+              type: 'silent-audio-play-resolved',
+              label: 'Silent audio play resolved (hardware may activate here)',
+              timestampMs: nowMs(),
+              severity: 'info',
+              audioContextState: audioContext?.state ?? 'none',
+              gainNodeValue: gainNode?.gain?.value ?? null,
+              hasGainNode: Boolean(gainNode),
+            });
+          }
+        })
+        .catch((err) => {
+          clearTimeout(silentPlayTimeoutId);
           emitDiagnosticsEvent({
-            type: 'silent-audio-play-timeout',
-            label: `Silent audio play did not resolve within ${SILENT_PLAY_TIMEOUT_MS} ms`,
+            type: 'silent-audio-play-failed',
+            label: 'Silent audio play failed',
             timestampMs: nowMs(),
             severity: 'warn',
-            audioContextState: audioContext?.state ?? 'none',
-            gainNodeValue: gainNode?.gain?.value ?? null,
+            error: err?.message,
           });
-        } else {
-          emitDiagnosticsEvent({
-            type: 'silent-audio-play-resolved',
-            label: 'Silent audio play resolved (hardware may activate here)',
-            timestampMs: nowMs(),
-            severity: 'info',
-            audioContextState: audioContext?.state ?? 'none',
-            gainNodeValue: gainNode?.gain?.value ?? null,
-            hasGainNode: Boolean(gainNode),
-          });
-        }
-      })
-      .catch((err) => {
-        clearTimeout(silentPlayTimeoutId);
-        emitDiagnosticsEvent({
-          type: 'silent-audio-play-failed',
-          label: 'Silent audio play failed',
-          timestampMs: nowMs(),
-          severity: 'warn',
-          error: err?.message,
         });
-      });
-
+    }
 
     const resumeStartedAt = performance.now();
     emitDiagnosticsEvent({
