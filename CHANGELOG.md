@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-06-02
+
+### Fixed
+- Avoided redundant worklet `initAudio()` cold-start work.
+- Treated Symphonia's unknown-duration frame sentinel as an unknown duration instead of converting it to an invalid large duration.
+
+### Verified
+- Engine cargo test
+- Worklet package test
+- Flutter bridge cargo check
+
 ## [0.3.4] — 2026-06-02
 
 ### Added

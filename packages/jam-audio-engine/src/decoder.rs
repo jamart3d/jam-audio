@@ -200,6 +200,25 @@ fn codec_supported_on_target(
     Ok(())
 }
 
+/// Converts a symphonia `(time_base, n_frames)` pair to milliseconds.
+///
+/// Returns `0.0` for any of:
+/// - `time_base` is `None`
+/// - `n_frames` is `None`
+/// - `n_frames` is `u64::MAX` (symphonia's sentinel for "unknown duration")
+fn duration_ms_from(
+    time_base: Option<symphonia::core::units::TimeBase>,
+    n_frames: Option<u64>,
+) -> f64 {
+    match (time_base, n_frames) {
+        (Some(tb), Some(n)) if n != u64::MAX => {
+            let t = tb.calc_time(n);
+            t.seconds as f64 * 1000.0 + t.frac * 1000.0
+        }
+        _ => 0.0,
+    }
+}
+
 impl StreamingDecoder {
     fn ensure_seekable_for_current_format(&self) -> Result<(), DecodeError> {
         if self.is_ogg_family && !self.has_known_byte_len {
@@ -273,16 +292,8 @@ impl StreamingDecoder {
             .map(|layout| layout.count() as u32)
             .ok_or(DecodeError::MissingChannels)?;
 
-        let duration_ms = if let Some(tb) = track.codec_params.time_base {
-            if let Some(ts) = track.codec_params.n_frames {
-                let time = tb.calc_time(ts);
-                (time.seconds as f64 * 1000.0) + (time.frac * 1000.0)
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
+        let duration_ms =
+            duration_ms_from(track.codec_params.time_base, track.codec_params.n_frames);
 
         let init_source_sample_rate = source_sample_rate;
         let raw_delay = track.codec_params.delay.unwrap_or(0) as u64;
@@ -1443,5 +1454,41 @@ mod tests {
             "seek did not compensate for encoder delay: mean_error={}",
             mean_abs_error
         );
+    }
+
+    #[test]
+    fn duration_ms_from_returns_zero_for_sentinel_n_frames() {
+        // u64::MAX is symphonia's sentinel for unknown duration (e.g. VBR MP3, Ogg
+        // without TOTAL_SAMPLES). Multiplying it through calc_time produced garbage.
+        let tb = symphonia::core::units::TimeBase {
+            numer: 1,
+            denom: 48000,
+        };
+        assert_eq!(duration_ms_from(Some(tb), Some(u64::MAX)), 0.0);
+    }
+
+    #[test]
+    fn duration_ms_from_returns_zero_for_none_n_frames() {
+        let tb = symphonia::core::units::TimeBase {
+            numer: 1,
+            denom: 48000,
+        };
+        assert_eq!(duration_ms_from(Some(tb), None), 0.0);
+    }
+
+    #[test]
+    fn duration_ms_from_returns_zero_for_none_time_base() {
+        assert_eq!(duration_ms_from(None, Some(44100)), 0.0);
+    }
+
+    #[test]
+    fn duration_ms_from_computes_correctly_for_known_duration() {
+        // 44100 frames at 1/44100 time base = exactly 1000 ms
+        let tb = symphonia::core::units::TimeBase {
+            numer: 1,
+            denom: 44100,
+        };
+        let ms = duration_ms_from(Some(tb), Some(44100));
+        assert!((ms - 1000.0).abs() < 0.01, "expected ~1000ms, got {ms}");
     }
 }

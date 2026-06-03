@@ -4,6 +4,7 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
 use symphonia::core::probe::Hint;
+use symphonia::core::units::TimeBase;
 use symphonia::default::get_probe;
 use wasm_bindgen::prelude::*;
 
@@ -21,6 +22,16 @@ pub struct AudioMetadata {
     track_number: Option<u32>,
     /// Total duration in milliseconds.
     duration_ms: Option<f64>,
+}
+
+fn duration_ms_from(time_base: Option<TimeBase>, n_frames: Option<u64>) -> f64 {
+    match (time_base, n_frames) {
+        (Some(tb), Some(n)) if n != u64::MAX => {
+            let t = tb.calc_time(n);
+            t.seconds as f64 * 1000.0 + t.frac * 1000.0
+        }
+        _ => 0.0,
+    }
 }
 
 fn apply_tags(result: &mut AudioMetadata, tags: &[symphonia::core::meta::Tag], overwrite: bool) {
@@ -73,13 +84,11 @@ pub fn extract_metadata_with_size_internal(data: &[u8], total_file_size: u64) ->
     };
 
     // Check default track for duration
-    if let Some(track) = probed.format.default_track()
-        && let Some(time) = track
-            .codec_params
-            .time_base
-            .and_then(|tb| track.codec_params.n_frames.map(|n| tb.calc_time(n)))
-    {
-        result.duration_ms = Some((time.seconds as f64 * 1000.0) + (time.frac * 1000.0));
+    if let Some(track) = probed.format.default_track() {
+        result.duration_ms = Some(duration_ms_from(
+            track.codec_params.time_base,
+            track.codec_params.n_frames,
+        ));
     }
 
     // Try container metadata first
@@ -244,5 +253,23 @@ mod tests {
             "Duration {}ms should be approx 65s",
             dur2
         );
+    }
+
+    #[test]
+    fn duration_ms_from_returns_zero_for_unknown_sentinel() {
+        let tb = TimeBase {
+            numer: 1,
+            denom: 48000,
+        };
+        assert_eq!(duration_ms_from(Some(tb), Some(u64::MAX)), 0.0);
+    }
+
+    #[test]
+    fn duration_ms_from_returns_zero_for_no_frames() {
+        let tb = TimeBase {
+            numer: 1,
+            denom: 48000,
+        };
+        assert_eq!(duration_ms_from(Some(tb), None), 0.0);
     }
 }
