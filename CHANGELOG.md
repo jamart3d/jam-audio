@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.7] — 2026-06-04
+
+### Fixed
+- Recovered `SharedCell` mutex guards from a poisoned native `Mutex` instead of panicking, so a thread panic while holding the lock no longer permanently breaks the audio engine.
+- Replaced `unwrap()` calls in `seek_to_ms()` and `decode_chunk_into()` with explicit `DecodeError::DecoderState` returns so a missing format reader surfaces as a recoverable error instead of a panic.
+
+### Verified
+- Engine cargo test (76 tests pass)
+- Engine cargo check
+
 ## [0.3.6] — 2026-06-04
 
 ### Fixed
