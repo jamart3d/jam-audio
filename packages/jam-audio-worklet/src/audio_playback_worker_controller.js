@@ -1298,6 +1298,11 @@ function createPlaybackWorkerController({
       } else {
         gaplessPlayerNextLoaded = true;
         emitMessage({ type: 'preload-pending' });
+        if (preloadHoldActive) {
+          preloadHoldActive = false;
+          clearPreloadHoldTimer();
+          emitEndedEmissionState('suppressed-pending-gapless');
+        }
       }
     },
 

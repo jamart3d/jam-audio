@@ -51,7 +51,6 @@ export function createJamAudioBridge({
   // callback is deferred until gesture-resume so the UI shows the play button
   // (paused) rather than the pause button (playing) while no audio comes out.
   let pendingPlaybackStartedOnResume = false;
-  let needsPlaybackStartedDeclick = false;
   /** @type {(() => void) | null} */
   let onPlaybackSuspendedCallback = null;
   /** @type {(() => void) | null} */
@@ -863,15 +862,6 @@ export function createJamAudioBridge({
           if (typeof onPlaybackSuspendedCallback === 'function') onPlaybackSuspendedCallback();
           markPlaybackState('paused');
         } else {
-          if (needsPlaybackStartedDeclick && gainNode) {
-            // Deferred from playTrack(): apply declick now that the ring buffer is
-            // populated. Gain is at 0 (transport-gain-zero in beginPlaybackSession
-            // set it, and no premature ramp ran). Ramp 0→currentVolume over
-            // DECLICK_DURATION_S so the first audio frame fades in rather than
-            // hard-starting at full gain.
-            needsPlaybackStartedDeclick = false;
-            scheduleDeclickRampToCurrentVolume('playback-started-startup');
-          }
           if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
           markPlaybackState('playing');
         }
@@ -1151,7 +1141,6 @@ export function createJamAudioBridge({
     }
 
     pendingPlaybackStartedOnResume = false;
-    needsPlaybackStartedDeclick = false;
     diagnosticsState = createDiagnosticsState();
     markPlaybackState('loading', { preserveMediaSession: true });
     setStartupPhase('initializing wasm');
@@ -1172,14 +1161,7 @@ export function createJamAudioBridge({
       try {
         await initAudio();
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
-        if (isAndroidTransport) {
-          // Android: defer declick to playback-started (when buffer is actually ready).
-          // Scheduling the ramp here causes it to complete before the first PCM frame
-          // arrives, leaving gain=1.0 at the hard start → audible pop on gapless tracks.
-          needsPlaybackStartedDeclick = true;
-        } else {
-          if (gainNode) scheduleDeclickRampToCurrentVolume('playTrack-startup');
-        }
+        if (gainNode) scheduleDeclickRampToCurrentVolume('playTrack-startup');
         createSharedBuffers();
         setStartupPhase('creating decoder');
         await sendPlaybackWorkerCommand('playTrack', {
