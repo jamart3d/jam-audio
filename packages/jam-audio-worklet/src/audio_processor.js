@@ -92,10 +92,8 @@ class JamAudioProcessor extends AudioWorkletProcessor {
     }
 
     // Fill the remainder of the output buffer with silence if we ran out of frames (underrun)
-    for (let frame = framesToProcess; frame < left.length; frame += 1) {
-      left[frame] = 0;
-      right[frame] = 0;
-    }
+    left.fill(0, framesToProcess);
+    right.fill(0, framesToProcess);
 
     if (framesToProcess > 0) {
       // Single batch update for shared state indices and counters.
