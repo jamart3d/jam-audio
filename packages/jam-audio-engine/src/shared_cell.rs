@@ -97,4 +97,32 @@ mod tests {
 
         assert_eq!(cell.with(|value| *value), 3);
     }
+
+    #[test]
+    fn new_wraps_initial_value() {
+        let cell = SharedCell::new(42usize);
+        assert_eq!(cell.with(|v| *v), 42);
+    }
+
+    #[test]
+    fn with_provides_immutable_reference() {
+        let cell = SharedCell::new(String::from("hello"));
+        let len = cell.with(|s| s.len());
+        assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn with_mut_modifies_inner_value() {
+        let cell = SharedCell::new(0usize);
+        cell.with_mut(|v| *v = 99);
+        assert_eq!(cell.with(|v| *v), 99);
+    }
+
+    #[test]
+    fn clone_shares_same_mutex() {
+        let cell = SharedCell::new(0usize);
+        let other = cell.clone();
+        cell.with_mut(|v| *v = 7);
+        assert_eq!(other.with(|v| *v), 7);
+    }
 }
