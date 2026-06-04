@@ -74,7 +74,7 @@ pub use imp::SharedCell;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::SharedCell;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
     fn with_and_with_mut_recover_after_poisoned_mutex() {

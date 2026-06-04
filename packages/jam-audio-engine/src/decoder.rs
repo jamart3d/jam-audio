@@ -1268,7 +1268,6 @@ mod tests {
         assert!(out.is_empty());
     }
 
-
     #[cfg(not(target_arch = "wasm32"))]
     fn decode_first_chunk_with_native_libopus(bytes: Vec<u8>) -> Vec<f32> {
         decode_nth_chunk_with_native_libopus(bytes, 0)
