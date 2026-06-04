@@ -484,6 +484,7 @@ impl StreamingDecoder {
                 self.pending_skip_frames -= skip as u64;
             }
 
+            // drain retains chunk_samples' capacity for reuse on the next iteration
             self.intermediate_samples.extend(chunk_samples.drain(..));
 
             if self.intermediate_samples.len() >= target_samples_stereo {
