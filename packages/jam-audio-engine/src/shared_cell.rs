@@ -52,13 +52,49 @@ mod imp {
         }
 
         pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-            f(&self.0.lock().unwrap())
+            let guard = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            f(&guard)
         }
 
         pub fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-            f(&mut self.0.lock().unwrap())
+            let mut guard = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            f(&mut guard)
         }
     }
 }
 
 pub use imp::SharedCell;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::SharedCell;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn with_and_with_mut_recover_after_poisoned_mutex() {
+        let cell = SharedCell::new(1usize);
+        let poisoned = cell.clone();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            poisoned.with_mut(|value| {
+                *value = 2;
+                panic!("poison the mutex");
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(cell.with(|value| *value), 2);
+
+        cell.with_mut(|value| {
+            *value = 3;
+        });
+
+        assert_eq!(cell.with(|value| *value), 3);
+    }
+}
