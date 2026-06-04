@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.3.6] — 2026-06-04
+
+### Fixed
+- Deferred the Android startup declick ramp until playback starts so cached gapless tracks fade in without a hard-start pop.
+
+### Verified
+- Worklet package test
+- Engine cargo check
+- Flutter bridge cargo check
+
 ## [0.3.5] — 2026-06-02
 
 ### Fixed
