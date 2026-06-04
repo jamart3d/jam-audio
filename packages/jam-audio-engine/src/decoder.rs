@@ -436,6 +436,7 @@ impl StreamingDecoder {
         self.intermediate_samples.clear();
         let target_samples_stereo = target_frames * 2;
 
+        let mut chunk_samples = Vec::new();
         loop {
             let packet = {
                 let format = self.format.as_mut().ok_or(DecodeError::DecoderState(
@@ -461,7 +462,7 @@ impl StreamingDecoder {
             self.source_sample_rate = spec.rate;
             self.source_channels = spec.channels.count() as u32;
 
-            let mut chunk_samples = Vec::new();
+            chunk_samples.clear();
             append_interleaved_samples(
                 &mut chunk_samples,
                 decoded,
@@ -483,7 +484,7 @@ impl StreamingDecoder {
                 self.pending_skip_frames -= skip as u64;
             }
 
-            self.intermediate_samples.extend(chunk_samples);
+            self.intermediate_samples.extend(chunk_samples.drain(..));
 
             if self.intermediate_samples.len() >= target_samples_stereo {
                 break;
