@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.3.8] — 2026-06-04
+
+### Added
+- Added native unit tests for `SharedCell` covering `new`, `with`, `with_mut`, and `clone` happy-path behavior.
+
+### Performance
+- Hoisted `chunk_samples` Vec allocation out of the `decode_chunk_into` loop so capacity is reused across iterations instead of reallocated on every decode.
+- Replaced manual silence-fill for-loop in `AudioWorkletProcessor` with `TypedArray.fill()` for faster native execution in the audio hot path.
+
+### Verified
+- Engine cargo test (80 tests pass)
+- Engine cargo fmt clean
+- Worklet npm test
+
 ## [0.3.7] — 2026-06-04
 
 ### Fixed
