@@ -141,6 +141,7 @@ pub enum DecodeError {
     MissingSampleRate,
     MissingChannels,
     NoDefaultTrack,
+    DecoderState(&'static str),
     Symphonia(String),
 }
 
@@ -152,6 +153,7 @@ impl fmt::Display for DecodeError {
             Self::MissingSampleRate => write!(f, "audio track is missing a sample rate"),
             Self::MissingChannels => write!(f, "audio track is missing channel metadata"),
             Self::NoDefaultTrack => write!(f, "audio container did not expose a default track"),
+            Self::DecoderState(message) => write!(f, "{message}"),
             Self::Symphonia(message) => write!(f, "{message}"),
         }
     }
@@ -387,7 +389,10 @@ impl StreamingDecoder {
             frac,
         };
 
-        let seeked_to = self.format.as_mut().unwrap().seek(
+        let format = self.format.as_mut().ok_or(DecodeError::DecoderState(
+            "decoder format reader is unavailable",
+        ))?;
+        let seeked_to = format.seek(
             SeekMode::Accurate,
             SeekTo::Time {
                 time: seek_time,
@@ -432,14 +437,19 @@ impl StreamingDecoder {
         let target_samples_stereo = target_frames * 2;
 
         loop {
-            let packet = match self.format.as_mut().unwrap().next_packet() {
-                Ok(packet) => packet,
-                Err(SymphoniaError::IoError(error))
-                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    break;
+            let packet = {
+                let format = self.format.as_mut().ok_or(DecodeError::DecoderState(
+                    "decoder format reader is unavailable",
+                ))?;
+                match format.next_packet() {
+                    Ok(packet) => packet,
+                    Err(SymphoniaError::IoError(error))
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                    {
+                        break;
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
             };
 
             if packet.track_id() != self.track_id {
@@ -1223,6 +1233,41 @@ mod tests {
             result
         );
     }
+
+    #[test]
+    fn seek_to_ms_returns_error_when_format_reader_is_missing() {
+        let bytes = include_bytes!("../testdata/opus_sample.opus").to_vec();
+        let mut decoder = StreamingDecoder::new(bytes, DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        decoder.format = None;
+
+        let result = decoder.seek_to_ms(0.0);
+
+        assert!(matches!(
+            result,
+            Err(DecodeError::DecoderState(
+                "decoder format reader is unavailable"
+            ))
+        ));
+    }
+
+    #[test]
+    fn decode_chunk_into_returns_error_when_format_reader_is_missing() {
+        let bytes = include_bytes!("../testdata/opus_sample.opus").to_vec();
+        let mut decoder = StreamingDecoder::new(bytes, DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        decoder.format = None;
+        let mut out = Vec::new();
+
+        let result = decoder.decode_chunk_into(128, &mut out);
+
+        assert!(matches!(
+            result,
+            Err(DecodeError::DecoderState(
+                "decoder format reader is unavailable"
+            ))
+        ));
+        assert!(out.is_empty());
+    }
+
 
     #[cfg(not(target_arch = "wasm32"))]
     fn decode_first_chunk_with_native_libopus(bytes: Vec<u8>) -> Vec<f32> {
