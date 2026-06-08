@@ -32,6 +32,8 @@ function createPlaybackWorkerController({
   clearIntervalFn,
   performanceNow,
   nowMs,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
 }) {
   let sharedSamples = null;
   let sharedState = null;
@@ -70,6 +72,7 @@ function createPlaybackWorkerController({
 
   let pendingGaplessBytes = null;
   let gaplessPlayerNextLoaded = false;
+  let gaplessEndedFallbackTimer = null;
   let pendingGaplessSampleRate = 0;
   let activeSampleRate = 48000;
   const core = createSharedPlaybackWorkerControllerCore({
@@ -254,6 +257,8 @@ function createPlaybackWorkerController({
     lastChunkReceivedAt = 0;
     isStalled = false;
     consecutiveZeroRefills = 0;
+    clearTimeoutFn(gaplessEndedFallbackTimer);
+    gaplessEndedFallbackTimer = null;
     pendingGaplessBytes = null;
     pendingGaplessSampleRate = 0;
     gaplessPlayerNextLoaded = false;
@@ -440,6 +445,22 @@ function createPlaybackWorkerController({
     emitMessage({ type: 'ended' });
   }
 
+  const GAPLESS_ENDED_FALLBACK_MS = 500;
+
+  function scheduleGaplessFallback() {
+    clearTimeoutFn(gaplessEndedFallbackTimer);
+    gaplessEndedFallbackTimer = setTimeoutFn(() => {
+      gaplessEndedFallbackTimer = null;
+      if (!endedEmitted && gaplessPlayerNextLoaded && pendingGaplessBytes === null) {
+        gaplessPlayerNextLoaded = false;
+        emitMessage({
+          type: 'diagnostics-event',
+          event: { type: 'gapless-fallback-recovery', reason: 'premature-eos-unlock' },
+        });
+      }
+    }, GAPLESS_ENDED_FALLBACK_MS);
+  }
+
   function handleEndOfStream() {
     // For streaming formats like Opus, durationMs() stays 0 (OGG total-sample-count is in
     // the last page, not the headers). positionMs() after all frames are decoded equals the
@@ -455,6 +476,9 @@ function createPlaybackWorkerController({
       if (Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX) === 0) {
         stopRefillLoop();
         emitEnded();
+        if (!endedEmitted && gaplessPlayerNextLoaded && pendingGaplessBytes === null) {
+          scheduleGaplessFallback();
+        }
       }
     }
   }

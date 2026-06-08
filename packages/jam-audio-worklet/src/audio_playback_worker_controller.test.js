@@ -1702,6 +1702,97 @@ test('emitEnded is suppressed when gaplessPlayerNextLoaded is set via loadNext',
   );
 });
 
+test('clears gaplessPlayerNextLoaded flag after 500ms fallback when gapless suppression fires with no transition', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let position = 0;
+  let capturedFallback = null;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (position >= 1000) return null;
+        position += 50;
+        return new Float32Array(2);
+      },
+      durationMs() { return 1000; },
+      positionMs() { return position; },
+      hasEnded() { return position >= 1000; },
+      loadNext() { return null; }, // success — sets gaplessPlayerNextLoaded
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (fn, _ms) => { capturedFallback = fn; return 1; },
+    clearTimeoutFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100 });
+
+  // Preload next — loadNext succeeds, gaplessPlayerNextLoaded becomes true
+  controller.preloadNext(new Uint8Array([9]));
+
+  // Drive to EOF without running intermediate refill ticks
+  position = 1000;
+
+  // Simulate buffer drain to zero to trigger handleEndOfStream via the interval callback
+  sharedState[2] = 0;
+  intervalCallback();
+
+  // Verify suppression happened: ended must NOT be emitted
+  assert.equal(
+    messages.some((m) => m.type === 'ended'),
+    false,
+    'ended must not be emitted immediately when gaplessPlayerNextLoaded is true',
+  );
+
+  // Verify suppressed-pending-gapless diagnostic fired
+  const suppressedEvents = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .filter((e) => e.type === 'ended-emission-state' && e.action === 'suppressed-pending-gapless');
+  assert.ok(
+    suppressedEvents.length > 0,
+    'suppressed-pending-gapless diagnostic must fire',
+  );
+
+  // Verify fallback was scheduled
+  assert.ok(capturedFallback !== null, 'setTimeoutFn must have been called to schedule fallback');
+
+  // Fire the fallback synchronously (simulates 500ms timer expiry)
+  capturedFallback();
+
+  // gapless-fallback-recovery diagnostic must have been emitted
+  const recoveryEvents = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .filter((e) => e.type === 'gapless-fallback-recovery' && e.reason === 'premature-eos-unlock');
+  assert.ok(
+    recoveryEvents.length > 0,
+    'gapless-fallback-recovery diagnostic must fire when fallback clears the suppression flag',
+  );
+
+  // ended must still NOT be emitted — the fallback does not force queue advance
+  assert.equal(
+    messages.some((m) => m.type === 'ended'),
+    false,
+    'ended must NOT be emitted by the fallback — health recovery decides advance vs retry',
+  );
+});
+
 test('ended fires after gapless boundary clears gaplessPlayerNextLoaded when no further preload arrives', () => {
   const messages = [];
   let intervalCallback = null;
