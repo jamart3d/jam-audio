@@ -22,6 +22,10 @@ const TRACK_HANDOFF_TOLERANCE_MS = 50;
 const HANDOFF_RETRY_WINDOW_MS = 200;
 const HANDOFF_FILL_THRESHOLD_PERCENT = 25;
 
+const PRELOAD_HOLD_MS = 500;
+const GAPLESS_ENDED_FALLBACK_MS = 750;
+const RECOVERY_REMAINING_THRESHOLD_MS = 1500;
+
 function createPlaybackWorkerController({
   createGaplessPlayer,
   createStreamingPlayer,
@@ -73,6 +77,7 @@ function createPlaybackWorkerController({
   let pendingGaplessBytes = null;
   let gaplessPlayerNextLoaded = false;
   let gaplessEndedFallbackTimer = null;
+  let pendingGaplessFallbackRecoveryConfirmation = false;
   let pendingGaplessSampleRate = 0;
   let activeSampleRate = 48000;
   const core = createSharedPlaybackWorkerControllerCore({
@@ -153,6 +158,12 @@ function createPlaybackWorkerController({
 
   function playerHasEnded(candidatePlayer) {
     return typeof candidatePlayer?.hasEnded === 'function' && candidatePlayer.hasEnded();
+  }
+
+  function playerPositionMs(candidatePlayer) {
+    return typeof candidatePlayer?.positionMs === 'function'
+      ? candidatePlayer.positionMs()
+      : 0;
   }
 
   let isBelowLowWaterMark = false;
@@ -262,6 +273,7 @@ function createPlaybackWorkerController({
     pendingGaplessBytes = null;
     pendingGaplessSampleRate = 0;
     gaplessPlayerNextLoaded = false;
+    pendingGaplessFallbackRecoveryConfirmation = false;
     currentSessionId++;
   }
 
@@ -417,7 +429,7 @@ function createPlaybackWorkerController({
     // for it to arrive before falling through to streaming reinit.
     if (!nextTrackPending && !preloadHoldActive) {
       preloadHoldActive = true;
-      preloadHoldUntilMs = nowMs() + 500;
+      preloadHoldUntilMs = nowMs() + PRELOAD_HOLD_MS;
       emitEndedEmissionState('hold-started');
       schedulePreloadHoldExpiry();
       return;
@@ -445,18 +457,72 @@ function createPlaybackWorkerController({
     emitMessage({ type: 'ended' });
   }
 
-  const GAPLESS_ENDED_FALLBACK_MS = 500;
+  function recoverFromStaleGaplessSuppression() {
+    const activePlayer = currentPlayer();
+    const hadSharedState = sharedState !== null;
+    const hadActivePlayer = activePlayer !== null;
+    const refillLoopActiveBefore = refillTimerId !== null;
+    const endOfStreamBefore = sharedState
+      ? Atomics.load(sharedState, END_OF_STREAM_INDEX)
+      : null;
+    const framesAvailableBefore = sharedState
+      ? Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX)
+      : null;
+    const activePositionMs = playerPositionMs(activePlayer);
+    const remainingMs = currentTrackEndPositionKnown
+      ? currentTrackEndPositionMs - activePositionMs
+      : null;
+    const canRecover =
+      hadActivePlayer &&
+      !playerHasEnded(activePlayer) &&
+      currentTrackEndPositionKnown &&
+      remainingMs > RECOVERY_REMAINING_THRESHOLD_MS;
+
+    gaplessPlayerNextLoaded = false;
+    preloadHoldActive = false;
+    preloadHoldUntilMs = 0;
+
+    let action = 'flag-cleared-only';
+    if (canRecover && sharedState) {
+      Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
+      if (refillTimerId === null) {
+        startRefillLoop();
+        action = 'refill-restarted';
+        pendingGaplessFallbackRecoveryConfirmation = true;
+      } else {
+        action = 'eos-cleared-refill-active';
+        pendingGaplessFallbackRecoveryConfirmation = true;
+      }
+    }
+
+    emitDiagnosticsEvent({
+      type: 'gapless-fallback-recovery',
+      reason: 'premature-eos-unlock',
+      action,
+      hadSharedState,
+      hadActivePlayer,
+      refillLoopActiveBefore,
+      endOfStreamBefore,
+      framesAvailableBefore,
+      endOfStreamAfter: sharedState
+        ? Atomics.load(sharedState, END_OF_STREAM_INDEX)
+        : null,
+      framesAvailableAfter: sharedState
+        ? Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX)
+        : null,
+      currentTrackEndPositionKnown,
+      currentTrackEndPositionMs,
+      activePositionMs,
+      remainingMs,
+    });
+  }
 
   function scheduleGaplessFallback() {
     clearTimeoutFn(gaplessEndedFallbackTimer);
     gaplessEndedFallbackTimer = setTimeoutFn(() => {
       gaplessEndedFallbackTimer = null;
       if (!endedEmitted && gaplessPlayerNextLoaded && pendingGaplessBytes === null) {
-        gaplessPlayerNextLoaded = false;
-        emitMessage({
-          type: 'diagnostics-event',
-          event: { type: 'gapless-fallback-recovery', reason: 'premature-eos-unlock' },
-        });
+        recoverFromStaleGaplessSuppression();
       }
     }, GAPLESS_ENDED_FALLBACK_MS);
   }
@@ -481,6 +547,81 @@ function createPlaybackWorkerController({
         }
       }
     }
+  }
+
+  function streamingGaplessHandoffLabel(reason) {
+    if (reason === 'end-of-stream-error') {
+      return 'Track handoff (streaming→gapless, end-of-stream path)';
+    }
+    if (reason === 'non-array-result') {
+      return 'Track handoff (streaming→gapless, non-array path)';
+    }
+    if (reason === 'zero-length-result') {
+      return 'Track handoff (streaming→gapless, zero-length path)';
+    }
+    return 'Track handoff (streaming→gapless)';
+  }
+
+  function transitionStreamingToGapless(reason, transitionPositionMs) {
+    const bytes = pendingGaplessBytes;
+    const sampleRate = pendingGaplessSampleRate;
+    let newPlayer;
+
+    try {
+      newPlayer = createGaplessPlayer(bytes, sampleRate);
+    } catch (bridgeError) {
+      stopRefillLoop();
+      diagnostics.transitionGapMs = null;
+      emitMessage({
+        type: 'playback-error',
+        message: bridgeError instanceof Error ? bridgeError.message : String(bridgeError),
+      });
+      return false;
+    }
+
+    pendingGaplessBytes = null;
+    pendingGaplessSampleRate = 0;
+    trackStartPositionMs = transitionPositionMs;
+
+    const bridgeDurationMs = newPlayer.durationMs();
+    if (bridgeDurationMs > 0) {
+      setCurrentTrackEndPosition(bridgeDurationMs, true);
+      _pendingHandoffBasePositionMs = -1;
+    } else {
+      setCurrentTrackEndPosition(0, false);
+      _pendingHandoffBasePositionMs = 0;
+    }
+
+    handoffUnderrunBaseline = diagnostics.underrunCount;
+    handoffStartedAtMs = nowMs();
+    diagnostics.transitionGapMs = 0;
+
+    streamingPlayer.free();
+    streamingPlayer = null;
+    streamingFinalized = false;
+    player = newPlayer;
+    _streamingHintDurationMs = 0;
+
+    const nextDurationMs = Math.floor(bridgeDurationMs);
+    emitMessage({
+      type: 'track-changed',
+      transitionPositionMs: Math.floor(transitionPositionMs),
+      durationMs: nextDurationMs,
+    });
+    emitMessage({ type: 'duration', durationMs: nextDurationMs });
+    emitDiagnosticsEvent({
+      type: 'track-handoff',
+      label: streamingGaplessHandoffLabel(reason),
+      timestampMs: handoffStartedAtMs,
+      severity: 'info',
+      signedGapMs: 0,
+      audibleLateGapMs: 0,
+      targetSignedGapMs: 0,
+      targetLeadMs: 0,
+      transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
+      underrunDelta: 0,
+    });
+    return true;
   }
 
   function refillRingBuffer() {
@@ -535,6 +676,17 @@ function createPlaybackWorkerController({
 
       if (result instanceof Float32Array && result.length > 0) {
         consecutiveZeroRefills = 0;
+        if (pendingGaplessFallbackRecoveryConfirmation) {
+          pendingGaplessFallbackRecoveryConfirmation = false;
+          emitDiagnosticsEvent({
+            type: 'gapless-fallback-recovery-confirmed',
+            label: 'Gapless fallback recovery confirmed',
+            timestampMs: nowMs(),
+            severity: 'info',
+            framesWritten: result.length / CHANNELS,
+            positionMs: playerPositionMs(activePlayer),
+          });
+        }
         diagnostics.pendingSeekDistanceMs = 0;
         if (lastChunkReceivedAt > 0) {
           const lag = performanceNow() - lastChunkReceivedAt;
@@ -611,45 +763,8 @@ function createPlaybackWorkerController({
           decodeError instanceof Error ? decodeError.message : String(decodeError);
         if (message.includes('end-of-stream')) {
           if (isStreaming && streamingFinalized && pendingGaplessBytes !== null) {
-            // end-of-stream error on a finalized stream — route through the bridge.
             const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
-            console.log('[worker] streaming→gapless bridge (end-of-stream error): transitioning at', transitionPositionMs.toFixed(0), 'ms');
-            const bytes = pendingGaplessBytes;
-            pendingGaplessBytes = null;
-            let newPlayer;
-            try {
-              newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
-            } catch (bridgeError) {
-              stopRefillLoop();
-              diagnostics.transitionGapMs = null;
-              emitMessage({ type: 'playback-error', message: bridgeError instanceof Error ? bridgeError.message : String(bridgeError) });
-              return;
-            }
-            trackStartPositionMs = transitionPositionMs;
-            const bridgeDurationMs = newPlayer.durationMs();
-            if (bridgeDurationMs > 0) {
-              setCurrentTrackEndPosition(bridgeDurationMs, true);
-              _pendingHandoffBasePositionMs = -1;
-            } else {
-              setCurrentTrackEndPosition(0, false);
-              _pendingHandoffBasePositionMs = 0;
-            }
-            handoffUnderrunBaseline = diagnostics.underrunCount;
-            handoffStartedAtMs = nowMs();
-            diagnostics.transitionGapMs = 0;
-            streamingPlayer.free();
-            streamingPlayer = null;
-            streamingFinalized = false;
-            player = newPlayer;
-            _streamingHintDurationMs = 0;
-            const nextDurationMs = Math.floor(bridgeDurationMs);
-            emitMessage({
-              type: 'track-changed',
-              transitionPositionMs: Math.floor(transitionPositionMs),
-              durationMs: nextDurationMs,
-            });
-            emitMessage({ type: 'duration', durationMs: nextDurationMs });
-            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, end-of-stream path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, targetSignedGapMs: 0, targetLeadMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            transitionStreamingToGapless('end-of-stream-error', transitionPositionMs);
             return;
           }
           handleEndOfStream();
@@ -674,64 +789,9 @@ function createPlaybackWorkerController({
           }
           if (streamingFinalized) {
             if (pendingGaplessBytes !== null) {
-              // Streaming has finished and we have a preloaded next track.
-              // Transition to WasmGaplessPlayer without letting the ring buffer drain.
-              console.log('[worker] streaming→gapless bridge: transitioning at', streamingPlayer.positionMs().toFixed(0), 'ms');
               const transitionPositionMs = streamingPlayer.positionMs();
-              const bytes = pendingGaplessBytes;
-              pendingGaplessBytes = null;
-
-              let newPlayer;
-              try {
-                newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
-              } catch (error) {
-                stopRefillLoop();
-                diagnostics.transitionGapMs = null;
-                emitMessage({
-                  type: 'playback-error',
-                  message: error instanceof Error ? error.message : String(error),
-                });
-                return;
-              }
-
-              trackStartPositionMs = transitionPositionMs;
-              const bridgeDurationMs = newPlayer.durationMs();
-              if (bridgeDurationMs > 0) {
-                setCurrentTrackEndPosition(bridgeDurationMs, true);
-                _pendingHandoffBasePositionMs = -1;
-              } else {
-                setCurrentTrackEndPosition(0, false);
-                _pendingHandoffBasePositionMs = 0;
-              }
-              handoffUnderrunBaseline = diagnostics.underrunCount;
-              handoffStartedAtMs = nowMs();
-              diagnostics.transitionGapMs = 0;
-
-              streamingPlayer.free();
-              streamingPlayer = null;
-              streamingFinalized = false;
-              player = newPlayer;
-              _streamingHintDurationMs = 0;
-
-              const nextDurationMs = Math.floor(bridgeDurationMs);
-              emitMessage({
-                type: 'track-changed',
-                transitionPositionMs: Math.floor(transitionPositionMs),
-                durationMs: nextDurationMs,
-              });
-              emitMessage({ type: 'duration', durationMs: nextDurationMs });
-              emitDiagnosticsEvent({
-                type: 'track-handoff',
-                label: 'Track handoff (streaming→gapless)',
-                timestampMs: handoffStartedAtMs,
-                severity: 'info',
-                signedGapMs: 0,
-                audibleLateGapMs: 0,
-                targetSignedGapMs: 0,
-                targetLeadMs: 0,
-                transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
-                underrunDelta: 0,
-              });
+              transitionStreamingToGapless('null-result', transitionPositionMs);
+              return;
             } else {
               handleEndOfStream();
             }
@@ -750,45 +810,8 @@ function createPlaybackWorkerController({
       if (!(result instanceof Float32Array)) {
         if (isStreaming && streamingFinalized) {
           if (pendingGaplessBytes !== null) {
-            // Non-Float32Array result on a finalized stream — route through the bridge.
             const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
-            console.log('[worker] streaming→gapless bridge (non-array result): transitioning at', transitionPositionMs.toFixed(0), 'ms');
-            const bytes = pendingGaplessBytes;
-            pendingGaplessBytes = null;
-            let newPlayer;
-            try {
-              newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
-            } catch (bridgeError) {
-              stopRefillLoop();
-              diagnostics.transitionGapMs = null;
-              emitMessage({ type: 'playback-error', message: bridgeError instanceof Error ? bridgeError.message : String(bridgeError) });
-              return;
-            }
-            trackStartPositionMs = transitionPositionMs;
-            const bridgeDurationMs = newPlayer.durationMs();
-            if (bridgeDurationMs > 0) {
-              setCurrentTrackEndPosition(bridgeDurationMs, true);
-              _pendingHandoffBasePositionMs = -1;
-            } else {
-              setCurrentTrackEndPosition(0, false);
-              _pendingHandoffBasePositionMs = 0;
-            }
-            handoffUnderrunBaseline = diagnostics.underrunCount;
-            handoffStartedAtMs = nowMs();
-            diagnostics.transitionGapMs = 0;
-            streamingPlayer.free();
-            streamingPlayer = null;
-            streamingFinalized = false;
-            player = newPlayer;
-            _streamingHintDurationMs = 0;
-            const nextDurationMs = Math.floor(bridgeDurationMs);
-            emitMessage({
-              type: 'track-changed',
-              transitionPositionMs: Math.floor(transitionPositionMs),
-              durationMs: nextDurationMs,
-            });
-            emitMessage({ type: 'duration', durationMs: nextDurationMs });
-            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, non-array path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, targetSignedGapMs: 0, targetLeadMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            transitionStreamingToGapless('non-array-result', transitionPositionMs);
             return;
           }
           handleEndOfStream();
@@ -806,45 +829,8 @@ function createPlaybackWorkerController({
       if (isStreaming && result.length === 0) {
         if (streamingFinalized) {
           if (pendingGaplessBytes !== null) {
-            // Zero-length result on a finalized stream — route through the bridge.
             const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
-            console.log('[worker] streaming→gapless bridge (zero-length result): transitioning at', transitionPositionMs.toFixed(0), 'ms');
-            const bytes = pendingGaplessBytes;
-            pendingGaplessBytes = null;
-            let newPlayer;
-            try {
-              newPlayer = createGaplessPlayer(bytes, pendingGaplessSampleRate);
-            } catch (bridgeError) {
-              stopRefillLoop();
-              diagnostics.transitionGapMs = null;
-              emitMessage({ type: 'playback-error', message: bridgeError instanceof Error ? bridgeError.message : String(bridgeError) });
-              return;
-            }
-            trackStartPositionMs = transitionPositionMs;
-            const bridgeDurationMs = newPlayer.durationMs();
-            if (bridgeDurationMs > 0) {
-              setCurrentTrackEndPosition(bridgeDurationMs, true);
-              _pendingHandoffBasePositionMs = -1;
-            } else {
-              setCurrentTrackEndPosition(0, false);
-              _pendingHandoffBasePositionMs = 0;
-            }
-            handoffUnderrunBaseline = diagnostics.underrunCount;
-            handoffStartedAtMs = nowMs();
-            diagnostics.transitionGapMs = 0;
-            streamingPlayer.free();
-            streamingPlayer = null;
-            streamingFinalized = false;
-            player = newPlayer;
-            _streamingHintDurationMs = 0;
-            const nextDurationMs = Math.floor(bridgeDurationMs);
-            emitMessage({
-              type: 'track-changed',
-              transitionPositionMs: Math.floor(transitionPositionMs),
-              durationMs: nextDurationMs,
-            });
-            emitMessage({ type: 'duration', durationMs: nextDurationMs });
-            emitDiagnosticsEvent({ type: 'track-handoff', label: 'Track handoff (streaming→gapless, zero-length path)', timestampMs: handoffStartedAtMs, severity: 'info', signedGapMs: 0, audibleLateGapMs: 0, targetSignedGapMs: 0, targetLeadMs: 0, transitionFloorPercent: diagnostics.lastTransitionFloorPercent, underrunDelta: 0 });
+            transitionStreamingToGapless('zero-length-result', transitionPositionMs);
             return;
           }
           handleEndOfStream();

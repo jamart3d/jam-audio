@@ -530,6 +530,118 @@ test('streaming bridge hint stays one-shot after late duration promotion', () =>
   );
 });
 
+function runStreamingToGaplessBranchScenario({ branch }) {
+  const messages = [];
+  let intervalCallback = null;
+  let streamingDecodeCalls = 0;
+  let gaplessDuration = 2222;
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const streamingPlayer = {
+    appendChunk() { return true; },
+    durationMs() { return 120; },
+    positionMs() { return 1000; },
+    isReady() { return true; },
+    isFinalized() { return true; },
+    finalize() {},
+    free() {},
+    decodeFrames() {
+      streamingDecodeCalls += 1;
+      if (streamingDecodeCalls === 1) {
+        return new Float32Array(CHANNELS * 8);
+      }
+      if (branch === 'end-of-stream-error') {
+        throw new Error('end-of-stream');
+      }
+      if (branch === 'null-result') {
+        return null;
+      }
+      if (branch === 'non-array-result') {
+        return { message: 'finalized non-array' };
+      }
+      if (branch === 'zero-length-result') {
+        return new Float32Array(0);
+      }
+      throw new Error(`unknown branch ${branch}`);
+    },
+  };
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() { return new Float32Array([0.2, 0.2]); },
+      durationMs() { return gaplessDuration; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => streamingPlayer,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+  controller.playTrackStreaming({
+    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer,
+    frameCapacity: 8,
+  });
+  controller.preloadNext(new Uint8Array([9]));
+  controller.finalizeStream();
+
+  intervalCallback();
+  sharedState[2] = 0;
+  intervalCallback();
+
+  return { messages, gaplessDuration };
+}
+
+for (const branch of [
+  'end-of-stream-error',
+  'null-result',
+  'non-array-result',
+  'zero-length-result',
+]) {
+  test(`streaming to gapless ${branch} branch emits the same handoff contract`, () => {
+    const { messages, gaplessDuration } = runStreamingToGaplessBranchScenario({ branch });
+
+    assert.deepEqual(
+      messages.find((message) => message.type === 'track-changed'),
+      {
+        type: 'track-changed',
+        transitionPositionMs: 1000,
+        durationMs: gaplessDuration,
+      },
+    );
+    assert.deepEqual(
+      messages.find((message) => message.type === 'duration'),
+      { type: 'duration', durationMs: gaplessDuration },
+    );
+
+    const handoff = messages
+      .filter((message) => message.type === 'diagnostics-event')
+      .map((message) => message.event)
+      .find((event) => event.type === 'track-handoff');
+
+    assert.equal(handoff.signedGapMs, 0);
+    assert.equal(handoff.audibleLateGapMs, 0);
+    assert.equal(handoff.targetSignedGapMs, 0);
+    assert.equal(handoff.targetLeadMs, 0);
+    assert.equal(handoff.underrunDelta, 0);
+    assert.match(handoff.label, /^Track handoff \(streaming→gapless/);
+  });
+}
+
 test('worker emits refill-starvation diagnostic at low rate', () => {
   const messages = [];
   let intervalCallback = null;
@@ -1702,7 +1814,7 @@ test('emitEnded is suppressed when gaplessPlayerNextLoaded is set via loadNext',
   );
 });
 
-test('clears gaplessPlayerNextLoaded flag after 500ms fallback when gapless suppression fires with no transition', () => {
+test('clears gaplessPlayerNextLoaded flag after 750ms fallback when gapless suppression fires with no transition', () => {
   const messages = [];
   let intervalCallback = null;
   let position = 0;
@@ -1790,6 +1902,189 @@ test('clears gaplessPlayerNextLoaded flag after 500ms fallback when gapless supp
     messages.some((m) => m.type === 'ended'),
     false,
     'ended must NOT be emitted by the fallback — health recovery decides advance vs retry',
+  );
+});
+
+test('gapless fallback clears transient EOS and restarts refill when known duration remains', () => {
+  const messages = [];
+  const intervalCallbacks = [];
+  const clearedIntervals = [];
+  let position = 231253;
+  let decodeCalls = 0;
+  let capturedFallback = null;
+  let nextTimerId = 1;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        decodeCalls += 1;
+        if (decodeCalls === 1 || decodeCalls === 2) {
+          throw new Error('end-of-stream');
+        }
+        if (decodeCalls === 3) {
+          position += 1024;
+          return new Float32Array(CHANNELS * 1024);
+        }
+        return null;
+      },
+      durationMs() { return 271220; },
+      positionMs() { return position; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      intervalCallbacks.push({ id, callback });
+      return id;
+    },
+    clearIntervalFn: (id) => {
+      clearedIntervals.push(id);
+    },
+    setTimeoutFn: (fn, ms) => {
+      capturedFallback = { fn, ms };
+      return 99;
+    },
+    clearTimeoutFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  const pcmBuffer = new SharedArrayBuffer(300000 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 300000,
+  });
+  controller.preloadNext(new Uint8Array([9]));
+
+  sharedState[2] = 0;
+  intervalCallbacks.at(-1).callback();
+
+  assert.equal(sharedState[3], 1, 'first transient EOS sets END_OF_STREAM_INDEX');
+  assert.ok(clearedIntervals.length > 0, 'EOS path stops the refill loop before fallback');
+  assert.equal(capturedFallback?.ms, 750, 'fallback must fire after the 500ms hold window');
+
+  capturedFallback.fn();
+
+  const recoveryEvent = messages
+    .filter((message) => message.type === 'diagnostics-event')
+    .map((message) => message.event)
+    .find((event) => event.type === 'gapless-fallback-recovery');
+
+  assert.equal(recoveryEvent.reason, 'premature-eos-unlock');
+  assert.equal(recoveryEvent.action, 'refill-restarted');
+  assert.equal(recoveryEvent.hadSharedState, true);
+  assert.equal(recoveryEvent.hadActivePlayer, true);
+  assert.equal(recoveryEvent.refillLoopActiveBefore, false);
+  assert.equal(recoveryEvent.endOfStreamBefore, 1);
+  assert.equal(recoveryEvent.framesAvailableBefore, 0);
+  assert.equal(recoveryEvent.endOfStreamAfter, 0);
+  assert.equal(recoveryEvent.framesAvailableAfter, 0);
+  assert.equal(sharedState[3], 0, 'fallback clears transient EOS before refill retry');
+  assert.ok(intervalCallbacks.length >= 2, 'fallback restarts the refill loop');
+
+  intervalCallbacks.at(-1).callback();
+
+  const confirmedEvent = messages
+    .filter((message) => message.type === 'diagnostics-event')
+    .map((message) => message.event)
+    .find((event) => event.type === 'gapless-fallback-recovery-confirmed');
+
+  assert.equal(confirmedEvent.framesWritten, 1024);
+  assert.equal(confirmedEvent.positionMs, position);
+  assert.equal(sharedState[3], 0, 'successful retry must not re-set END_OF_STREAM_INDEX');
+  assert.equal(
+    messages.some((message) => message.type === 'ended'),
+    false,
+    'fallback recovery must not emit ended or advance the queue',
+  );
+});
+
+test('gapless fallback does not clear EOS when active player is truly at known end', () => {
+  const messages = [];
+  const intervalCallbacks = [];
+  let position = 1000;
+  let capturedFallback = null;
+  let nextTimerId = 1;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        throw new Error('end-of-stream');
+      },
+      durationMs() { return 1000; },
+      positionMs() { return position; },
+      hasEnded() { return true; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      intervalCallbacks.push({ id, callback });
+      return id;
+    },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (fn, ms) => {
+      capturedFallback = { fn, ms };
+      return 99;
+    },
+    clearTimeoutFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+  controller.preloadNext(new Uint8Array([9]));
+
+  sharedState[2] = 0;
+  intervalCallbacks.at(-1).callback();
+  assert.equal(sharedState[3], 1);
+
+  capturedFallback.fn();
+
+  const recoveryEvent = messages
+    .filter((message) => message.type === 'diagnostics-event')
+    .map((message) => message.event)
+    .find((event) => event.type === 'gapless-fallback-recovery');
+
+  assert.equal(recoveryEvent.action, 'flag-cleared-only');
+  assert.equal(recoveryEvent.hadActivePlayer, true);
+  assert.equal(recoveryEvent.endOfStreamBefore, 1);
+  assert.equal(recoveryEvent.endOfStreamAfter, 1);
+  assert.equal(sharedState[3], 1, 'true-ended fallback must not clear EOS');
+  assert.equal(intervalCallbacks.length, 1, 'true-ended fallback must not restart refill');
+  assert.equal(
+    messages.some((message) => message.type === 'ended'),
+    false,
+    'fallback must not emit ended directly',
   );
 });
 
