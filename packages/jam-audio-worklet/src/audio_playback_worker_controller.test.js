@@ -1778,6 +1778,132 @@ test('ended fires after gapless boundary clears gaplessPlayerNextLoaded when no 
   );
 });
 
+test('gapless handoff deferred correction does not bleed prior transitionStreamToGapless hint into next track duration', () => {
+  // Reproduces the log56 "Big River shows 11:43" bug:
+  // 1. Mississippi Half-Step: streaming → transitionStreamToGapless(mississippiBytes, 703740)
+  //    sets _streamingHintDurationMs = 703740.
+  // 2. Big River: preloaded into Mississippi's GaplessPlayer via loadNext().
+  // 3. Mississippi ends → non-streaming gapless handoff fires with newDuration=0 (VBR).
+  // 4. Deferred correction must NOT use 703740 as resolvedDuration for Big River.
+  const messages = [];
+  let intervalCallback = null;
+
+  // Track state for the mock GaplessPlayer (represents Mississippi that also handles Big River internally)
+  let tickCount = 0;
+  // Tick 1: Mississippi playing, far from boundary.
+  // Tick 2: Mississippi crosses boundary, newDuration (Big River) = 0.
+  // Tick 3: newDuration (Big River) = 551000 — deferred correction fires.
+  const MISSISSIPPI_DURATION = 703740;
+  const BIG_RIVER_DURATION = 551000;
+
+  let nextLoaded = false;
+
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        return new Float32Array(CHANNELS * 10);
+      },
+      durationMs() {
+        if (tickCount <= 1) return MISSISSIPPI_DURATION;
+        if (tickCount === 2) return 0;
+        return BIG_RIVER_DURATION;
+      },
+      positionMs() {
+        if (tickCount <= 0) return 0;
+        if (tickCount === 1) return 50000;
+        if (tickCount === 2) return MISSISSIPPI_DURATION + 5;
+        return MISSISSIPPI_DURATION + 100;
+      },
+      hasEnded() { return false; },
+      loadNext(_bytes) {
+        nextLoaded = true;
+        return null;
+      },
+      seekToMs(value) {},
+      free() {},
+    }),
+    createStreamingPlayer: () => ({
+      appendChunk() { return true; },
+      durationMs() { return 0; },
+      positionMs() { return 100; },
+      isReady() { return true; },
+      isFinalized() { return false; },
+      finalize() {},
+      free() {},
+      decodeFrames() { return new Float32Array(CHANNELS * 10); },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = () => {
+        tickCount += 1;
+        callback();
+      };
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  // Set up: streaming → transitionStreamToGapless sets _streamingHintDurationMs = 703740
+  controller.playTrackStreaming({ pcmBuffer, stateBuffer, frameCapacity: 100 });
+  controller.transitionStreamToGapless(new Uint8Array([1, 2, 3]), MISSISSIPPI_DURATION);
+
+  // Preload Big River into the GaplessPlayer (simulates Dart calling preloadNext)
+  controller.preloadNext(new Uint8Array([4, 5, 6]));
+  assert.ok(nextLoaded, 'loadNext was called on the GaplessPlayer');
+
+  // Tick 1: Mississippi playing normally — no handoff yet.
+  sharedState[2] = 50; // frames available
+  intervalCallback();
+
+  const afterTick1 = messages.filter((m) => m.type === 'track-changed');
+  assert.equal(afterTick1.length, 0, 'no track-changed before boundary crossing');
+
+  // Tick 2: boundary crossed, newDuration = 0 — non-streaming gapless handoff fires.
+  sharedState[2] = 50;
+  intervalCallback();
+
+  const trackChangedMsgs = messages.filter((m) => m.type === 'track-changed');
+  assert.equal(trackChangedMsgs.length, 1, 'track-changed emitted at handoff');
+  assert.equal(
+    trackChangedMsgs[0].durationMs,
+    0,
+    'track-changed must carry durationMs=0, not the stale Mississippi hint (703740)',
+  );
+
+  // The deferred correction must NOT have fired yet (Big River duration still unknown)
+  const durationMsgsAfterHandoff = messages.filter(
+    (m) => m.type === 'duration' && m.durationMs === MISSISSIPPI_DURATION,
+  );
+  assert.equal(
+    durationMsgsAfterHandoff.length,
+    0,
+    'must not emit stale hint duration 703740 as Big River duration',
+  );
+
+  // Tick 3: Big River's GaplessPlayer now reports real duration 551000.
+  // Deferred correction should fire and emit the corrected duration.
+  messages.length = 0; // clear to inspect only tick-3 messages
+  sharedState[2] = 50;
+  intervalCallback();
+
+  const correctedDurationMsg = messages.find((m) => m.type === 'duration');
+  assert.ok(correctedDurationMsg, 'deferred correction emitted a duration message');
+  assert.equal(
+    correctedDurationMsg.durationMs,
+    BIG_RIVER_DURATION,
+    'corrected duration must be Big River real duration (551000), not Mississippi hint (703740)',
+  );
+});
+
+
 
 
 
