@@ -89,6 +89,9 @@ export function createJamAudioBridge({
   let mediaSessionResumeRequested = false;
   let lastPositionEventTs = 0;
 
+  let transportMuted = false;
+  let resumeUnmuteSent = false;
+
   let queueTrackIds = [];
   let activeTrackIndex = 0;
   let activeTrackId = null;
@@ -223,8 +226,10 @@ export function createJamAudioBridge({
   }
 
   async function waitForWorkerTransportQuiet() {
-    if (!playbackWorker) return;
-    await sendPlaybackWorkerCommand('transportMute').catch(() => {});
+    if (playbackWorker) {
+      await sendPlaybackWorkerCommand('transportMute').catch(() => {});
+    }
+    transportMuted = true;
     emitDiagnosticsEvent({
       type: 'transport-worker-muted',
       label: 'Transport worker muted',
@@ -268,7 +273,11 @@ export function createJamAudioBridge({
     }
 
     if (fadeIn) {
-      if (playbackWorker) await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
+      if (playbackWorker) {
+        await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
+      }
+      transportMuted = false;
+      resumeUnmuteSent = true;
       await rampGainToValue(currentVolume, DECLICK_DURATION_S);
     }
   }
@@ -1152,6 +1161,7 @@ export function createJamAudioBridge({
 
     pendingPlaybackStartedOnResume = false;
     needsPlaybackStartedDeclick = false;
+    resumeUnmuteSent = false;
     diagnosticsState = createDiagnosticsState();
     markPlaybackState('loading', { preserveMediaSession: true });
     setStartupPhase('initializing wasm');
@@ -1423,7 +1433,10 @@ export function createJamAudioBridge({
       // advancing READ_INDEX (ring-buffer position frozen). This subsumes
       // pauseRefill (also stops the refill loop). transportUnmute on resume
       // clears STOP_INDEX=0 and restarts the refill loop.
-      if (playbackWorker) void sendPlaybackWorkerCommand('transportMute').catch(() => {});
+      if (playbackWorker) {
+        await sendPlaybackWorkerCommand('transportMute').catch(() => {});
+      }
+      transportMuted = true;
     }
 
     markPlaybackState('paused');
@@ -1462,7 +1475,11 @@ export function createJamAudioBridge({
         // transportMute was called during pause (STOP_INDEX=1 froze the worklet).
         // transportUnmute clears STOP_INDEX=0 and restarts the refill loop so audio
         // can flow before the gain ramp reaches currentVolume.
-        if (playbackWorker) void sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
+        if (playbackWorker) {
+          await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
+        }
+        transportMuted = false;
+        resumeUnmuteSent = true;
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.cancelScheduledValues(now);
@@ -1500,9 +1517,20 @@ export function createJamAudioBridge({
         decoderReady: false,
         endOfStream: false,
         pendingSeek: false,
+        transportMuted,
+        resumeUnmuteSent,
+        gainNodeValue: gainNode?.gain?.value ?? null,
+        audioContextState: audioContext?.state ?? 'none',
       };
     }
-    return await sendPlaybackWorkerCommand('getHealthStatus');
+    const health = await sendPlaybackWorkerCommand('getHealthStatus');
+    return {
+      ...health,
+      transportMuted,
+      resumeUnmuteSent,
+      gainNodeValue: gainNode?.gain?.value ?? null,
+      audioContextState: audioContext?.state ?? 'none',
+    };
   }
 
   async function stop(options = {}) {
@@ -1531,6 +1559,9 @@ export function createJamAudioBridge({
       if (processorNode) processorNode.port.postMessage({ type: 'stop' });
       if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
     }
+
+    transportMuted = true;
+    resumeUnmuteSent = false;
 
     clearBoundedAnchorEndedHandler();
     restoreSilentAnchor();

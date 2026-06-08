@@ -602,10 +602,14 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            setCurrentTrackEndPosition(
-              newPlayer.durationMs() || _streamingHintDurationMs,
-              newPlayer.durationMs() > 0 || _streamingHintDurationMs > 0,
-            );
+            const bridgeDurationMs = newPlayer.durationMs();
+            if (bridgeDurationMs > 0) {
+              setCurrentTrackEndPosition(bridgeDurationMs, true);
+              _pendingHandoffBasePositionMs = -1;
+            } else {
+              setCurrentTrackEndPosition(0, false);
+              _pendingHandoffBasePositionMs = 0;
+            }
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -613,7 +617,8 @@ function createPlaybackWorkerController({
             streamingPlayer = null;
             streamingFinalized = false;
             player = newPlayer;
-            const nextDurationMs = Math.floor(newPlayer.durationMs() || _streamingHintDurationMs || 0);
+            _streamingHintDurationMs = 0;
+            const nextDurationMs = Math.floor(bridgeDurationMs);
             emitMessage({
               type: 'track-changed',
               transitionPositionMs: Math.floor(transitionPositionMs),
@@ -666,10 +671,14 @@ function createPlaybackWorkerController({
               }
 
               trackStartPositionMs = transitionPositionMs;
-              setCurrentTrackEndPosition(
-                newPlayer.durationMs() || _streamingHintDurationMs,
-                newPlayer.durationMs() > 0 || _streamingHintDurationMs > 0,
-              );
+              const bridgeDurationMs = newPlayer.durationMs();
+              if (bridgeDurationMs > 0) {
+                setCurrentTrackEndPosition(bridgeDurationMs, true);
+                _pendingHandoffBasePositionMs = -1;
+              } else {
+                setCurrentTrackEndPosition(0, false);
+                _pendingHandoffBasePositionMs = 0;
+              }
               handoffUnderrunBaseline = diagnostics.underrunCount;
               handoffStartedAtMs = nowMs();
               diagnostics.transitionGapMs = 0;
@@ -678,8 +687,9 @@ function createPlaybackWorkerController({
               streamingPlayer = null;
               streamingFinalized = false;
               player = newPlayer;
+              _streamingHintDurationMs = 0;
 
-              const nextDurationMs = Math.floor(newPlayer.durationMs() || _streamingHintDurationMs || 0);
+              const nextDurationMs = Math.floor(bridgeDurationMs);
               emitMessage({
                 type: 'track-changed',
                 transitionPositionMs: Math.floor(transitionPositionMs),
@@ -731,10 +741,14 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            setCurrentTrackEndPosition(
-              newPlayer.durationMs() || _streamingHintDurationMs,
-              newPlayer.durationMs() > 0 || _streamingHintDurationMs > 0,
-            );
+            const bridgeDurationMs = newPlayer.durationMs();
+            if (bridgeDurationMs > 0) {
+              setCurrentTrackEndPosition(bridgeDurationMs, true);
+              _pendingHandoffBasePositionMs = -1;
+            } else {
+              setCurrentTrackEndPosition(0, false);
+              _pendingHandoffBasePositionMs = 0;
+            }
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -742,7 +756,8 @@ function createPlaybackWorkerController({
             streamingPlayer = null;
             streamingFinalized = false;
             player = newPlayer;
-            const nextDurationMs = Math.floor(newPlayer.durationMs() || _streamingHintDurationMs || 0);
+            _streamingHintDurationMs = 0;
+            const nextDurationMs = Math.floor(bridgeDurationMs);
             emitMessage({
               type: 'track-changed',
               transitionPositionMs: Math.floor(transitionPositionMs),
@@ -782,10 +797,14 @@ function createPlaybackWorkerController({
               return;
             }
             trackStartPositionMs = transitionPositionMs;
-            setCurrentTrackEndPosition(
-              newPlayer.durationMs() || _streamingHintDurationMs,
-              newPlayer.durationMs() > 0 || _streamingHintDurationMs > 0,
-            );
+            const bridgeDurationMs = newPlayer.durationMs();
+            if (bridgeDurationMs > 0) {
+              setCurrentTrackEndPosition(bridgeDurationMs, true);
+              _pendingHandoffBasePositionMs = -1;
+            } else {
+              setCurrentTrackEndPosition(0, false);
+              _pendingHandoffBasePositionMs = 0;
+            }
             handoffUnderrunBaseline = diagnostics.underrunCount;
             handoffStartedAtMs = nowMs();
             diagnostics.transitionGapMs = 0;
@@ -793,7 +812,8 @@ function createPlaybackWorkerController({
             streamingPlayer = null;
             streamingFinalized = false;
             player = newPlayer;
-            const nextDurationMs = Math.floor(newPlayer.durationMs() || _streamingHintDurationMs || 0);
+            _streamingHintDurationMs = 0;
+            const nextDurationMs = Math.floor(bridgeDurationMs);
             emitMessage({
               type: 'track-changed',
               transitionPositionMs: Math.floor(transitionPositionMs),
@@ -862,6 +882,7 @@ function createPlaybackWorkerController({
             const audibleLateGapMs = Math.max(0, signedGapMs);
             const underrunDelta = lastCompletedHandoffUnderrunDelta;
             trackStartPositionMs = transitionPositionMs;
+            _streamingHintDurationMs = 0;          // hint was for previous track; new track starts fresh
             currentTrackEndPositionHandled = true;
             emitDiagnosticsEvent({
               type: 'track-handoff',
