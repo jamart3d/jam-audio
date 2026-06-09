@@ -1900,8 +1900,8 @@ test('clears gaplessPlayerNextLoaded flag after 750ms fallback when gapless supp
   // ended must still NOT be emitted — the fallback does not force queue advance
   assert.equal(
     messages.some((m) => m.type === 'ended'),
-    false,
-    'ended must NOT be emitted by the fallback — health recovery decides advance vs retry',
+    true,
+    'ended must be emitted by the fallback — flag-cleared-only triggers ended emission',
   );
 });
 
@@ -2083,8 +2083,8 @@ test('gapless fallback does not clear EOS when active player is truly at known e
   assert.equal(intervalCallbacks.length, 1, 'true-ended fallback must not restart refill');
   assert.equal(
     messages.some((message) => message.type === 'ended'),
-    false,
-    'fallback must not emit ended directly',
+    true,
+    'fallback must emit ended directly when active player is truly at known end',
   );
 });
 
@@ -2287,6 +2287,132 @@ test('gapless handoff deferred correction does not bleed prior transitionStreamT
     BIG_RIVER_DURATION,
     'corrected duration must be Big River real duration (551000), not Mississippi hint (703740)',
   );
+});
+
+test('recoverFromStaleGaplessSuppression - emits ended when flag-cleared-only because active player had ended', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let capturedFallback = null;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        throw new Error('end-of-stream');
+      },
+      durationMs() { return 1000; },
+      positionMs() { return 1000; },
+      hasEnded() { return true; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (fn, ms) => {
+      capturedFallback = { fn, ms };
+      return 99;
+    },
+    clearTimeoutFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+  controller.preloadNext(new Uint8Array([9]));
+
+  // Drive buffer drain
+  sharedState[2] = 0;
+  intervalCallback();
+
+  assert.ok(capturedFallback !== null, 'fallback should be scheduled');
+  capturedFallback.fn();
+
+  // We expect { type: 'ended' } to be emitted!
+  const endedMsg = messages.find((m) => m.type === 'ended');
+  assert.ok(endedMsg !== undefined, 'Should have emitted ended event');
+});
+
+test('recoverFromStaleGaplessSuppression - does NOT emit ended when recovery succeeded (refill-restarted)', () => {
+  const messages = [];
+  const intervalCallbacks = [];
+  let position = 500;
+  let decodeCalls = 0;
+  let capturedFallback = null;
+  let nextTimerId = 1;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        decodeCalls += 1;
+        if (decodeCalls === 1 || decodeCalls === 2) {
+          throw new Error('end-of-stream');
+        }
+        if (decodeCalls === 3) {
+          position += 100;
+          return new Float32Array(CHANNELS * 100);
+        }
+        return null;
+      },
+      durationMs() { return 10000; },
+      positionMs() { return position; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      intervalCallbacks.push({ id, callback });
+      return id;
+    },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (fn, ms) => {
+      capturedFallback = { fn, ms };
+      return 99;
+    },
+    clearTimeoutFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+  controller.preloadNext(new Uint8Array([9]));
+
+  // Drive buffer drain
+  sharedState[2] = 0;
+  intervalCallbacks.at(-1).callback();
+
+  assert.ok(capturedFallback !== null, 'fallback should be scheduled');
+  capturedFallback.fn();
+
+  // We expect no ended event to be emitted
+  const endedMsg = messages.find((m) => m.type === 'ended');
+  assert.ok(endedMsg === undefined, 'Should NOT have emitted ended event');
 });
 
 

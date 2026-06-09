@@ -87,6 +87,7 @@ export function createJamAudioBridge({
   let silentPlayHandler = null;
   let isAppOwnedResumeInFlight = false;
   let mediaSessionResumeRequested = false;
+  let _nextTrackMeta = null;
   let lastPositionEventTs = 0;
 
   let transportMuted = false;
@@ -900,8 +901,26 @@ export function createJamAudioBridge({
           activeTrackIndex = Math.min(activeTrackIndex + 1, queueTrackIds.length - 1);
           activeTrackId = queueTrackIds[activeTrackIndex];
         }
-        activeTrackTitle = '';
-        saveSessionMetadataToLocalStorage();
+        if (_nextTrackMeta !== null) {
+          activeTrackTitle = _nextTrackMeta.title || '';
+          saveSessionMetadataToLocalStorage();
+          if ('mediaSession' in navigator) {
+            navigator.mediaSession.metadata = new MediaMetadata({
+              title: _nextTrackMeta.title,
+              artist: _nextTrackMeta.artist,
+              album: _nextTrackMeta.album,
+              artwork: _nextTrackMeta.artworkUrl ? [
+                { src: _nextTrackMeta.artworkUrl, sizes: '96x96', type: 'image/jpeg' },
+                { src: _nextTrackMeta.artworkUrl, sizes: '192x192', type: 'image/jpeg' },
+                { src: _nextTrackMeta.artworkUrl, sizes: '512x512', type: 'image/jpeg' },
+              ] : [],
+            });
+          }
+          _nextTrackMeta = null;
+        } else {
+          activeTrackTitle = '';
+          saveSessionMetadataToLocalStorage();
+        }
         if (typeof onTrackChangedCallback === 'function') {
           onTrackChangedCallback({
             transitionPositionMs: data.transitionPositionMs ?? 0,
@@ -1664,6 +1683,10 @@ export function createJamAudioBridge({
     } catch {}
   }
 
+  function setNextTrackMeta(title, artist, album, artworkUrl) {
+    _nextTrackMeta = { title: title || '', artist: artist || '', album: album || '', artworkUrl: artworkUrl || '' };
+  }
+
   function updateMediaSession(title, artist, album, artworkUrl) {
     activeTrackTitle = title || '';
     saveSessionMetadataToLocalStorage();
@@ -2050,6 +2073,7 @@ export function createJamAudioBridge({
     updatePlaybackState,
     updatePositionState,
     updateMediaSession,
+    setNextTrackMeta,
     setSessionQueue,
     getPlaybackSessionSnapshot,
     initAudio,

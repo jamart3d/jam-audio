@@ -515,6 +515,11 @@ function createPlaybackWorkerController({
       activePositionMs,
       remainingMs,
     });
+
+    if (action === 'flag-cleared-only' && hadActivePlayer) {
+      endedEmitted = true;
+      emitMessage({ type: 'ended' });
+    }
   }
 
   function scheduleGaplessFallback() {
