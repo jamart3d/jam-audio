@@ -2012,6 +2012,95 @@ test('gapless fallback clears transient EOS and restarts refill when known durat
   );
 });
 
+test('gapless fallback restarts refill when hasEnded is true but known remaining audio is large', () => {
+  const messages = [];
+  const intervalCallbacks = [];
+  const clearedIntervals = [];
+  let decodeCalls = 0;
+  let capturedFallback = null;
+  let nextTimerId = 1;
+  let position = 5790737.5;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        decodeCalls += 1;
+        if (decodeCalls === 1 || decodeCalls === 2) {
+          throw new Error('end-of-stream');
+        }
+        position += 1024;
+        return new Float32Array(CHANNELS * 1024);
+      },
+      durationMs() { return 5877339.166666667; },
+      positionMs() { return position; },
+      hasEnded() { return true; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      const id = nextTimerId;
+      nextTimerId += 1;
+      intervalCallbacks.push({ id, callback });
+      return id;
+    },
+    clearIntervalFn: (id) => {
+      clearedIntervals.push(id);
+    },
+    setTimeoutFn: (fn, ms) => {
+      capturedFallback = { fn, ms };
+      return 99;
+    },
+    clearTimeoutFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  const pcmBuffer = new SharedArrayBuffer(300000 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 300000,
+  });
+  controller.preloadNext(new Uint8Array([9]));
+
+  sharedState[2] = 0;
+  intervalCallbacks.at(-1).callback();
+
+  assert.equal(sharedState[3], 1, 'premature EOS sets END_OF_STREAM_INDEX');
+  assert.ok(capturedFallback, 'gapless fallback timer must be scheduled');
+  assert.ok(clearedIntervals.length > 0, 'EOS path stops refill before fallback');
+
+  capturedFallback.fn();
+
+  const recoveryEvent = messages
+    .filter((message) => message.type === 'diagnostics-event')
+    .map((message) => message.event)
+    .find((event) => event.type === 'gapless-fallback-recovery');
+
+  assert.equal(recoveryEvent.reason, 'premature-eos-unlock');
+  assert.equal(recoveryEvent.action, 'refill-restarted');
+  assert.equal(recoveryEvent.endOfStreamBefore, 1);
+  assert.equal(recoveryEvent.endOfStreamAfter, 0);
+  assert.equal(recoveryEvent.remainingMs > 80000, true);
+  assert.equal(sharedState[3], 0, 'fallback clears transient EOS when remaining audio is known');
+  assert.ok(intervalCallbacks.length >= 2, 'fallback restarts the refill loop');
+  assert.equal(
+    messages.some((message) => message.type === 'ended'),
+    false,
+    'mid-track false EOS recovery must not emit ended while remaining audio is known',
+  );
+});
+
 test('gapless fallback does not clear EOS when active player is truly at known end', () => {
   const messages = [];
   const intervalCallbacks = [];

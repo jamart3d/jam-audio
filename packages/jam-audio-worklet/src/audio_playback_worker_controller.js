@@ -472,11 +472,14 @@ function createPlaybackWorkerController({
     const remainingMs = currentTrackEndPositionKnown
       ? currentTrackEndPositionMs - activePositionMs
       : null;
+    const activePlayerEnded = playerHasEnded(activePlayer);
+    const hasKnownRemainingAudio =
+      currentTrackEndPositionKnown &&
+      remainingMs !== null &&
+      remainingMs > RECOVERY_REMAINING_THRESHOLD_MS;
     const canRecover =
       hadActivePlayer &&
-      !playerHasEnded(activePlayer) &&
-      currentTrackEndPositionKnown &&
-      remainingMs > RECOVERY_REMAINING_THRESHOLD_MS;
+      hasKnownRemainingAudio;
 
     gaplessPlayerNextLoaded = false;
     preloadHoldActive = false;
@@ -514,9 +517,11 @@ function createPlaybackWorkerController({
       currentTrackEndPositionMs,
       activePositionMs,
       remainingMs,
+      activePlayerEnded,
+      hasKnownRemainingAudio,
     });
 
-    if (action === 'flag-cleared-only' && hadActivePlayer) {
+    if (action === 'flag-cleared-only' && hadActivePlayer && !hasKnownRemainingAudio) {
       endedEmitted = true;
       emitMessage({ type: 'ended' });
     }
