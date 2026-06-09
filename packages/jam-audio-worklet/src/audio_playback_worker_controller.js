@@ -66,6 +66,9 @@ function createPlaybackWorkerController({
   let lastCompletedHandoffUnderrunDelta = 0;
   let endedEmitted = false;
   let _pendingHandoffBasePositionMs = -1;
+  let pendingHandoffDurationBaseMs = -1;
+  let pendingHandoffPreviousDurationMs = 0;
+  let pendingHandoffProvisionalDurationMs = 0;
   let preloadHoldUntilMs = 0;
   let preloadHoldActive = false;
   let lastChunkReceivedAt = 0;
@@ -255,6 +258,9 @@ function createPlaybackWorkerController({
     currentTrackEndPositionKnown = false;
     currentTrackEndPositionHandled = false;
     _pendingHandoffBasePositionMs = -1;
+    pendingHandoffDurationBaseMs = -1;
+    pendingHandoffPreviousDurationMs = 0;
+    pendingHandoffProvisionalDurationMs = 0;
     _streamingHintDurationMs = 0;
     transitionMonitorUntilMs = 0;
     transitionFloorCandidate = Infinity;
@@ -281,6 +287,48 @@ function createPlaybackWorkerController({
     currentTrackEndPositionMs = durationMs > 0 ? durationMs : 0;
     currentTrackEndPositionKnown = isKnown;
     currentTrackEndPositionHandled = false;
+  }
+
+  function currentBoundaryDurationMs() {
+    if (!currentTrackEndPositionKnown) return 0;
+    const base = trackStartPositionMs > 0 ? trackStartPositionMs : 0;
+    return Math.max(0, currentTrackEndPositionMs - base);
+  }
+
+  function isStaleHandoffDuration(candidateDurationMs, previousDurationMs) {
+    if (!candidateDurationMs || candidateDurationMs <= 0) return false;
+    if (!previousDurationMs || previousDurationMs <= 0) return false;
+    return Math.abs(candidateDurationMs - previousDurationMs) <= TRACK_HANDOFF_TOLERANCE_MS;
+  }
+
+  function emitGaplessDurationCorrection(durationMs, basePositionMs) {
+    setCurrentTrackEndPosition(basePositionMs + durationMs, true);
+    pendingHandoffDurationBaseMs = -1;
+    pendingHandoffPreviousDurationMs = 0;
+    pendingHandoffProvisionalDurationMs = 0;
+    emitMessage({ type: 'duration', durationMs: Math.floor(durationMs) });
+    emitDiagnosticsEvent({
+      type: 'gapless-duration-corrected',
+      label: 'Gapless duration corrected after handoff',
+      timestampMs: nowMs(),
+      severity: 'info',
+      durationMs: Math.floor(durationMs),
+      basePositionMs: Math.floor(basePositionMs),
+      nextBoundaryMs: Math.floor(basePositionMs + durationMs),
+      trackStartPositionMs: Math.floor(trackStartPositionMs),
+      currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
+      currentTrackEndPositionKnown,
+    });
+  }
+
+  function probePendingHandoffDuration(activePlayer) {
+    if (pendingHandoffDurationBaseMs < 0 || !activePlayer) return;
+    const candidateDurationMs = activePlayer.durationMs();
+    if (!candidateDurationMs || candidateDurationMs <= 0) return;
+    if (isStaleHandoffDuration(candidateDurationMs, pendingHandoffPreviousDurationMs)) {
+      return;
+    }
+    emitGaplessDurationCorrection(candidateDurationMs, pendingHandoffDurationBaseMs);
   }
 
   const stopRefillLoop = core.stopRefillLoop;
@@ -852,6 +900,7 @@ function createPlaybackWorkerController({
         if (activePlayer !== player) {
           return;
         }
+        probePendingHandoffDuration(activePlayer);
         const newDuration = activePlayer.durationMs();
         if (
           !currentTrackEndPositionKnown &&
@@ -901,6 +950,7 @@ function createPlaybackWorkerController({
             const signedGapMs = diagnostics.transitionGapMs;
             const audibleLateGapMs = Math.max(0, signedGapMs);
             const underrunDelta = lastCompletedHandoffUnderrunDelta;
+            const previousDurationMs = currentBoundaryDurationMs();
             trackStartPositionMs = transitionPositionMs;
             _streamingHintDurationMs = 0;          // hint was for previous track; new track starts fresh
             currentTrackEndPositionHandled = true;
@@ -917,34 +967,43 @@ function createPlaybackWorkerController({
               transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
               underrunDelta,
             });
-            const nextDurationMs = Math.floor(newDuration || 0);
+            const handoffDurationIsStale = isStaleHandoffDuration(newDuration, previousDurationMs);
+            const nextDurationMs = handoffDurationIsStale ? 0 : Math.floor(newDuration || 0);
+
+            if (handoffDurationIsStale) {
+              pendingHandoffDurationBaseMs = transitionPositionMs;
+              pendingHandoffPreviousDurationMs = previousDurationMs;
+              pendingHandoffProvisionalDurationMs = newDuration;
+              emitDiagnosticsEvent({
+                type: 'gapless-duration-provisional',
+                label: 'Gapless handoff duration is provisional',
+                timestampMs: handoffStartedAtMs,
+                severity: 'warning',
+                transitionPositionMs: Math.floor(transitionPositionMs),
+                staleDurationMs: Math.floor(newDuration),
+                previousDurationMs: Math.floor(previousDurationMs),
+                trackStartPositionMs: Math.floor(trackStartPositionMs),
+                currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
+                currentTrackEndPositionKnown,
+              });
+            }
+
             emitMessage({
               type: 'track-changed',
               transitionPositionMs: Math.floor(transitionPositionMs),
               durationMs: nextDurationMs,
             });
-            emitMessage({ type: 'duration', durationMs: nextDurationMs });
+            if (nextDurationMs > 0) {
+              emitMessage({ type: 'duration', durationMs: nextDurationMs });
+            }
             transitionMonitorUntilMs = handoffStartedAtMs + 500;
             transitionFloorCandidate = Infinity;
             gaplessPlayerNextLoaded = false;
-            // Reset the boundary detector for the next gapless handoff.
-            // After the Rust-internal track swap, activePlayer.durationMs() returns
-            // the new track's duration (not the old track's). The new absolute
-            // end position is transitionPositionMs (= old end) + newDuration.
-            // setCurrentTrackEndPosition resets currentTrackEndPositionHandled = false
-            // so the next boundary crossing will fire a second track-changed.
-            if (newDuration > 0) {
-              // Duration known at handoff time: set absolute boundary directly.
-              setCurrentTrackEndPosition(transitionPositionMs + newDuration, true);
+
+            if (nextDurationMs > 0) {
+              setCurrentTrackEndPosition(transitionPositionMs + nextDurationMs, true);
               _pendingHandoffBasePositionMs = -1;
             } else {
-              // Duration unknown at handoff time (VBR MP3, Ogg without headers).
-              // Save the base so the per-tick discovery block can resolve the
-              // absolute boundary once durationMs() returns a positive value.
-              // setCurrentTrackEndPosition(0, false) resets:
-              //   currentTrackEndPositionHandled = false  (via setCurrentTrackEndPosition)
-              //   currentTrackEndPositionKnown   = false  (isKnown arg)
-              // so the discovery block will fire on the next tick with a real duration.
               _pendingHandoffBasePositionMs = transitionPositionMs;
               setCurrentTrackEndPosition(0, false);
             }

@@ -1422,6 +1422,104 @@ test('gapless handoff: second track boundary fires track-changed for third track
   assert.equal(allHandoffs[1].durationMs, 1200, 'second track-changed must carry DEMI duration');
 });
 
+test('gapless handoff does not arm next boundary from stale previous duration', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let totalPosition = 0;
+  let durationValue = 123420;
+  let decodeCalls = 0;
+
+  const pcmBuffer = new SharedArrayBuffer(600 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+  Atomics.store(sharedState, 2, 400);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames(n) {
+        decodeCalls += 1;
+        return new Float32Array(CHANNELS * n);
+      },
+      durationMs() {
+        return durationValue;
+      },
+      positionMs() {
+        return totalPosition;
+      },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (msg) => messages.push(msg),
+    setIntervalFn: (cb) => { intervalCallback = cb; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100 + decodeCalls,
+    nowMs: () => 100 + decodeCalls,
+  });
+
+  controller.setDiagnosticsMode('extended');
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 500,
+    sampleRate: 48000,
+  });
+  controller.preloadNext(new Uint8Array([2]));
+
+  totalPosition = 123420;
+  durationValue = 123420; // stale: Rust still reports the completed track duration at boundary.
+  Atomics.store(sharedState, 2, 400);
+  intervalCallback();
+
+  const firstHandoff = messages.filter((m) => m.type === 'track-changed');
+  assert.equal(firstHandoff.length, 1, 'first boundary still emits track-changed');
+  assert.equal(
+    firstHandoff[0].durationMs,
+    0,
+    'stale previous duration must not be advertised as the new track duration',
+  );
+
+  totalPosition = 246700;
+  durationValue = 369773; // Rust now reports the actual new track duration.
+  Atomics.store(sharedState, 2, 400);
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    1,
+    'must not fire a second handoff at previousDuration + previousDuration',
+  );
+  assert.ok(
+    messages.some((m) => m.type === 'duration' && m.durationMs === 369773),
+    'worker must emit corrected new-track duration when the Rust value changes',
+  );
+
+  totalPosition = 493250; // 123420 + 369773 - tolerance-ish.
+  durationValue = 369773; // stale: still reports the second track's duration.
+  controller.preloadNext(new Uint8Array([3]));
+  Atomics.store(sharedState, 2, 400);
+  intervalCallback();
+
+  const handoffs = messages.filter((m) => m.type === 'track-changed');
+  assert.equal(handoffs.length, 2, 'second handoff fires only at the corrected boundary');
+  assert.equal(handoffs[1].durationMs, 0, 'duration is provisional if it still equals the previous active duration');
+
+  totalPosition = 493300;
+  durationValue = 460867; // corrected third track duration.
+  Atomics.store(sharedState, 2, 400);
+  intervalCallback();
+
+  assert.ok(
+    messages.some((m) => m.type === 'duration' && m.durationMs === 460867),
+    'worker must emit corrected third-track duration when the Rust value changes',
+  );
+});
+
+
 test('gapless handoff fires for third track when new-track durationMs is 0 at boundary', () => {
   // Regression test for: when durationMs() returns 0 at handoff time (VBR MP3 /
   // Ogg without embedded duration), the boundary detector for the NEXT handoff
