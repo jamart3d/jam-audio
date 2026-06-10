@@ -3206,6 +3206,100 @@ test('refillRingBuffer uses injected setTimeoutFn for long-tick yield, not raw s
   assert.equal(yieldTimeouts[0].delayMs, 0, 'Yield timeout must use delay=0');
 });
 
+// Fix-A regression: when the ring buffer is full at the tick where positionMs
+// pins at the gapless track boundary, the refill loop's writableFrames<=0 early
+// break must NOT suppress the boundary check — track-changed must still fire.
+test('gapless boundary check fires even when ring buffer is full (writableFrames<=0)', () => {
+  const messages = [];
+  let intervalCallback = null;
+  const STEADY_STATE_TARGET_FRAMES = 264600;
+  const TRACK_DURATION_MS = 235367;
+
+  // Allocate a SAB large enough to hold the full steady-state target
+  const pcmBuffer = new SharedArrayBuffer(
+    STEADY_STATE_TARGET_FRAMES * CHANNELS * Float32Array.BYTES_PER_ELEMENT,
+  );
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  let position = 0;
+  let duration = TRACK_DURATION_MS;
+  let loadNextCalled = false;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        // Return empty frames — we don't need to write anything, buffer is full
+        return new Float32Array(0);
+      },
+      durationMs() { return duration; },
+      positionMs() { return position; },
+      hasEnded() { return false; },
+      loadNext() {
+        loadNextCalled = true;
+        duration = 190493;
+        return null;
+      },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  // Start playback
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: STEADY_STATE_TARGET_FRAMES,
+  });
+
+  // Prime startup: set framesAvailable above PLAYBACK_START_FRAMES so
+  // startupCompleted is set and currentTargetFrames switches to STEADY_STATE_TARGET_FRAMES
+  sharedState[2] = STEADY_STATE_TARGET_FRAMES; // buffer FULL → writableFrames = 0
+  position = 100;
+  intervalCallback(); // establishes startupCompleted = true
+
+  // Preload the next track
+  controller.preloadNext(new Uint8Array([9]));
+
+  // Pin position at the track boundary (at or past durationMs - TRACK_HANDOFF_TOLERANCE_MS)
+  position = TRACK_DURATION_MS; // 235367 >= 235367 - 50 → crossedTrackBoundary = true
+
+  // The ring buffer remains FULL — writableFrames = currentTargetFrames - framesAvailable = 0
+  // With the bug, the loop breaks before reaching the boundary check → no track-changed emitted.
+  // With the fix, the boundary check runs before (or on) the writableFrames<=0 break.
+  sharedState[2] = STEADY_STATE_TARGET_FRAMES;
+  intervalCallback();
+
+  const trackChangedMessages = messages.filter((m) => m.type === 'track-changed');
+  assert.equal(
+    trackChangedMessages.length,
+    1,
+    'track-changed must be emitted exactly once at the gapless boundary tick',
+  );
+  assert.ok(
+    trackChangedMessages.length > 0,
+    'track-changed must be emitted even when the ring buffer is full at the gapless boundary tick',
+  );
+  const fullBufferDiagnostic = messages.find(
+    (m) => m.type === 'diagnostics-event' && m.event?.type === 'boundary-checked-on-full-buffer',
+  );
+  assert.ok(
+    fullBufferDiagnostic !== undefined,
+    'boundary-checked-on-full-buffer diagnostic must be emitted when handoff fires on a full-buffer tick',
+  );
+});
+
 test('track-changed payload includes trackDelta field equal to 1 for a forward handoff', () => {
   const messages = [];
   let intervalCallback = null;

@@ -350,6 +350,167 @@ function createPlaybackWorkerController({
 
   const stopRefillLoop = core.stopRefillLoop;
 
+  // Shared gapless boundary / handoff logic called from two sites:
+  //   1. The writableFrames<=0 (full-buffer) early break — isFullBufferTick=true.
+  //   2. The normal in-loop decode path — isFullBufferTick=false.
+  //
+  // Pre-condition: caller has already verified !isStreaming && activePlayer === player.
+  // The function handles the currentTrackEndPositionKnown guard internally.
+  //
+  // Returns:
+  //   'retry'  — boundary crossed but fill% too low; caller must defer (break/return)
+  //   'unsafe' — fill% retry window expired; stopRefillLoop has been called, caller must return
+  //   'fired'  — handoff was executed and track-changed emitted
+  //   null     — end-position unknown or boundary not yet crossed; no action needed
+  function runGaplessBoundaryHandoff(activePlayer, framesAvailable, isFullBufferTick) {
+    probePendingHandoffDuration(activePlayer);
+    const newDuration = activePlayer.durationMs();
+    // Resolve end position if it was unknown at the previous handoff boundary
+    // (e.g. stale duration at transition; duration became known this tick).
+    if (!currentTrackEndPositionKnown &&
+        (newDuration > 0 || _streamingHintDurationMs > 0)) {
+      const resolvedDuration = newDuration || _streamingHintDurationMs;
+      const endPositionMs =
+        _pendingHandoffBasePositionMs >= 0
+          ? _pendingHandoffBasePositionMs + resolvedDuration
+          : resolvedDuration;
+      setCurrentTrackEndPosition(endPositionMs, true);
+      if (_pendingHandoffBasePositionMs >= 0) {
+        emitMessage({
+          type: 'duration',
+          durationMs: Math.floor(resolvedDuration),
+        });
+        _pendingHandoffBasePositionMs = -1;
+      }
+    }
+    if (!currentTrackEndPositionKnown || currentTrackEndPositionHandled) {
+      return null;
+    }
+    const positionMs = activePlayer.positionMs();
+    const crossedTrackBoundary =
+      positionMs >= currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+    if (!crossedTrackBoundary) {
+      return null;
+    }
+    const fillPercent = frameCapacity > 0 ? (framesAvailable / frameCapacity) * 100 : 0;
+    if (fillPercent < HANDOFF_FILL_THRESHOLD_PERCENT) {
+      if (handoffPendingUntilMs === 0) {
+        handoffPendingUntilMs = nowMs() + HANDOFF_RETRY_WINDOW_MS;
+      }
+      if (nowMs() < handoffPendingUntilMs) {
+        return 'retry';
+      }
+      handoffPendingUntilMs = 0;
+      stopRefillLoop();
+      diagnostics.transitionGapMs = null;
+      emitMessage({ type: 'playback-error', message: 'handoff_unsafe' });
+      return 'unsafe';
+    }
+    handoffPendingUntilMs = 0;
+    diagnostics.transitionGapMs = positionMs - currentTrackEndPositionMs;
+    handoffUnderrunBaseline = diagnostics.underrunCount;
+    handoffStartedAtMs = nowMs();
+    const signedGapMs = diagnostics.transitionGapMs;
+    const audibleLateGapMs = Math.max(0, signedGapMs);
+    const underrunDelta = lastCompletedHandoffUnderrunDelta;
+    const previousDurationMs = currentBoundaryDurationMs();
+    trackStartPositionMs = positionMs;
+    _streamingHintDurationMs = 0;
+    currentTrackEndPositionHandled = true;
+    emitDiagnosticsEvent({
+      type: 'track-handoff',
+      label: 'Track handoff',
+      timestampMs: handoffStartedAtMs,
+      severity: audibleLateGapMs > 0 || underrunDelta > 0 ? 'warning' : 'info',
+      signedGapMs,
+      audibleLateGapMs,
+      targetSignedGapMs: 0,
+      targetLeadMs: 0,
+      transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
+      underrunDelta,
+    });
+    const handoffDurationIsStale = isStaleHandoffDuration(newDuration, previousDurationMs);
+    const hintedDurationMs = loadedNextGaplessHintDurationMs > 0
+      ? loadedNextGaplessHintDurationMs
+      : pendingGaplessHintDurationMs;
+    const useHint = handoffDurationIsStale && hintedDurationMs > 0 &&
+      Math.abs(hintedDurationMs - previousDurationMs) > TRACK_HANDOFF_TOLERANCE_MS;
+    const nextDurationMs = handoffDurationIsStale
+      ? (useHint ? hintedDurationMs : 0)
+      : Math.floor(newDuration || 0);
+    if (handoffDurationIsStale) {
+      if (useHint) {
+        pendingHandoffDurationBaseMs = positionMs;
+        pendingHandoffPreviousDurationMs = previousDurationMs;
+        pendingHandoffProvisionalDurationMs = newDuration;
+        pendingHandoffHintDurationMs = hintedDurationMs;
+        emitDiagnosticsEvent({
+          type: 'gapless-duration-hint-used',
+          label: 'Gapless handoff duration hint used',
+          timestampMs: handoffStartedAtMs,
+          severity: 'info',
+          hintDurationMs: hintedDurationMs,
+          staleDurationMs: newDuration,
+          previousDurationMs: previousDurationMs,
+          nextBoundaryMs: positionMs + hintedDurationMs,
+        });
+      } else {
+        pendingHandoffDurationBaseMs = positionMs;
+        pendingHandoffPreviousDurationMs = previousDurationMs;
+        pendingHandoffProvisionalDurationMs = newDuration;
+        emitDiagnosticsEvent({
+          type: 'gapless-duration-provisional',
+          label: 'Gapless handoff duration is provisional',
+          timestampMs: handoffStartedAtMs,
+          severity: 'warning',
+          transitionPositionMs: Math.floor(positionMs),
+          staleDurationMs: Math.floor(newDuration),
+          previousDurationMs: Math.floor(previousDurationMs),
+          trackStartPositionMs: Math.floor(trackStartPositionMs),
+          currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
+          currentTrackEndPositionKnown,
+          gaplessHandoffMissingHint: true,
+        });
+      }
+    }
+    emitMessage({
+      type: 'track-changed',
+      transitionPositionMs: Math.floor(positionMs),
+      durationMs: nextDurationMs,
+      trackDelta: 1,
+    });
+    if (nextDurationMs > 0) {
+      emitMessage({ type: 'duration', durationMs: nextDurationMs });
+    }
+    transitionMonitorUntilMs = handoffStartedAtMs + 500;
+    transitionFloorCandidate = Infinity;
+    gaplessPlayerNextLoaded = false;
+    if (useHint) {
+      setCurrentTrackEndPosition(positionMs + hintedDurationMs, true);
+      _pendingHandoffBasePositionMs = -1;
+    } else if (nextDurationMs > 0) {
+      setCurrentTrackEndPosition(positionMs + nextDurationMs, true);
+      _pendingHandoffBasePositionMs = -1;
+    } else {
+      _pendingHandoffBasePositionMs = positionMs;
+      setCurrentTrackEndPosition(0, false);
+    }
+    pendingGaplessHintDurationMs = 0;
+    loadedNextGaplessHintDurationMs = 0;
+    if (isFullBufferTick) {
+      emitDiagnosticsEvent({
+        type: 'boundary-checked-on-full-buffer',
+        label: 'Gapless boundary check fired on full-buffer tick',
+        timestampMs: handoffStartedAtMs,
+        severity: 'info',
+        positionMs: Math.floor(positionMs),
+        framesAvailable,
+        fillPercent: Number(fillPercent.toFixed(1)),
+      });
+    }
+    return 'fired';
+  }
+
   function startRefillLoop() {
     stopRefillLoop();
     lastRefillTickMs = performanceNow();
@@ -783,6 +944,18 @@ function createPlaybackWorkerController({
       );
 
       if (writableFrames <= 0) {
+        // Fix-A: even when the ring buffer is full, the gapless boundary check
+        // must execute so that track-changed is emitted at the track boundary.
+        // Previously this break was unconditional, so a full buffer at the exact
+        // tick where positionMs pins at the end would suppress track-changed on
+        // every subsequent tick until a decode slot opened.  We call
+        // runGaplessBoundaryHandoff with isFullBufferTick=true, which emits the
+        // 'boundary-checked-on-full-buffer' diagnostic when the handoff fires.
+        if (!isStreaming && activePlayer === player) {
+          const fullBufferResult = runGaplessBoundaryHandoff(activePlayer, framesAvailable, true);
+          if (fullBufferResult === 'unsafe') return;
+          // 'retry', 'fired', or null — all fall through to break below
+        }
         break;
       }
 
@@ -978,144 +1151,9 @@ function createPlaybackWorkerController({
         if (activePlayer !== player) {
           return;
         }
-        probePendingHandoffDuration(activePlayer);
-        const newDuration = activePlayer.durationMs();
-        if (
-          !currentTrackEndPositionKnown &&
-          (newDuration > 0 || _streamingHintDurationMs > 0)
-        ) {
-          const resolvedDuration = newDuration || _streamingHintDurationMs;
-          const endPositionMs =
-            _pendingHandoffBasePositionMs >= 0
-              ? _pendingHandoffBasePositionMs + resolvedDuration
-              : resolvedDuration;
-          setCurrentTrackEndPosition(endPositionMs, true);
-          if (_pendingHandoffBasePositionMs >= 0) {
-            // Emit a corrected duration for the track whose duration was unknown
-            // at handoff time. Dart uses this to schedule the next preload.
-            emitMessage({
-              type: 'duration',
-              durationMs: Math.floor(resolvedDuration),
-            });
-            _pendingHandoffBasePositionMs = -1;
-          }
-        }
-        const transitionPositionMs = activePlayer.positionMs();
-        if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
-          const crossedTrackBoundary =
-            transitionPositionMs >=
-            currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
-          if (crossedTrackBoundary) {
-            const currentFillPercent = frameCapacity > 0 ? (framesAvailable / frameCapacity) * 100 : 0;
-            if (currentFillPercent < HANDOFF_FILL_THRESHOLD_PERCENT) {
-              if (handoffPendingUntilMs === 0) {
-                handoffPendingUntilMs = nowMs() + HANDOFF_RETRY_WINDOW_MS;
-              }
-              if (nowMs() < handoffPendingUntilMs) {
-                return; // retry next tick
-              }
-              handoffPendingUntilMs = 0;
-              stopRefillLoop();
-              diagnostics.transitionGapMs = null;
-              emitMessage({ type: 'playback-error', message: 'handoff_unsafe' });
-              return;
-            }
-            handoffPendingUntilMs = 0;
-            diagnostics.transitionGapMs =
-              transitionPositionMs - currentTrackEndPositionMs;
-            handoffUnderrunBaseline = diagnostics.underrunCount;
-            handoffStartedAtMs = nowMs();
-            const signedGapMs = diagnostics.transitionGapMs;
-            const audibleLateGapMs = Math.max(0, signedGapMs);
-            const underrunDelta = lastCompletedHandoffUnderrunDelta;
-            const previousDurationMs = currentBoundaryDurationMs();
-            trackStartPositionMs = transitionPositionMs;
-            _streamingHintDurationMs = 0;          // hint was for previous track; new track starts fresh
-            currentTrackEndPositionHandled = true;
-            emitDiagnosticsEvent({
-              type: 'track-handoff',
-              label: 'Track handoff',
-              timestampMs: handoffStartedAtMs,
-              severity:
-                audibleLateGapMs > 0 || underrunDelta > 0 ? 'warning' : 'info',
-              signedGapMs,
-              audibleLateGapMs,
-              targetSignedGapMs: 0,
-              targetLeadMs: 0,
-              transitionFloorPercent: diagnostics.lastTransitionFloorPercent,
-              underrunDelta,
-            });
-            const handoffDurationIsStale = isStaleHandoffDuration(newDuration, previousDurationMs);
-            const hintedDurationMs = loadedNextGaplessHintDurationMs > 0
-              ? loadedNextGaplessHintDurationMs
-              : pendingGaplessHintDurationMs;
-            const useHint = handoffDurationIsStale && hintedDurationMs > 0 && Math.abs(hintedDurationMs - previousDurationMs) > TRACK_HANDOFF_TOLERANCE_MS;
-
-            const nextDurationMs = handoffDurationIsStale ? (useHint ? hintedDurationMs : 0) : Math.floor(newDuration || 0);
-
-            if (handoffDurationIsStale) {
-              if (useHint) {
-                pendingHandoffDurationBaseMs = transitionPositionMs;
-                pendingHandoffPreviousDurationMs = previousDurationMs;
-                pendingHandoffProvisionalDurationMs = newDuration;
-                pendingHandoffHintDurationMs = hintedDurationMs;
-                emitDiagnosticsEvent({
-                  type: 'gapless-duration-hint-used',
-                  label: 'Gapless handoff duration hint used',
-                  timestampMs: handoffStartedAtMs,
-                  severity: 'info',
-                  hintDurationMs: hintedDurationMs,
-                  staleDurationMs: newDuration,
-                  previousDurationMs: previousDurationMs,
-                  nextBoundaryMs: transitionPositionMs + hintedDurationMs,
-                });
-              } else {
-                pendingHandoffDurationBaseMs = transitionPositionMs;
-                pendingHandoffPreviousDurationMs = previousDurationMs;
-                pendingHandoffProvisionalDurationMs = newDuration;
-                emitDiagnosticsEvent({
-                  type: 'gapless-duration-provisional',
-                  label: 'Gapless handoff duration is provisional',
-                  timestampMs: handoffStartedAtMs,
-                  severity: 'warning',
-                  transitionPositionMs: Math.floor(transitionPositionMs),
-                  staleDurationMs: Math.floor(newDuration),
-                  previousDurationMs: Math.floor(previousDurationMs),
-                  trackStartPositionMs: Math.floor(trackStartPositionMs),
-                  currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
-                  currentTrackEndPositionKnown,
-                  gaplessHandoffMissingHint: true,
-                });
-              }
-            }
-
-            emitMessage({
-              type: 'track-changed',
-              transitionPositionMs: Math.floor(transitionPositionMs),
-              durationMs: nextDurationMs,
-              trackDelta: 1,
-            });
-            if (nextDurationMs > 0) {
-              emitMessage({ type: 'duration', durationMs: nextDurationMs });
-            }
-            transitionMonitorUntilMs = handoffStartedAtMs + 500;
-            transitionFloorCandidate = Infinity;
-            gaplessPlayerNextLoaded = false;
-
-            if (useHint) {
-              setCurrentTrackEndPosition(transitionPositionMs + hintedDurationMs, true);
-              _pendingHandoffBasePositionMs = -1;
-            } else if (nextDurationMs > 0) {
-              setCurrentTrackEndPosition(transitionPositionMs + nextDurationMs, true);
-              _pendingHandoffBasePositionMs = -1;
-            } else {
-              _pendingHandoffBasePositionMs = transitionPositionMs;
-              setCurrentTrackEndPosition(0, false);
-            }
-
-            pendingGaplessHintDurationMs = 0;
-            loadedNextGaplessHintDurationMs = 0;
-          }
+        const loopResult = runGaplessBoundaryHandoff(activePlayer, framesAvailable, false);
+        if (loopResult === 'retry' || loopResult === 'unsafe') {
+          return;
         }
       }
 
