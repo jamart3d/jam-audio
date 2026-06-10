@@ -69,6 +69,8 @@ function createPlaybackWorkerController({
   let pendingHandoffDurationBaseMs = -1;
   let pendingHandoffPreviousDurationMs = 0;
   let pendingHandoffProvisionalDurationMs = 0;
+  let pendingGaplessHintDurationMs = 0;
+  let pendingHandoffHintDurationMs = 0;
   let preloadHoldUntilMs = 0;
   let preloadHoldActive = false;
   let lastChunkReceivedAt = 0;
@@ -261,6 +263,8 @@ function createPlaybackWorkerController({
     pendingHandoffDurationBaseMs = -1;
     pendingHandoffPreviousDurationMs = 0;
     pendingHandoffProvisionalDurationMs = 0;
+    pendingGaplessHintDurationMs = 0;
+    pendingHandoffHintDurationMs = 0;
     _streamingHintDurationMs = 0;
     transitionMonitorUntilMs = 0;
     transitionFloorCandidate = Infinity;
@@ -306,6 +310,8 @@ function createPlaybackWorkerController({
     pendingHandoffDurationBaseMs = -1;
     pendingHandoffPreviousDurationMs = 0;
     pendingHandoffProvisionalDurationMs = 0;
+    pendingGaplessHintDurationMs = 0;
+    pendingHandoffHintDurationMs = 0;
     emitMessage({ type: 'duration', durationMs: Math.floor(durationMs) });
     emitDiagnosticsEvent({
       type: 'gapless-duration-corrected',
@@ -325,6 +331,13 @@ function createPlaybackWorkerController({
     if (pendingHandoffDurationBaseMs < 0 || !activePlayer) return;
     const candidateDurationMs = activePlayer.durationMs();
     if (!candidateDurationMs || candidateDurationMs <= 0) return;
+    if (pendingHandoffHintDurationMs > 0 && Math.abs(candidateDurationMs - pendingHandoffHintDurationMs) <= TRACK_HANDOFF_TOLERANCE_MS) {
+      pendingHandoffDurationBaseMs = -1;
+      pendingHandoffPreviousDurationMs = 0;
+      pendingHandoffProvisionalDurationMs = 0;
+      pendingHandoffHintDurationMs = 0;
+      return;
+    }
     if (isStaleHandoffDuration(candidateDurationMs, pendingHandoffPreviousDurationMs)) {
       return;
     }
@@ -620,7 +633,11 @@ function createPlaybackWorkerController({
     return 'Track handoff (streaming→gapless)';
   }
 
-  function transitionStreamingToGapless(reason, transitionPositionMs) {
+  function transitionStreamingToGapless(reason, transitionPositionMs, hintDurationMs = 0) {
+    const previousStreamingDurationMs =
+      typeof streamingPlayer?.durationMs === 'function'
+        ? streamingPlayer.durationMs()
+        : 0;
     const bytes = pendingGaplessBytes;
     const sampleRate = pendingGaplessSampleRate;
     let newPlayer;
@@ -639,15 +656,49 @@ function createPlaybackWorkerController({
 
     pendingGaplessBytes = null;
     pendingGaplessSampleRate = 0;
+    pendingGaplessHintDurationMs = Number.isFinite(hintDurationMs) && hintDurationMs > 0 ? Math.floor(hintDurationMs) : 0;
+    pendingHandoffHintDurationMs = 0;
     trackStartPositionMs = transitionPositionMs;
 
-    const bridgeDurationMs = newPlayer.durationMs();
+    const rawBridgeDurationMs = newPlayer.durationMs();
+    const normalizedHintDurationMs =
+      Number.isFinite(hintDurationMs) && hintDurationMs > 0
+        ? Math.floor(hintDurationMs)
+        : 0;
+    const bridgeDurationIsStale =
+      normalizedHintDurationMs > 0 &&
+      rawBridgeDurationMs > 0 &&
+      previousStreamingDurationMs > 0 &&
+      Math.abs(rawBridgeDurationMs - previousStreamingDurationMs) <= TRACK_HANDOFF_TOLERANCE_MS &&
+      Math.abs(normalizedHintDurationMs - previousStreamingDurationMs) > TRACK_HANDOFF_TOLERANCE_MS;
+    const bridgeDurationMs = bridgeDurationIsStale
+      ? normalizedHintDurationMs
+      : rawBridgeDurationMs;
+
+    if (bridgeDurationIsStale) {
+      pendingHandoffDurationBaseMs = transitionPositionMs;
+      pendingHandoffPreviousDurationMs = previousStreamingDurationMs;
+      pendingHandoffProvisionalDurationMs = rawBridgeDurationMs;
+      pendingHandoffHintDurationMs = normalizedHintDurationMs;
+      emitDiagnosticsEvent({
+        type: 'streaming-gapless-duration-hint-used',
+        label: 'Streaming gapless duration hint used',
+        timestampMs: nowMs(),
+        severity: 'info',
+        hintDurationMs: normalizedHintDurationMs,
+        staleDurationMs: rawBridgeDurationMs,
+        previousDurationMs: previousStreamingDurationMs,
+        transitionPositionMs: Math.floor(transitionPositionMs),
+        nextBoundaryMs: Math.floor(transitionPositionMs + normalizedHintDurationMs),
+      });
+    }
+
     if (bridgeDurationMs > 0) {
-      setCurrentTrackEndPosition(bridgeDurationMs, true);
+      setCurrentTrackEndPosition(transitionPositionMs + bridgeDurationMs, true);
       _pendingHandoffBasePositionMs = -1;
     } else {
       setCurrentTrackEndPosition(0, false);
-      _pendingHandoffBasePositionMs = 0;
+      _pendingHandoffBasePositionMs = transitionPositionMs;
     }
 
     handoffUnderrunBaseline = diagnostics.underrunCount;
@@ -822,7 +873,7 @@ function createPlaybackWorkerController({
         if (message.includes('end-of-stream')) {
           if (isStreaming && streamingFinalized && pendingGaplessBytes !== null) {
             const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
-            transitionStreamingToGapless('end-of-stream-error', transitionPositionMs);
+            transitionStreamingToGapless('end-of-stream-error', transitionPositionMs, pendingGaplessHintDurationMs);
             return;
           }
           handleEndOfStream();
@@ -848,7 +899,7 @@ function createPlaybackWorkerController({
           if (streamingFinalized) {
             if (pendingGaplessBytes !== null) {
               const transitionPositionMs = streamingPlayer.positionMs();
-              transitionStreamingToGapless('null-result', transitionPositionMs);
+              transitionStreamingToGapless('null-result', transitionPositionMs, pendingGaplessHintDurationMs);
               return;
             } else {
               handleEndOfStream();
@@ -869,7 +920,7 @@ function createPlaybackWorkerController({
         if (isStreaming && streamingFinalized) {
           if (pendingGaplessBytes !== null) {
             const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
-            transitionStreamingToGapless('non-array-result', transitionPositionMs);
+            transitionStreamingToGapless('non-array-result', transitionPositionMs, pendingGaplessHintDurationMs);
             return;
           }
           handleEndOfStream();
@@ -888,7 +939,7 @@ function createPlaybackWorkerController({
         if (streamingFinalized) {
           if (pendingGaplessBytes !== null) {
             const transitionPositionMs = streamingPlayer?.positionMs() ?? 0;
-            transitionStreamingToGapless('zero-length-result', transitionPositionMs);
+            transitionStreamingToGapless('zero-length-result', transitionPositionMs, pendingGaplessHintDurationMs);
             return;
           }
           handleEndOfStream();
@@ -968,24 +1019,44 @@ function createPlaybackWorkerController({
               underrunDelta,
             });
             const handoffDurationIsStale = isStaleHandoffDuration(newDuration, previousDurationMs);
-            const nextDurationMs = handoffDurationIsStale ? 0 : Math.floor(newDuration || 0);
+            const hintedDurationMs = pendingGaplessHintDurationMs;
+            const useHint = handoffDurationIsStale && hintedDurationMs > 0 && Math.abs(hintedDurationMs - previousDurationMs) > TRACK_HANDOFF_TOLERANCE_MS;
+
+            const nextDurationMs = handoffDurationIsStale ? (useHint ? hintedDurationMs : 0) : Math.floor(newDuration || 0);
 
             if (handoffDurationIsStale) {
-              pendingHandoffDurationBaseMs = transitionPositionMs;
-              pendingHandoffPreviousDurationMs = previousDurationMs;
-              pendingHandoffProvisionalDurationMs = newDuration;
-              emitDiagnosticsEvent({
-                type: 'gapless-duration-provisional',
-                label: 'Gapless handoff duration is provisional',
-                timestampMs: handoffStartedAtMs,
-                severity: 'warning',
-                transitionPositionMs: Math.floor(transitionPositionMs),
-                staleDurationMs: Math.floor(newDuration),
-                previousDurationMs: Math.floor(previousDurationMs),
-                trackStartPositionMs: Math.floor(trackStartPositionMs),
-                currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
-                currentTrackEndPositionKnown,
-              });
+              if (useHint) {
+                pendingHandoffDurationBaseMs = transitionPositionMs;
+                pendingHandoffPreviousDurationMs = previousDurationMs;
+                pendingHandoffProvisionalDurationMs = newDuration;
+                pendingHandoffHintDurationMs = hintedDurationMs;
+                emitDiagnosticsEvent({
+                  type: 'gapless-duration-hint-used',
+                  label: 'Gapless handoff duration hint used',
+                  timestampMs: handoffStartedAtMs,
+                  severity: 'info',
+                  hintDurationMs: hintedDurationMs,
+                  staleDurationMs: newDuration,
+                  previousDurationMs: previousDurationMs,
+                  nextBoundaryMs: transitionPositionMs + hintedDurationMs,
+                });
+              } else {
+                pendingHandoffDurationBaseMs = transitionPositionMs;
+                pendingHandoffPreviousDurationMs = previousDurationMs;
+                pendingHandoffProvisionalDurationMs = newDuration;
+                emitDiagnosticsEvent({
+                  type: 'gapless-duration-provisional',
+                  label: 'Gapless handoff duration is provisional',
+                  timestampMs: handoffStartedAtMs,
+                  severity: 'warning',
+                  transitionPositionMs: Math.floor(transitionPositionMs),
+                  staleDurationMs: Math.floor(newDuration),
+                  previousDurationMs: Math.floor(previousDurationMs),
+                  trackStartPositionMs: Math.floor(trackStartPositionMs),
+                  currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
+                  currentTrackEndPositionKnown,
+                });
+              }
             }
 
             emitMessage({
@@ -1000,13 +1071,18 @@ function createPlaybackWorkerController({
             transitionFloorCandidate = Infinity;
             gaplessPlayerNextLoaded = false;
 
-            if (nextDurationMs > 0) {
+            if (useHint) {
+              setCurrentTrackEndPosition(transitionPositionMs + hintedDurationMs, true);
+              _pendingHandoffBasePositionMs = -1;
+            } else if (nextDurationMs > 0) {
               setCurrentTrackEndPosition(transitionPositionMs + nextDurationMs, true);
               _pendingHandoffBasePositionMs = -1;
             } else {
               _pendingHandoffBasePositionMs = transitionPositionMs;
               setCurrentTrackEndPosition(0, false);
             }
+
+            pendingGaplessHintDurationMs = 0;
           }
         }
       }
@@ -1086,6 +1162,8 @@ function createPlaybackWorkerController({
     playTrack(audioBytes, buffers) {
       stopRefillLoop();
       resetPlaybackState();
+      pendingGaplessHintDurationMs = 0;
+      pendingHandoffHintDurationMs = 0;
       diagnostics = createWorkerDiagnostics({
         workerState: 'running',
         decoderOwner: 'worker',
@@ -1350,8 +1428,14 @@ function createPlaybackWorkerController({
           newPlayer.loadNext(pendingGaplessBytes);
           gaplessPlayerNextLoaded = true;
         } catch { /* ignore */ }
+        if (!gaplessPlayerNextLoaded) {
+          pendingGaplessHintDurationMs = 0;
+        }
         pendingGaplessBytes = null;
+      } else {
+        pendingGaplessHintDurationMs = 0;
       }
+      pendingHandoffHintDurationMs = 0;
       streamingPlayer.free();
       streamingPlayer = null;
       streamingFinalized = false;
@@ -1366,24 +1450,27 @@ function createPlaybackWorkerController({
       kickRefillLoopIfNeeded();
     },
 
-    preloadNext(audioBytes) {
+    preloadNext(audioBytes, hintDurationMs = 0) {
+      const isFinitePositive = Number.isFinite(hintDurationMs) && hintDurationMs > 0;
+      pendingGaplessHintDurationMs = isFinitePositive ? Math.floor(hintDurationMs) : 0;
+
       if (!player) {
         if (streamingPlayer || windowedPlayer) {
           // Store bytes; the streaming→gapless bridge will consume them when streaming ends.
           pendingGaplessBytes = audioBytes;
           pendingGaplessSampleRate = activeSampleRate;
-          console.log('[worker] preloadNext: stored as pendingGaplessBytes for streaming→gapless bridge');
           emitMessage({ type: 'preload-pending' });
         } else {
+          pendingGaplessHintDurationMs = 0;
           emitMessage({ type: 'preload-error', message: 'no_active_player' });
         }
         return;
       }
-      console.log('[worker] preloadNext: calling player.loadNext, bytes=' + audioBytes.byteLength);
       let result;
       try {
         result = player.loadNext(audioBytes);
       } catch (error) {
+        pendingGaplessHintDurationMs = 0;
         emitMessage({
           type: 'preload-error',
           message: error instanceof Error ? error.message : String(error),
@@ -1391,6 +1478,7 @@ function createPlaybackWorkerController({
         return;
       }
       if (result && result.error === 'next_failed') {
+        pendingGaplessHintDurationMs = 0;
         emitMessage({
           type: 'preload-error',
           message: result.message ?? 'preload failed',
@@ -1449,6 +1537,8 @@ function createPlaybackWorkerController({
           Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
         }
         trackStartPositionMs = 0;
+        pendingGaplessHintDurationMs = 0;
+        pendingHandoffHintDurationMs = 0;
         const durationMs = activePlayer.durationMs();
         setCurrentTrackEndPosition(durationMs, durationMs > 0);
         endedEmitted = false;

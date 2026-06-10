@@ -1396,8 +1396,8 @@ export function createJamAudioBridge({
     return sendPlaybackWorkerCommand('transitionStreamToGapless', { audioBytes, hintDurationMs });
   }
 
-  function preloadNext(audioBytes) {
-    void sendPlaybackWorkerCommand('preloadNext', { audioBytes }).catch((error) => {
+  function preloadNext(audioBytes, hintDurationMs = 0) {
+    void sendPlaybackWorkerCommand('preloadNext', { audioBytes, hintDurationMs }).catch((error) => {
       if (typeof onPreloadErrorCallback === 'function') {
         onPreloadErrorCallback(error instanceof Error ? error.message : String(error));
       }

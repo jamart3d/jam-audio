@@ -4,6 +4,7 @@ import test from 'node:test';
 import { createPlaybackWorkerController } from './audio_playback_worker_controller.js';
 
 const CHANNELS = 2;
+const TRACK_HANDOFF_TOLERANCE_MS = 50;
 
 test('worklet wrapper still exports createPlaybackWorkerController', () => {
   assert.equal(typeof createPlaybackWorkerController, 'function');
@@ -641,6 +642,133 @@ for (const branch of [
     assert.match(handoff.label, /^Track handoff \(streaming→gapless/);
   });
 }
+
+test('streaming to gapless uses preloaded duration hint when bridge duration repeats streaming duration', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let streamingDecodeCalls = 0;
+  let totalPositionMs = 0;
+
+  const JAM_DURATION = 92420;
+  const BLUE_SUEDE_DURATION = 190493;
+  const WORKINGMAN_DURATION = 646880;
+
+  const streamingPlayer = {
+    appendChunk() { return true; },
+    durationMs() { return JAM_DURATION; },
+    positionMs() { return JAM_DURATION; },
+    isReady() { return true; },
+    isFinalized() { return true; },
+    finalize() {},
+    free() {},
+    decodeFrames() {
+      streamingDecodeCalls += 1;
+      if (streamingDecodeCalls === 1) {
+        return new Float32Array(CHANNELS * 8);
+      }
+      return null;
+    },
+  };
+
+  const gaplessPlayer = {
+    decodeFrames(n) {
+      return new Float32Array(CHANNELS * n);
+    },
+    durationMs() {
+      // Log67 failure: the newly-created gapless player still reports the
+      // streaming track duration, not Blue Suede's true duration.
+      return JAM_DURATION;
+    },
+    positionMs() {
+      return totalPositionMs;
+    },
+    hasEnded() {
+      return false;
+    },
+    loadNext() {
+      return null;
+    },
+    seekToMs() {},
+    free() {},
+  };
+
+  const stateBuffer = new SharedArrayBuffer(8 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => gaplessPlayer,
+    createStreamingPlayer: () => streamingPlayer,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100 + streamingDecodeCalls * 15,
+  });
+
+  controller.setDiagnosticsMode('extended');
+  controller.playTrackStreaming({
+    pcmBuffer: new SharedArrayBuffer(264600 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer,
+    frameCapacity: 264600,
+  });
+
+  controller.preloadNext(new Uint8Array([2]), BLUE_SUEDE_DURATION);
+  controller.finalizeStream();
+
+  intervalCallback();
+  sharedState[2] = 0;
+  intervalCallback();
+
+  assert.deepEqual(
+    messages.find((message) => message.type === 'track-changed'),
+    {
+      type: 'track-changed',
+      transitionPositionMs: JAM_DURATION,
+      durationMs: BLUE_SUEDE_DURATION,
+    },
+  );
+
+  assert.deepEqual(
+    messages.find((message) => message.type === 'duration'),
+    { type: 'duration', durationMs: BLUE_SUEDE_DURATION },
+  );
+
+  const hintEvent = messages
+    .filter((message) => message.type === 'diagnostics-event')
+    .map((message) => message.event)
+    .find((event) => event.type === 'streaming-gapless-duration-hint-used');
+
+  assert.ok(hintEvent, 'streaming-to-gapless path should report hint use');
+  assert.equal(hintEvent.hintDurationMs, BLUE_SUEDE_DURATION);
+  assert.equal(hintEvent.staleDurationMs, JAM_DURATION);
+
+  controller.preloadNext(new Uint8Array([3]), WORKINGMAN_DURATION);
+
+  totalPositionMs = JAM_DURATION + JAM_DURATION - TRACK_HANDOFF_TOLERANCE_MS + 5;
+  sharedState[2] = 263576;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((message) => message.type === 'track-changed').length,
+    1,
+    'must not cut Blue Suede at the previous jam duration',
+  );
+
+  totalPositionMs = JAM_DURATION + BLUE_SUEDE_DURATION - TRACK_HANDOFF_TOLERANCE_MS + 5;
+  sharedState[2] = 263576;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((message) => message.type === 'track-changed').length,
+    2,
+    'should hand off only when Blue Suede reaches the hinted duration',
+  );
+});
+
 
 test('worker emits refill-starvation diagnostic at low rate', () => {
   const messages = [];
@@ -1519,6 +1647,107 @@ test('gapless handoff does not arm next boundary from stale previous duration', 
   );
 });
 
+test('gapless handoff uses preload duration hint when engine duration never refreshes', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let totalPosition = 0;
+  let decodeCalls = 0;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames(n) {
+        decodeCalls += 1;
+        return new Float32Array(CHANNELS * n);
+      },
+      durationMs() {
+        // Simulate log66: engine keeps returning Truckin's stale duration after
+        // the Sugaree handoff and never reports Sugaree's real 442413ms duration.
+        return 571460;
+      },
+      positionMs() {
+        return totalPosition;
+      },
+      hasEnded() {
+        return false;
+      },
+      loadNext() {
+        return null;
+      },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => {
+      messages.push(message);
+    },
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100 + decodeCalls * 15,
+  });
+
+  const pcmBuffer = new SharedArrayBuffer(264600 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(8 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.setDiagnosticsMode('extended');
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 264600,
+  });
+  
+  // Set buffer level high so playTrack doesn't immediately decode all the way.
+  Atomics.store(sharedState, 2, 263576);
+  
+  controller.preloadNext(new Uint8Array([2]), 442413);
+
+  // Set position to exact boundary (571460 - 50 = 571410). Let's set it to 571415.
+  totalPosition = 571415;
+  Atomics.store(sharedState, 2, 263576);
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    1,
+    'first handoff into hinted track should happen',
+  );
+
+  const hintUsedEvent = messages.find(
+    (m) =>
+      m.type === 'diagnostics-event' &&
+      m.event?.type === 'gapless-duration-hint-used',
+  );
+  assert.ok(hintUsedEvent !== undefined, 'should emit gapless-duration-hint-used diagnostic');
+  assert.equal(hintUsedEvent.event.hintDurationMs, 442413);
+  assert.equal(hintUsedEvent.event.staleDurationMs, 571460);
+  assert.equal(hintUsedEvent.event.previousDurationMs, 571460);
+  assert.ok(hintUsedEvent.event.nextBoundaryMs > 571460);
+
+  const transitionPositionMs = messages.find((m) => m.type === 'track-changed').transitionPositionMs;
+
+  // Let's preload track 3 so the second handoff can be preloaded.
+  controller.preloadNext(new Uint8Array([3]), 120000);
+
+  // Simulate crossing the hinted Sugaree boundary: transitionPositionMs + 442413.
+  // 571415 + 442413 = 1013828.
+  // Handoff tolerance is 50. Let's set it to 1013800.
+  totalPosition = 1013800;
+  Atomics.store(sharedState, 2, 263576);
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    2,
+    'second handoff should happen at hinted active-track duration, not get stuck forever',
+  );
+});
 
 test('gapless handoff fires for third track when new-track durationMs is 0 at boundary', () => {
   // Regression test for: when durationMs() returns 0 at handoff time (VBR MP3 /
