@@ -76,7 +76,7 @@ test('gapless handoff emits an integer transition position', () => {
 
   assert.deepEqual(
     messages.find((message) => message.type === 'track-changed'),
-    { type: 'track-changed', transitionPositionMs: 1005, durationMs: 2200 },
+    { type: 'track-changed', transitionPositionMs: 1005, durationMs: 2200, trackDelta: 1 },
   );
 });
 
@@ -622,6 +622,7 @@ for (const branch of [
         type: 'track-changed',
         transitionPositionMs: 1000,
         durationMs: gaplessDuration,
+        trackDelta: 1,
       },
     );
     assert.deepEqual(
@@ -729,6 +730,7 @@ test('streaming to gapless uses preloaded duration hint when bridge duration rep
       type: 'track-changed',
       transitionPositionMs: JAM_DURATION,
       durationMs: BLUE_SUEDE_DURATION,
+      trackDelta: 1,
     },
   );
 
@@ -2875,3 +2877,389 @@ test('worker preloadNext command forwards hintDurationMs to controller', () => {
   );
 });
 
+test('seek resets FRAMES_AVAILABLE_INDEX before READ_INDEX and WRITE_INDEX', () => {
+  // This test asserts the ordering contract: the worklet guard on FRAMES_AVAILABLE_INDEX
+  // must be zeroed first so no other thread can read stale PCM during the reset.
+  const storeLog = [];
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+
+  // Wrap the SAB in a Proxy that records store order.
+  // We can't proxy Int32Array directly, so we intercept at the Atomics.store call
+  // by overriding globalThis.Atomics.
+  const realAtomics = globalThis.Atomics;
+  const patchedAtomics = Object.create(realAtomics);
+  patchedAtomics.store = (ta, index, value) => {
+    storeLog.push({ index, value });
+    return realAtomics.store(ta, index, value);
+  };
+  globalThis.Atomics = patchedAtomics;
+
+  try {
+    const controller = createPlaybackWorkerController({
+      createGaplessPlayer: () => ({
+        decodeFrames() { return new Float32Array(4); },
+        durationMs() { return 1000; },
+        positionMs() { return 0; },
+        hasEnded() { return false; },
+        loadNext() { return null; },
+        seekToMs(ms) { /* fake seek succeeds */ },
+        free() {},
+      }),
+      createStreamingPlayer: () => null,
+      createWindowedStreamingPlayer: () => null,
+      createRangeFetchController: () => null,
+      emitMessage: () => {},
+      setIntervalFn: () => 1,
+      clearIntervalFn: () => {},
+      performanceNow: () => 100,
+      nowMs: () => 100,
+    });
+
+    controller.playTrack(new Uint8Array([1]), {
+      pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+      stateBuffer,
+      frameCapacity: 100,
+      sampleRate: 44100,
+    });
+
+    storeLog.length = 0; // clear stores from playTrack setup
+    controller.seek(500);
+
+    // FRAMES_AVAILABLE_INDEX = 2. It must be set to 0 before READ_INDEX (0) and WRITE_INDEX (1).
+    const stores = storeLog.filter((s) => [0, 1, 2].includes(s.index) && s.value === 0);
+    const framesFirstStore = stores.findIndex((s) => s.index === 2); // FRAMES_AVAILABLE_INDEX
+    const readIndexStore = stores.findIndex((s) => s.index === 0);   // READ_INDEX
+    const writeIndexStore = stores.findIndex((s) => s.index === 1);  // WRITE_INDEX
+
+    assert.ok(framesFirstStore !== -1, 'FRAMES_AVAILABLE_INDEX must be stored during seek reset');
+    assert.ok(readIndexStore !== -1, 'READ_INDEX must be stored during seek reset');
+    assert.ok(writeIndexStore !== -1, 'WRITE_INDEX must be stored during seek reset');
+    assert.ok(
+      framesFirstStore < readIndexStore,
+      `FRAMES_AVAILABLE_INDEX store (pos ${framesFirstStore}) must precede READ_INDEX store (pos ${readIndexStore})`,
+    );
+    assert.ok(
+      framesFirstStore < writeIndexStore,
+      `FRAMES_AVAILABLE_INDEX store (pos ${framesFirstStore}) must precede WRITE_INDEX store (pos ${writeIndexStore})`,
+    );
+  } finally {
+    globalThis.Atomics = realAtomics;
+  }
+});
+
+test('schedulePreloadHoldExpiry fires emitEnded via injected setTimeoutFn when hold window expires', () => {
+  // Reach handleEndOfStream via the gapless player throwing end-of-stream from
+  // decodeFrames(). That is the real path that calls emitEnded() with the preload
+  // hold active (no next track pending). The fake player throws on the first
+  // decodeFrames() call so end-of-stream fires immediately on the first refill tick.
+  //
+  // Path: refillRingBuffer → decodeFrames throws 'end-of-stream'
+  //   → handleEndOfStream() (FRAMES_AVAILABLE_INDEX=0 so emitEnded is called)
+  //   → emitEnded() enters hold-started branch (no pendingGaplessBytes)
+  //   → schedulePreloadHoldExpiry()
+  //   → setTimeoutFn recorded in scheduledTimeouts
+  const messages = [];
+  const scheduledTimeouts = [];
+  let intervalCallback = null;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        // Throw end-of-stream on every call — matches the real Wasm error string
+        // that the controller checks at line ~876: message.includes('end-of-stream')
+        throw new Error('end-of-stream');
+      },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (callback, delayMs) => {
+      scheduledTimeouts.push({ callback, delayMs });
+      return scheduledTimeouts.length; // fake timer ID
+    },
+    clearTimeoutFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
+    frameCapacity: 100,
+    sampleRate: 44100,
+  });
+
+  // Fire one refill tick. decodeFrames() throws 'end-of-stream' → handleEndOfStream()
+  // → emitEnded() → hold-started branch → schedulePreloadHoldExpiry().
+  // SharedArrayBuffer is zero-initialized so FRAMES_AVAILABLE_INDEX=0, satisfying
+  // the handleEndOfStream guard (line ~616) that calls emitEnded only when no frames
+  // are still buffered for the worklet to drain.
+  assert.ok(intervalCallback, 'interval callback must be registered after playTrack');
+  intervalCallback();
+
+  // schedulePreloadHoldExpiry must have registered a timeout
+  assert.ok(
+    scheduledTimeouts.length > 0,
+    'schedulePreloadHoldExpiry must register a timeout via setTimeoutFn when hold window opens',
+  );
+
+  // The timeout delay must be ≤ PRELOAD_HOLD_MS (500ms)
+  const holdTimeout = scheduledTimeouts[scheduledTimeouts.length - 1];
+  assert.ok(
+    holdTimeout.delayMs >= 0 && holdTimeout.delayMs <= 500,
+    `Hold timeout delay must be in [0, 500]ms, got ${holdTimeout.delayMs}`,
+  );
+
+  // Firing the timeout must emit 'ended' (hold window expired, no next track loaded)
+  holdTimeout.callback();
+  assert.ok(
+    messages.some((m) => m.type === 'ended'),
+    'Firing the hold-expiry timer must emit { type: "ended" }',
+  );
+});
+
+// ─── Review-fix: stale preload-hold timer cleared on new session ───────────────
+
+test('resetPlaybackState (via playTrack) clears the preload-hold timer registered in the previous session', () => {
+  // Drive EOS so the hold timer is registered in session 1.  Then call
+  // playTrack() for session 2 (which calls resetPlaybackState()) and confirm
+  // that clearTimeoutFn was called with the hold-timer id captured from session 1.
+  const clearedIds = [];
+  let timerIdCounter = 0;
+  let capturedHoldTimerId = null;
+  let intervalCallback = null;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() { throw new Error('end-of-stream'); },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: () => {},
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (_callback, _delayMs) => {
+      timerIdCounter += 1;
+      capturedHoldTimerId = timerIdCounter;
+      return timerIdCounter;
+    },
+    clearTimeoutFn: (id) => { clearedIds.push(id); },
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  const buffers = {
+    pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
+    frameCapacity: 100,
+    sampleRate: 44100,
+  };
+
+  // Session 1: playTrack + one refill tick → hold timer registered
+  controller.playTrack(new Uint8Array([1]), buffers);
+  assert.ok(intervalCallback, 'interval callback must be registered after playTrack');
+  intervalCallback(); // EOS → emitEnded → hold-started → schedulePreloadHoldExpiry
+
+  assert.ok(capturedHoldTimerId !== null, 'hold timer must have been registered via setTimeoutFn');
+  const holdTimerIdSession1 = capturedHoldTimerId;
+
+  // Session 2: playTrack calls resetPlaybackState() which must clear the hold timer
+  controller.playTrack(new Uint8Array([1]), buffers);
+
+  assert.ok(
+    clearedIds.includes(holdTimerIdSession1),
+    `clearTimeoutFn must be called with the session-1 hold-timer id (${holdTimerIdSession1}); got cleared ids: [${clearedIds.join(', ')}]`,
+  );
+});
+
+test('seek() clears the preload-hold timer so a stale hold cannot fire mid-seek', () => {
+  // Drive EOS so the hold timer is registered, then call seek() and confirm
+  // clearTimeoutFn was called with the hold-timer id.
+  const clearedIds = [];
+  let timerIdCounter = 0;
+  let capturedHoldTimerId = null;
+  let intervalCallback = null;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() { throw new Error('end-of-stream'); },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: () => {},
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (_callback, _delayMs) => {
+      timerIdCounter += 1;
+      capturedHoldTimerId = timerIdCounter;
+      return timerIdCounter;
+    },
+    clearTimeoutFn: (id) => { clearedIds.push(id); },
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  const buffers = {
+    pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
+    frameCapacity: 100,
+    sampleRate: 44100,
+  };
+
+  // Session: playTrack + one refill tick → hold timer registered
+  controller.playTrack(new Uint8Array([1]), buffers);
+  assert.ok(intervalCallback, 'interval callback must be registered after playTrack');
+  intervalCallback(); // EOS → emitEnded → hold-started → schedulePreloadHoldExpiry
+
+  assert.ok(capturedHoldTimerId !== null, 'hold timer must have been registered via setTimeoutFn');
+  const holdTimerId = capturedHoldTimerId;
+
+  // seek() must clear the hold timer
+  controller.seek(0);
+
+  assert.ok(
+    clearedIds.includes(holdTimerId),
+    `clearTimeoutFn must be called with the hold-timer id (${holdTimerId}) during seek(); got cleared ids: [${clearedIds.join(', ')}]`,
+  );
+});
+
+test('refillRingBuffer uses injected setTimeoutFn for long-tick yield, not raw setTimeout', () => {
+  const yieldTimeouts = [];
+  let intervalCallback = null;
+  let performanceNowValue = 100;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() { return new Float32Array(4); },
+      durationMs() { return 10000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: () => {},
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (callback, delayMs) => {
+      yieldTimeouts.push({ callback, delayMs });
+      return yieldTimeouts.length;
+    },
+    clearTimeoutFn: () => {},
+    performanceNow: () => {
+      // Jump 100ms on every call — guaranteed to exceed REFILL_MAX_TICK_DURATION_MS
+      performanceNowValue += 100;
+      return performanceNowValue;
+    },
+    nowMs: () => 100,
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
+    frameCapacity: 100,
+    sampleRate: 44100,
+  });
+
+  assert.ok(intervalCallback, 'interval callback must be registered after playTrack');
+  intervalCallback();
+
+  assert.ok(
+    yieldTimeouts.length > 0,
+    'refillRingBuffer must schedule a yield via injected setTimeoutFn when tick duration exceeded',
+  );
+  assert.equal(yieldTimeouts[0].delayMs, 0, 'Yield timeout must use delay=0');
+});
+
+test('track-changed payload includes trackDelta field equal to 1 for a forward handoff', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let duration = 1000;
+  let position = 0;
+  let actualTransitionPending = false;
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (actualTransitionPending) {
+          position = 1005;
+          actualTransitionPending = false;
+        }
+        return new Float32Array(CHANNELS * 10);
+      },
+      durationMs() { return duration; },
+      positionMs() { return position; },
+      hasEnded() { return false; },
+      loadNext() { duration = 2200; return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer, stateBuffer, frameCapacity: 100,
+  });
+
+  sharedState[2] = 0;
+  position = 800;
+  controller.preloadNext(new Uint8Array([9]));
+  intervalCallback();
+
+  sharedState[2] = 50;
+  actualTransitionPending = true;
+  intervalCallback();
+
+  const trackChanged = messages.find((m) => m.type === 'track-changed');
+  assert.ok(trackChanged, 'Expected a track-changed message');
+  assert.equal(
+    trackChanged.trackDelta,
+    1,
+    `Expected trackDelta=1 in track-changed payload, got ${trackChanged.trackDelta}`,
+  );
+});

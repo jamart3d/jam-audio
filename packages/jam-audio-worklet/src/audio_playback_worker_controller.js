@@ -275,6 +275,7 @@ function createPlaybackWorkerController({
     handoffPendingUntilMs = 0;
     lastCompletedHandoffUnderrunDelta = 0;
     endedEmitted = false;
+    clearPreloadHoldTimer();
     preloadHoldUntilMs = 0;
     preloadHoldActive = false;
     lastChunkReceivedAt = 0;
@@ -476,8 +477,30 @@ function createPlaybackWorkerController({
     emitPlaybackStarted();
   }
 
-  function clearPreloadHoldTimer() {}
-  function schedulePreloadHoldExpiry() {}
+  let preloadHoldTimerId = null;
+
+  function clearPreloadHoldTimer() {
+    if (preloadHoldTimerId !== null) {
+      clearTimeoutFn(preloadHoldTimerId);
+      preloadHoldTimerId = null;
+    }
+  }
+
+  function schedulePreloadHoldExpiry() {
+    if (preloadHoldTimerId !== null) return; // already scheduled
+    const remainingMs = Math.max(0, preloadHoldUntilMs - nowMs());
+    preloadHoldTimerId = setTimeoutFn(() => {
+      preloadHoldTimerId = null;
+      // Mark the hold as expired before calling emitEnded so that the
+      // nowMs() < preloadHoldUntilMs guard in emitEnded always evaluates
+      // to false here.  Without this, a frozen/constant injected nowMs()
+      // (common in tests) would make emitEnded re-enter the hold-active
+      // branch and call schedulePreloadHoldExpiry again — an infinite
+      // timer chain that keeps the event loop alive forever.
+      preloadHoldUntilMs = 0;
+      emitEnded();
+    }, remainingMs);
+  }
 
   function emitEnded() {
     if (endedEmitted) {
@@ -719,6 +742,7 @@ function createPlaybackWorkerController({
       type: 'track-changed',
       transitionPositionMs: Math.floor(transitionPositionMs),
       durationMs: nextDurationMs,
+      trackDelta: 1,
     });
     emitMessage({ type: 'duration', durationMs: nextDurationMs });
     emitDiagnosticsEvent({
@@ -1069,6 +1093,7 @@ function createPlaybackWorkerController({
               type: 'track-changed',
               transitionPositionMs: Math.floor(transitionPositionMs),
               durationMs: nextDurationMs,
+              trackDelta: 1,
             });
             if (nextDurationMs > 0) {
               emitMessage({ type: 'duration', durationMs: nextDurationMs });
@@ -1135,7 +1160,7 @@ function createPlaybackWorkerController({
 
       if (performanceNow() - refillStartedAt > REFILL_MAX_TICK_DURATION_MS) {
         refillPending = true;
-        setTimeout(() => refillRingBuffer(), 0);
+        setTimeoutFn(() => refillRingBuffer(), 0);
         break;
       }
     }
@@ -1547,16 +1572,24 @@ function createPlaybackWorkerController({
         });
       } else {
         if (sharedState) {
-          Atomics.store(sharedState, READ_INDEX, 0);
-          Atomics.store(sharedState, WRITE_INDEX, 0);
+          // Zero FRAMES_AVAILABLE_INDEX first so the worklet thread sees zero
+          // frames and outputs silence before any other index moves.
+          // Residual race (accepted, pre-existing, sub-millisecond): a worklet
+          // callback that already loaded a positive FRAMES_AVAILABLE before this
+          // zero-store can still Atomics.sub the zeroed counter, briefly driving it
+          // negative; the next refill tick then over-computes writableFrames until
+          // Atomics.add corrects it. Benign, pre-existing, sub-millisecond.
           Atomics.store(sharedState, FRAMES_AVAILABLE_INDEX, 0);
           Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
+          Atomics.store(sharedState, READ_INDEX, 0);
+          Atomics.store(sharedState, WRITE_INDEX, 0);
         }
         trackStartPositionMs = 0;
         pendingGaplessHintDurationMs = 0;
         pendingHandoffHintDurationMs = 0;
         const durationMs = activePlayer.durationMs();
         setCurrentTrackEndPosition(durationMs, durationMs > 0);
+        clearPreloadHoldTimer();
         endedEmitted = false;
         emitDiagnosticsEvent({
           type: 'seek',

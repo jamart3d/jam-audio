@@ -187,7 +187,9 @@ export function createJamAudioBridge({
     gainNode.gain.cancelScheduledValues(now);
     gainNode.gain.setValueAtTime(gainNode.gain.value, now);
     gainNode.gain.linearRampToValueAtTime(targetValue, now + durationSeconds);
-    await new Promise((resolve) => setTimeout(resolve, durationSeconds * 1000));
+    // Do NOT await a wall-clock timer here. linearRampToValueAtTime is scheduled
+    // on the audio thread and is unthrottled. Awaiting setTimeout(15ms) throttles
+    // to 1s+ in hidden tabs, stalling pause/stop from MediaSession actions.
   }
 
   function forceGainToZero(reason) {
@@ -898,7 +900,8 @@ export function createJamAudioBridge({
         diagnosticsState.decodedPositionMs = 0;
         processorNode?.port.postMessage({ type: 'reset_position' });
         if (queueTrackIds && queueTrackIds.length > 0) {
-          activeTrackIndex = Math.min(activeTrackIndex + 1, queueTrackIds.length - 1);
+          const delta = typeof data.trackDelta === 'number' ? data.trackDelta : 1;
+          activeTrackIndex = Math.min(activeTrackIndex + delta, queueTrackIds.length - 1);
           activeTrackId = queueTrackIds[activeTrackIndex];
         }
         if (_nextTrackMeta !== null) {
@@ -1835,6 +1838,16 @@ export function createJamAudioBridge({
 
   async function rebindWorkletNode() {
     if (!audioContext || !gainNode) return;
+    if (!sharedPcmBuffer || !sharedStateBuffer) {
+      emitDiagnosticsEvent({
+        type: 'rebind-skipped-null-buffers',
+        label: 'Rebind skipped: null buffers after stop',
+        timestampMs: nowMs(),
+        severity: 'warn',
+        message: 'Buffers were null after stop(); callers must reinitialize via playTrack or initAudio',
+      });
+      return;
+    }
     const oldNode = processorNode;
     if (oldNode) {
       try {
