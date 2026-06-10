@@ -70,6 +70,7 @@ function createPlaybackWorkerController({
   let pendingHandoffPreviousDurationMs = 0;
   let pendingHandoffProvisionalDurationMs = 0;
   let pendingGaplessHintDurationMs = 0;
+  let loadedNextGaplessHintDurationMs = 0;
   let pendingHandoffHintDurationMs = 0;
   let preloadHoldUntilMs = 0;
   let preloadHoldActive = false;
@@ -264,6 +265,7 @@ function createPlaybackWorkerController({
     pendingHandoffPreviousDurationMs = 0;
     pendingHandoffProvisionalDurationMs = 0;
     pendingGaplessHintDurationMs = 0;
+    loadedNextGaplessHintDurationMs = 0;
     pendingHandoffHintDurationMs = 0;
     _streamingHintDurationMs = 0;
     transitionMonitorUntilMs = 0;
@@ -311,6 +313,7 @@ function createPlaybackWorkerController({
     pendingHandoffPreviousDurationMs = 0;
     pendingHandoffProvisionalDurationMs = 0;
     pendingGaplessHintDurationMs = 0;
+    loadedNextGaplessHintDurationMs = 0;
     pendingHandoffHintDurationMs = 0;
     emitMessage({ type: 'duration', durationMs: Math.floor(durationMs) });
     emitDiagnosticsEvent({
@@ -1019,7 +1022,9 @@ function createPlaybackWorkerController({
               underrunDelta,
             });
             const handoffDurationIsStale = isStaleHandoffDuration(newDuration, previousDurationMs);
-            const hintedDurationMs = pendingGaplessHintDurationMs;
+            const hintedDurationMs = loadedNextGaplessHintDurationMs > 0
+              ? loadedNextGaplessHintDurationMs
+              : pendingGaplessHintDurationMs;
             const useHint = handoffDurationIsStale && hintedDurationMs > 0 && Math.abs(hintedDurationMs - previousDurationMs) > TRACK_HANDOFF_TOLERANCE_MS;
 
             const nextDurationMs = handoffDurationIsStale ? (useHint ? hintedDurationMs : 0) : Math.floor(newDuration || 0);
@@ -1055,6 +1060,7 @@ function createPlaybackWorkerController({
                   trackStartPositionMs: Math.floor(trackStartPositionMs),
                   currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
                   currentTrackEndPositionKnown,
+                  gaplessHandoffMissingHint: true,
                 });
               }
             }
@@ -1083,6 +1089,7 @@ function createPlaybackWorkerController({
             }
 
             pendingGaplessHintDurationMs = 0;
+            loadedNextGaplessHintDurationMs = 0;
           }
         }
       }
@@ -1163,6 +1170,7 @@ function createPlaybackWorkerController({
       stopRefillLoop();
       resetPlaybackState();
       pendingGaplessHintDurationMs = 0;
+      loadedNextGaplessHintDurationMs = 0;
       pendingHandoffHintDurationMs = 0;
       diagnostics = createWorkerDiagnostics({
         workerState: 'running',
@@ -1428,12 +1436,17 @@ function createPlaybackWorkerController({
           newPlayer.loadNext(pendingGaplessBytes);
           gaplessPlayerNextLoaded = true;
         } catch { /* ignore */ }
-        if (!gaplessPlayerNextLoaded) {
+        if (gaplessPlayerNextLoaded) {
+          loadedNextGaplessHintDurationMs = pendingGaplessHintDurationMs;
           pendingGaplessHintDurationMs = 0;
+        } else {
+          pendingGaplessHintDurationMs = 0;
+          loadedNextGaplessHintDurationMs = 0;
         }
         pendingGaplessBytes = null;
       } else {
         pendingGaplessHintDurationMs = 0;
+        loadedNextGaplessHintDurationMs = 0;
       }
       pendingHandoffHintDurationMs = 0;
       streamingPlayer.free();
@@ -1471,6 +1484,7 @@ function createPlaybackWorkerController({
         result = player.loadNext(audioBytes);
       } catch (error) {
         pendingGaplessHintDurationMs = 0;
+        loadedNextGaplessHintDurationMs = 0;
         emitMessage({
           type: 'preload-error',
           message: error instanceof Error ? error.message : String(error),
@@ -1479,12 +1493,14 @@ function createPlaybackWorkerController({
       }
       if (result && result.error === 'next_failed') {
         pendingGaplessHintDurationMs = 0;
+        loadedNextGaplessHintDurationMs = 0;
         emitMessage({
           type: 'preload-error',
           message: result.message ?? 'preload failed',
         });
       } else {
         gaplessPlayerNextLoaded = true;
+        loadedNextGaplessHintDurationMs = isFinitePositive ? Math.floor(hintDurationMs) : 0;
         emitMessage({ type: 'preload-pending' });
       }
     },

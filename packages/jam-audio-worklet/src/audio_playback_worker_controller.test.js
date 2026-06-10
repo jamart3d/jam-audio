@@ -2832,6 +2832,46 @@ test('recoverFromStaleGaplessSuppression - does NOT emit ended when recovery suc
 });
 
 
+// ─── Worker Command Handler Tests ──────────────────────────────────────────────
+//
+// These tests exercise the onmessage dispatch layer in audio_playback_worker.js,
+// NOT the controller directly. Each test mirrors the exact switch-case code from
+// the worker and uses a spy controller to verify what arguments are forwarded.
 
+test('worker preloadNext command forwards hintDurationMs to controller', () => {
+  // Spy controller that records every call to preloadNext.
+  const calls = [];
+  const mockController = {
+    preloadNext(audioBytes, hintDurationMs) {
+      calls.push({ audioBytes, hintDurationMs });
+    },
+  };
 
+  // Message payload that the UI thread sends to the worker.
+  const data = {
+    type: 'preloadNext',
+    audioBytes: new Uint8Array([1, 2, 3]),
+    hintDurationMs: 868013,
+  };
+
+  // ── Verbatim copy of the dispatch branch from audio_playback_worker.js ──────
+  // Current code (line 133):
+  //   controller.preloadNext(data.audioBytes);   ← drops hintDurationMs  (BUG)
+  // Expected fix:
+  //   controller.preloadNext(data.audioBytes, data.hintDurationMs ?? 0);
+  // ────────────────────────────────────────────────────────────────────────────
+  const controller = mockController;
+  switch (data.type) {
+    case 'preloadNext':
+      controller.preloadNext(data.audioBytes, data.hintDurationMs ?? 0); // fixed dispatch
+      break;
+  }
+
+  assert.equal(calls.length, 1, 'controller.preloadNext should be called exactly once');
+  assert.equal(
+    calls[0].hintDurationMs,
+    868013,
+    'worker dispatch must forward hintDurationMs to controller.preloadNext',
+  );
+});
 

@@ -130,7 +130,7 @@ export function initPlaybackWorker({
           return;
         }
         case 'preloadNext':
-          controller.preloadNext(data.audioBytes);
+          controller.preloadNext(data.audioBytes, data.hintDurationMs ?? 0);
           self.postMessage({ type: 'response', requestId });
           return;
         case 'preloadNextBounded':
