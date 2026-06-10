@@ -433,13 +433,39 @@ function createPlaybackWorkerController({
     const hintedDurationMs = loadedNextGaplessHintDurationMs > 0
       ? loadedNextGaplessHintDurationMs
       : pendingGaplessHintDurationMs;
-    const useHint = handoffDurationIsStale && hintedDurationMs > 0 &&
+    // When the previous boundary window was very short (< 1000ms), the player was
+    // seeked close to the end of the current track — typical of streaming→gapless
+    // transitions. In this case durationMs() still reflects the OLD track's full
+    // file duration and is unreliable as the new-track duration. If a preloaded
+    // hint (pendingGaplessHintDurationMs / loadedNextGaplessHintDurationMs) is
+    // available, prefer it over the player's stale value.
+    const tinyPreviousDuration = previousDurationMs > 0 && previousDurationMs < 1000;
+    const useHint = (handoffDurationIsStale || tinyPreviousDuration) && hintedDurationMs > 0 &&
       Math.abs(hintedDurationMs - previousDurationMs) > TRACK_HANDOFF_TOLERANCE_MS;
-    const nextDurationMs = handoffDurationIsStale
-      ? (useHint ? hintedDurationMs : 0)
-      : Math.floor(newDuration || 0);
+    const nextDurationMs = useHint
+      ? hintedDurationMs
+      : handoffDurationIsStale
+        ? 0
+        : Math.floor(newDuration || 0);
+    if (tinyPreviousDuration) {
+      emitDiagnosticsEvent({
+        type: 'handoff-tiny-previous-duration',
+        label: 'Gapless handoff fired on tiny boundary window',
+        timestampMs: handoffStartedAtMs,
+        severity: 'warning',
+        previousDurationMs: Math.floor(previousDurationMs),
+        playerDurationMs: Math.floor(newDuration),
+        hintDurationMs: Math.floor(hintedDurationMs),
+        chosen: Math.floor(useHint ? hintedDurationMs : (newDuration || 0)),
+        positionMs: Math.floor(positionMs),
+      });
+    }
     if (handoffDurationIsStale) {
       if (useHint) {
+        // Hint is authoritative. Set up a pending probe so that if the player
+        // eventually returns the confirmed next-track duration we can validate;
+        // the stale check in probePendingHandoffDuration will suppress overwrites
+        // while durationMs() still returns the old-track value.
         pendingHandoffDurationBaseMs = positionMs;
         pendingHandoffPreviousDurationMs = previousDurationMs;
         pendingHandoffProvisionalDurationMs = newDuration;
@@ -472,6 +498,49 @@ function createPlaybackWorkerController({
           gaplessHandoffMissingHint: true,
         });
       }
+    } else if (tinyPreviousDuration && useHint) {
+      // Tiny-window fire: the hint is authoritative and no pending probe is
+      // needed — the player's durationMs() is still the old track's value and
+      // would cause probePendingHandoffDuration to overwrite the correct boundary
+      // if we opened a probe here. Just record the diagnostic.
+      emitDiagnosticsEvent({
+        type: 'gapless-duration-hint-used',
+        label: 'Gapless handoff duration hint used (tiny window)',
+        timestampMs: handoffStartedAtMs,
+        severity: 'info',
+        hintDurationMs: hintedDurationMs,
+        staleDurationMs: newDuration,
+        previousDurationMs: previousDurationMs,
+        nextBoundaryMs: positionMs + hintedDurationMs,
+      });
+    } else if (tinyPreviousDuration) {
+      // Tiny-window fire with no hint: the player's durationMs() still reflects the
+      // OLD track's full file duration (newDuration). We accepted it as nextDurationMs
+      // and armed the boundary with it above, but it will be wrong once the player
+      // advances to the new track. Open a probe so probePendingHandoffDuration can
+      // correct the boundary when durationMs() changes.
+      //
+      // pendingHandoffPreviousDurationMs is set to newDuration (the current stale value)
+      // so the stale guard in probePendingHandoffDuration suppresses re-correction while
+      // the player still reports the old file duration, and fires as soon as the player
+      // returns the new track's real duration.
+      pendingHandoffDurationBaseMs = positionMs;
+      pendingHandoffPreviousDurationMs = newDuration;
+      pendingHandoffProvisionalDurationMs = newDuration;
+      emitDiagnosticsEvent({
+        type: 'gapless-duration-provisional',
+        label: 'Gapless handoff duration is provisional (tiny window, no hint)',
+        timestampMs: handoffStartedAtMs,
+        severity: 'warning',
+        transitionPositionMs: Math.floor(positionMs),
+        staleDurationMs: Math.floor(newDuration),
+        previousDurationMs: Math.floor(previousDurationMs),
+        trackStartPositionMs: Math.floor(trackStartPositionMs),
+        currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
+        currentTrackEndPositionKnown,
+        gaplessHandoffMissingHint: true,
+        tinyWindowNoHint: true,
+      });
     }
     emitMessage({
       type: 'track-changed',

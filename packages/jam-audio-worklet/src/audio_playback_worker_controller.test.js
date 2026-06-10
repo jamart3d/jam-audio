@@ -3300,6 +3300,135 @@ test('gapless boundary check fires even when ring buffer is full (writableFrames
   );
 });
 
+// Fix 1: log70 regression — streaming→gapless transition where the gapless player's
+// durationMs() returns the OLD track's file duration (Bertha: 374260ms) because the
+// next track (Me and My Uncle: 195107ms) was preloaded via preloadNext BEFORE the
+// transitionStreamToGapless command arrived. After the spurious 49ms boundary fire,
+// the next track-changed must be emitted at trackStart+195107, not trackStart+374260.
+test('transitionStreamToGapless: tiny-window spurious handoff does not poison next boundary when preload hint is loaded', () => {
+  const messages = [];
+  let intervalCallback = null;
+
+  // log70 positions
+  const BERTHA_DURATION = 374260;     // full file duration of current track
+  const BERTHA_SEEK_POS = 374211;     // where streaming ended
+  const MAMU_DURATION = 195107;       // Me and My Uncle (next track, hint from preloadNext)
+  // After the 49ms spurious fire, the correct SECOND boundary must be at:
+  const CORRECT_SECOND_BOUNDARY = BERTHA_DURATION + MAMU_DURATION; // 569367
+
+  // The gapless player always returns BERTHA_DURATION from durationMs() — this models
+  // the bug scenario where the Wasm player hasn't promoted to the next track yet.
+  let playerPositionMs = BERTHA_SEEK_POS;
+
+  const pcmBuffer = new SharedArrayBuffer(264600 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(8 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames(n) {
+        return new Float32Array(CHANNELS * (n || 8));
+      },
+      durationMs() {
+        // Always returns the old track's full file duration — never updates.
+        // This is the exact condition from log70 that causes the wrong boundary.
+        return BERTHA_DURATION;
+      },
+      positionMs() {
+        return playerPositionMs;
+      },
+      hasEnded() {
+        return false;
+      },
+      loadNext() {
+        // Called when preloadNext bytes are loaded; does NOT change durationMs().
+        return null;
+      },
+      seekToMs(ms) {
+        playerPositionMs = ms;
+      },
+      free() {},
+    }),
+    createStreamingPlayer: () => ({
+      appendChunk() { return true; },
+      durationMs() { return 120; },
+      positionMs() { return BERTHA_SEEK_POS; },
+      isReady() { return true; },
+      isFinalized() { return false; },
+      finalize() {},
+      free() {},
+      decodeFrames() { return new Float32Array(CHANNELS * 8); },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  // Start streaming (current track: Bertha)
+  controller.playTrackStreaming({
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 264600,
+  });
+
+  // Preload next track (Me and My Uncle) before the streaming→gapless transition
+  controller.preloadNext(new Uint8Array([9, 10, 11]), MAMU_DURATION);
+
+  // Now the download completes: transition streaming→gapless.
+  // Dart passes the CURRENT track's duration as hintDurationMs (verified from
+  // playback_orchestrator.dart: `hintDurationMs = track.durationMs ?? activeDurationMs`)
+  controller.transitionStreamToGapless(new Uint8Array([1, 2, 3]), BERTHA_DURATION);
+
+  // Tick 1: position is at BERTHA_SEEK_POS (374211).
+  // The boundary is at 374260, tolerance is 50ms, so 374211 >= 374210 — the
+  // boundary fires immediately on this first tick. This IS the spurious fire:
+  // Bertha has only 49ms of audio left and the Wasm player reports its full
+  // file duration (374260) rather than a new duration for Me and My Uncle.
+  sharedState[2] = 263576; // buffer well-filled
+  playerPositionMs = BERTHA_SEEK_POS; // 374211
+  intervalCallback();
+
+  // First track-changed MUST fire on tick 1 (at position 374211, within 50ms tolerance of 374260)
+  const firstHandoffs = messages.filter((m) => m.type === 'track-changed');
+  assert.equal(firstHandoffs.length, 1, 'First (spurious tiny-window) handoff must fire at Bertha boundary');
+  assert.equal(firstHandoffs[0].transitionPositionMs, BERTHA_SEEK_POS,
+    'First handoff position should be at seek position');
+
+  // Advance to just before the CORRECT second boundary (trackStart=374211 + MAMU_DURATION=195107
+  // = 569318). The position threshold is 569318 - 50 (tolerance) = 569268.
+  // We advance to just inside that (569263) — no second handoff should fire yet.
+  const CORRECT_BOUNDARY_THRESHOLD = BERTHA_SEEK_POS + MAMU_DURATION - TRACK_HANDOFF_TOLERANCE_MS;
+  sharedState[2] = 263576;
+  playerPositionMs = CORRECT_BOUNDARY_THRESHOLD - 5;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    1,
+    'No second handoff before the correct MAMU boundary',
+  );
+
+  // Now advance to just past the correct boundary threshold — second handoff must fire here.
+  // (Pre-fix regression: without the fix, the second boundary was at trackStart+BERTHA_DURATION
+  // = 748471, and no second handoff would fire here at 569273.)
+  sharedState[2] = 263576;
+  playerPositionMs = CORRECT_BOUNDARY_THRESHOLD + 5;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    2,
+    'Second handoff must fire at the correct boundary (trackStart + MAMU_DURATION), not at the stale BERTHA_DURATION offset',
+  );
+});
+
 test('track-changed payload includes trackDelta field equal to 1 for a forward handoff', () => {
   const messages = [];
   let intervalCallback = null;
@@ -3355,5 +3484,168 @@ test('track-changed payload includes trackDelta field equal to 1 for a forward h
     trackChanged.trackDelta,
     1,
     `Expected trackDelta=1 in track-changed payload, got ${trackChanged.trackDelta}`,
+  );
+});
+
+// Fix 1 / Fix 3: tiny-window handoff with hint ABSENT — probe must open and correct boundary.
+//
+// Scenario (mirrors log70 numbers, no-preload variant):
+//   - Track A (Bertha) is delivered via streaming→gapless (transitionStreamToGapless)
+//     with hintDurationMs=BERTHA_FULL_DURATION_MS (the current track's full duration).
+//   - streamingPlayer.positionMs() = BERTHA_SEEK_POS = 374211 at transition time.
+//   - transitionStreamToGapless sets: trackStartPositionMs=374211, currentTrackEndPositionMs=374260.
+//   - currentBoundaryDurationMs() = 374260 - 374211 = 49ms → tinyPreviousDuration=true.
+//   - The gapless player's durationMs() returns BERTHA_FULL_DURATION_MS=374260 throughout
+//     (Wasm player reports old track's headers until it actually starts decoding new data).
+//   - At handoff tick: previousDurationMs=49, newDuration=374260
+//     → isStaleHandoffDuration(374260, 49) = |374260-49| >> 50 → false (handoffDurationIsStale=false)
+//     → tinyPreviousDuration=true, handoffDurationIsStale=false, useHint=false (NO preloadNext)
+//     → NEW BRANCH: probe opens with pendingHandoffPreviousDurationMs=BERTHA_FULL_DURATION_MS
+//
+// Pre-fix: no branch opens the probe for tinyPreviousDuration&&!stale&&!hint.
+//   nextDurationMs = BERTHA_FULL_DURATION_MS → boundary = positionMs + 374260 (wrong).
+//   Corrected duration message never arrives.
+//   Second track-changed fires at the wrong boundary.
+// Post-fix: probe is opened; when player.durationMs() advances to MAMU_REAL_DURATION_MS
+//   the probe fires → corrected duration emitted AND boundary corrected to
+//   positionMs + MAMU_REAL_DURATION_MS.
+test('tiny-window handoff with no hint opens probe and corrects boundary when player durationMs advances', () => {
+  const messages = [];
+  let intervalCallback = null;
+  // Bertha full file duration — what the gapless player reports at handoff time
+  const BERTHA_FULL_DURATION_MS = 374260;
+  // Streaming position at the time of the streaming→gapless transition
+  const BERTHA_SEEK_POS = 374211;
+  // Me and My Uncle — the next track's real duration (not yet known at handoff)
+  const MAMU_REAL_DURATION_MS = 195107;
+  // After transitionStreamToGapless:
+  //   trackStartPositionMs = BERTHA_SEEK_POS = 374211
+  //   currentTrackEndPositionMs = BERTHA_FULL_DURATION_MS = 374260
+  //   currentBoundaryDurationMs() = 374260 - 374211 = 49ms → TINY
+  //
+  // The boundary crossing check is positionMs >= 374260 - 50 = 374210.
+  // Set TRANSITION_POS_MS = 374211 (same as BERTHA_SEEK_POS — already in the window).
+  const TRANSITION_POS_MS = BERTHA_SEEK_POS;
+
+  // The gapless player always returns BERTHA_FULL_DURATION_MS — never updates.
+  let playerDurationMs = BERTHA_FULL_DURATION_MS;
+  let playerPositionMs = BERTHA_SEEK_POS;
+
+  const pcmBuffer = new SharedArrayBuffer(300 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(8 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames(n) { return new Float32Array(CHANNELS * (n || 8)); },
+      durationMs() { return playerDurationMs; },
+      positionMs() { return playerPositionMs; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs(ms) { playerPositionMs = ms; },
+      free() {},
+    }),
+    createStreamingPlayer: () => ({
+      appendChunk() { return true; },
+      durationMs() { return 120; },
+      positionMs() { return BERTHA_SEEK_POS; },
+      isReady() { return true; },
+      isFinalized() { return false; },
+      finalize() {},
+      free() {},
+      decodeFrames() { return new Float32Array(CHANNELS * 8); },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  // Start streaming (Bertha — streaming player holds position at BERTHA_SEEK_POS).
+  controller.playTrackStreaming({
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 300,
+  });
+
+  // Transition streaming→gapless with hintDurationMs=BERTHA_FULL_DURATION_MS and NO preloadNext.
+  // This mirrors the real-world Dart call where hintDurationMs = currentTrackDurationMs.
+  // transitionStreamToGapless sets:
+  //   trackStartPositionMs = BERTHA_SEEK_POS = 374211
+  //   currentTrackEndPositionMs = BERTHA_FULL_DURATION_MS = 374260
+  //   currentBoundaryDurationMs() = 374260 - 374211 = 49ms → tinyPreviousDuration=true
+  controller.transitionStreamToGapless(new Uint8Array([1, 2, 3]), BERTHA_FULL_DURATION_MS);
+
+  // Tick 1: position = TRANSITION_POS_MS = 374211 >= 374260 - 50 = 374210 → boundary crossed.
+  //   previousDurationMs = currentBoundaryDurationMs() = 49 (tiny)
+  //   newDuration = player.durationMs() = BERTHA_FULL_DURATION_MS = 374260
+  //   isStaleHandoffDuration(374260, 49) = |374260-49|=374211 >> 50 → false
+  //   tinyPreviousDuration=true, handoffDurationIsStale=false, useHint=false
+  //   → NEW BRANCH fires: probe opened with pendingHandoffPreviousDurationMs=374260
+  //   nextDurationMs = Math.floor(newDuration) = 374260 (no hint to override it)
+  //   currentTrackEndPositionMs set to TRANSITION_POS_MS + 374260 = 748471 (stale)
+  sharedState[2] = 200;
+  intervalCallback();
+
+  // track-changed must have fired.
+  const handoff = messages.find((m) => m.type === 'track-changed');
+  assert.ok(handoff, 'track-changed must fire when position crosses the tiny 49ms boundary');
+  assert.equal(handoff.transitionPositionMs, TRANSITION_POS_MS,
+    'transitionPositionMs must equal BERTHA_SEEK_POS where the tiny-window handoff fired');
+
+  // Pre-fix: probe never opened → no correction → boundary stays at 748471.
+  // Post-fix: probe open → correction fires when player advances to MAMU_REAL_DURATION_MS.
+
+  // Tick 2: player advances to the real new-track duration.
+  playerDurationMs = MAMU_REAL_DURATION_MS;
+  playerPositionMs = TRANSITION_POS_MS + 1000; // well past the transition, no second handoff yet
+
+  sharedState[2] = 200;
+  intervalCallback(); // probePendingHandoffDuration fires this tick
+
+  // Post-fix: corrected duration message must be emitted.
+  // isStaleHandoffDuration(195107, 374260) = |195107-374260|=179153 >> 50 → false → fires.
+  const correctedDurationMsg = messages.find(
+    (m) => m.type === 'duration' && m.durationMs === MAMU_REAL_DURATION_MS,
+  );
+  assert.ok(
+    correctedDurationMsg !== undefined,
+    `corrected duration message (durationMs=${MAMU_REAL_DURATION_MS}) must be emitted after probe fires; ` +
+    `pre-fix: probe never opened (tinyPreviousDuration&&!stale&&!hint branch absent) so no correction arrives`,
+  );
+
+  // Post-fix: boundary is now TRANSITION_POS_MS + MAMU_REAL_DURATION_MS.
+  // Arm a third track via preloadNext so fill check passes for the 2nd handoff.
+  controller.preloadNext(new Uint8Array([3]));
+  playerDurationMs = MAMU_REAL_DURATION_MS;
+
+  const CORRECT_BOUNDARY = TRANSITION_POS_MS + MAMU_REAL_DURATION_MS;
+
+  // Position just below the correct boundary — second handoff must NOT fire yet.
+  playerPositionMs = CORRECT_BOUNDARY - TRACK_HANDOFF_TOLERANCE_MS - 5;
+  sharedState[2] = 200;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    1,
+    `must NOT fire second handoff before the correct MaMU boundary (${CORRECT_BOUNDARY}ms)`,
+  );
+
+  // Position at the correct boundary — second handoff must fire here.
+  playerPositionMs = CORRECT_BOUNDARY - TRACK_HANDOFF_TOLERANCE_MS + 5;
+  sharedState[2] = 200;
+  intervalCallback();
+
+  assert.equal(
+    messages.filter((m) => m.type === 'track-changed').length,
+    2,
+    `second handoff must fire at the corrected MaMU boundary (${CORRECT_BOUNDARY}ms); ` +
+    `pre-fix: probe never opened so boundary stayed at TRANSITION_POS_MS + BERTHA_FULL_DURATION_MS (wrong)`,
   );
 });
