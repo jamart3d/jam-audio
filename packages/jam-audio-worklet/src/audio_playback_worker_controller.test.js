@@ -4617,10 +4617,12 @@ test('P1.10: seam detection fires handoff at actual seam position, not metadata 
   controller.stop(); // teardown — Finding 5
 });
 
-test('P1.10: well-formed file (seam at metadata boundary) behaves identically to today — no seam-boundary-handoff emitted', async () => {
-  // When seam fires at or near the metadata boundary, the existing boundary check
-  // fires naturally (positionMs >= currentTrackEndPositionMs - tolerance).
-  // seam-boundary-handoff should NOT be emitted in this case.
+test('P1.10: well-formed file (seam at metadata boundary) fires handoff and emits seam-boundary-handoff with near-zero drift', async () => {
+  // When seam fires at or near the metadata boundary, the seam is still authoritative
+  // (P1.10 spec: decoded frames are the boundary authority; container duration is a hint).
+  // seam-boundary-handoff IS emitted for any consumed seam — the diagnostic captures the
+  // actual delta, including sub-500ms and negative (seam-after-boundary) drifts.
+  // This removes the previous DRIFT_TOLERANCE_MS=500 silent-override gap.
   const messages = [];
   let playerInstance = null;
   const durationMs = 30000;
@@ -4657,19 +4659,28 @@ test('P1.10: well-formed file (seam at metadata boundary) behaves identically to
 
   // Advance position past boundary (normal arithmetic would fire the handoff)
   playerInstance._setPosition(durationMs + 100); // past metadata boundary
-  // Seam fires near the boundary — within TRACK_HANDOFF_TOLERANCE_MS
+  // Seam fires near the boundary (100ms after) — within TRACK_HANDOFF_TOLERANCE_MS
   playerInstance._fireSeam();
 
   Atomics.add(sharedState, 7, 1);
   Atomics.notify(sharedState, 7, 1);
   await new Promise((r) => setTimeout(r, 50));
 
+  // track-changed must have fired (handoff happened)
+  const trackChanged = messages.find((m) => m.type === 'track-changed');
+  assert.ok(trackChanged !== undefined,
+    'track-changed must be emitted for well-formed files too');
+
+  // seam-boundary-handoff IS now emitted for every consumed seam (P1.10 always-authoritative)
   const seamDiag = messages
     .filter((m) => m.type === 'diagnostics-event')
     .map((m) => m.event)
-    .filter((e) => e.type === 'seam-boundary-handoff');
-  assert.equal(seamDiag.length, 0,
-    'seam-boundary-handoff must NOT be emitted when seam is at the expected boundary');
+    .find((e) => e.type === 'seam-boundary-handoff');
+  assert.ok(seamDiag !== undefined,
+    'seam-boundary-handoff must be emitted for any consumed seam (always-authoritative spec)');
+  // seam fired at durationMs+100 = 30100, metadata boundary was 30000 → headerDriftMs = -100
+  assert.ok(typeof seamDiag.headerDriftMs === 'number',
+    'headerDriftMs must be a number');
 
   controller.stop(); // teardown — Finding 5
 });
@@ -4727,9 +4738,233 @@ test('P1.10: missing seam API (old Wasm) falls back to metadata-boundary arithme
   controller.stop(); // teardown — Finding 5
 });
 
+test('P1.10: double-fire guard — seam after EOS-handled boundary does not emit second track-changed and generation is consumed', async () => {
+  // Regression: when the EOS path fires track-changed first (currentTrackEndPositionHandled=true),
+  // a seam that arrives on a later refill tick must NOT emit a second track-changed.
+  // The generation must still be consumed so it cannot re-trigger after the next track's reset.
+  const messages = [];
+  let shouldEnd = false;
 
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
 
+  let playerInstance = null;
 
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => {
+      playerInstance = makeMockPlayerWithSeam({ durationMs: 300000 });
+      // Wrap decodeFrames so it can simulate EOS
+      const original = playerInstance.decodeFrames.bind(playerInstance);
+      playerInstance.decodeFrames = () => {
+        if (shouldEnd) return null;
+        return original();
+      };
+      playerInstance.hasEnded = () => shouldEnd;
+      return playerInstance;
+    },
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: (cb, ms) => { setTimeout(cb, ms); return 1; },
+    clearTimeoutFn: (id) => clearTimeout(id),
+    waitTimeoutMs: 10, // Finding 5
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+
+  controller.preloadNext(new Uint8Array([9]), 200000);
+
+  // Simulate EOS — triggers eos-boundary-handoff path (sets currentTrackEndPositionHandled = true)
+  shouldEnd = true;
+  Atomics.store(sharedState, 2, 0);  // FRAMES_AVAILABLE = 0
+  Atomics.store(sharedState, 3, 1);  // END_OF_STREAM_INDEX = 1
+
+  // Let EOS path run
+  await new Promise((r) => setTimeout(r, 200));
+
+  // Verify EOS path fired exactly one track-changed
+  const trackChangedAfterEos = messages.filter((m) => m.type === 'track-changed').length;
+  assert.equal(trackChangedAfterEos, 1,
+    'EOS path must emit exactly one track-changed before seam arrives');
+
+  // Now fire a seam at the same boundary position (arrives on a later tick, after EOS handled)
+  playerInstance._setPosition(200000);
+  playerInstance._fireSeam();
+
+  // Wake the refill loop to process the seam tick
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
+  await new Promise((r) => setTimeout(r, 100));
+
+  // Assert: still exactly one track-changed — double-fire suppressed
+  const trackChangedTotal = messages.filter((m) => m.type === 'track-changed').length;
+  assert.equal(trackChangedTotal, 1,
+    'Double-fire guard must suppress second track-changed when EOS already handled boundary');
+
+  // Assert: no seam-boundary-handoff diagnostic (double-fire guard returns before emitting it)
+  const seamBoundaryDiags = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .filter((e) => e.type === 'seam-boundary-handoff');
+  assert.equal(seamBoundaryDiags.length, 0,
+    'seam-boundary-handoff must NOT be emitted when double-fire guard fires');
+
+  controller.stop(); // teardown — Finding 5
+});
+
+test('P1.10: double-fire guard — after track reset, a fresh seam on the new track is still detected normally', async () => {
+  // After a track reset (new playTrack call), lastSeamGeneration is reset to 0.
+  // A fresh seam on the new track (gen=1) must still be detected and fire track-changed.
+  const messages = [];
+  let currentPlayer = null;
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => {
+      currentPlayer = makeMockPlayerWithSeam({ durationMs: 60000 });
+      return currentPlayer;
+    },
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+    waitTimeoutMs: 10, // Finding 5
+  });
+
+  // First track
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+  controller.preloadNext(new Uint8Array([9]), 120000);
+
+  // Reset via new playTrack (simulates track reset clearing lastSeamGeneration)
+  controller.playTrack(new Uint8Array([2]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+  controller.preloadNext(new Uint8Array([10]), 90000);
+
+  // Fire seam on the new track (gen starts at 0, _fireSeam() bumps to 1)
+  currentPlayer._setPosition(55000);
+  currentPlayer._fireSeam();
+
+  // Wake refill loop
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
+  await new Promise((r) => setTimeout(r, 100));
+
+  // track-changed must fire for the new track's seam
+  const trackChanged = messages.filter((m) => m.type === 'track-changed');
+  assert.ok(trackChanged.length >= 1,
+    'Fresh seam on new track after reset must still trigger track-changed');
+
+  controller.stop(); // teardown — Finding 5
+});
+
+test('P1.8: recoverFromStaleGaplessSuppression performs handoff before clearing gaplessPlayerNextLoaded, and no streaming restart', async () => {
+  // P1.8 recovery path: decodeFrames() throws 'end-of-stream' while framesAvailable=0 and
+  // hasEnded()=false, so handleEndOfStream fires → runGaplessBoundaryHandoff returns 'retry'
+  // (fill=0% < 25% threshold, player says not ended). scheduleGaplessFallback arms 750ms timer.
+  // We then raise framesAvailable above 25% so recovery handoff succeeds:
+  //   recoverFromStaleGaplessSuppression → runGaplessBoundaryHandoff → 'fired' → track-changed.
+  // No 'ended' emitted before track-changed (recovery handled the transition, not streaming reinit).
+  const messages = [];
+  let throwEos = false;
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (throwEos) throw new Error('end-of-stream');
+        return new Float32Array(4);
+      },
+      durationMs() { return 300000; },
+      positionMs() { return 200000; },
+      // hasEnded() always false — ensures the fill-level check in runGaplessBoundaryHandoff
+      // applies, returning 'retry' when framesAvailable=0 (0% < 25%).
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: (cb, ms) => { setTimeout(cb, ms); return 1; },
+    clearTimeoutFn: (id) => clearTimeout(id),
+    waitTimeoutMs: 10, // Finding 5
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+
+  // Load gapless next so the recovery path attempts handoff (not streaming restart)
+  controller.preloadNext(new Uint8Array([9]), 200000);
+
+  // Arm the EOS condition: framesAvailable=0 → 0% fill, throw end-of-stream on next decode
+  Atomics.store(sharedState, 2, 0); // FRAMES_AVAILABLE = 0
+  throwEos = true;
+  // Wake the refill loop so decodeFrames() throws and handleEndOfStream fires
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
+
+  // Wait briefly for EOS path to arm the fallback timer (but not 750ms yet)
+  await new Promise((r) => setTimeout(r, 150));
+
+  // Raise fill above 25% so recoverFromStaleGaplessSuppression handoff succeeds
+  // (frameCapacity=1000, ≥250 frames needed to pass HANDOFF_FILL_THRESHOLD_PERCENT=25%)
+  throwEos = false;
+  Atomics.store(sharedState, 2, 300); // 30% fill — above threshold
+
+  // Wait past GAPLESS_ENDED_FALLBACK_MS (750ms) for recoverFromStaleGaplessSuppression to fire
+  await new Promise((r) => setTimeout(r, 900));
+
+  // track-changed must have been emitted (handoff performed before gaplessPlayerNextLoaded cleared)
+  const trackChanged = messages.filter((m) => m.type === 'track-changed');
+  assert.ok(trackChanged.length >= 1,
+    'recoverFromStaleGaplessSuppression must perform handoff (track-changed) before clearing gaplessPlayerNextLoaded');
+
+  // 'ended' must NOT have been emitted before track-changed
+  const endedIdx = messages.findIndex((m) => m.type === 'ended');
+  const trackChangedIdx = messages.findIndex((m) => m.type === 'track-changed');
+  assert.ok(endedIdx === -1 || endedIdx > trackChangedIdx,
+    'ended must NOT be emitted before track-changed — recovery must handoff first');
+
+  controller.stop(); // teardown — Finding 5
+});
 
 
 

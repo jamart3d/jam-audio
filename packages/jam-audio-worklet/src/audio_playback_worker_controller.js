@@ -349,27 +349,32 @@ function createPlaybackWorkerController({
     }
     if (gen <= lastSeamGeneration) return false;
 
-    // New seam detected.
+    // P1.10: Double-fire guard. If the EOS path already handled this boundary,
+    // consume the generation (so it won't re-trigger on the next tick before reset)
+    // but return false to suppress the second track-changed emission.
+    if (currentTrackEndPositionHandled) {
+      lastSeamGeneration = gen;
+      return false;
+    }
+
+    // New seam detected. Seam position is always authoritative — decoded frames
+    // are the boundary authority; container duration is a hint. Update the end
+    // position and emit the full diagnostic trail unconditionally so sub-500ms
+    // drifts are recorded and signedGapMs is always accurate.
     lastSeamGeneration = gen;
     const seamPositionMs = activePlayer.lastSeamPositionMs();
     const prevEndPositionMs = currentTrackEndPositionMs;
 
-    // Only override if the seam is meaningfully earlier than the metadata boundary.
-    // If they are within TRACK_HANDOFF_TOLERANCE_MS, the existing arithmetic already
-    // handles it — no need for seam-boundary-handoff diagnostic.
-    const DRIFT_TOLERANCE_MS = 500;
-    if (prevEndPositionMs - seamPositionMs > DRIFT_TOLERANCE_MS) {
-      currentTrackEndPositionMs = seamPositionMs;
-      emitDiagnosticsEvent({
-        type: 'seam-boundary-handoff',
-        label: 'Seam signal superseded metadata boundary',
-        timestampMs: nowMs(),
-        severity: 'info',
-        seamPositionMs,
-        metadataBoundaryMs: prevEndPositionMs,
-        headerDriftMs: prevEndPositionMs - seamPositionMs,
-      });
-    }
+    currentTrackEndPositionMs = seamPositionMs;
+    emitDiagnosticsEvent({
+      type: 'seam-boundary-handoff',
+      label: 'Seam signal superseded metadata boundary',
+      timestampMs: nowMs(),
+      severity: 'info',
+      seamPositionMs,
+      metadataBoundaryMs: prevEndPositionMs,
+      headerDriftMs: prevEndPositionMs - seamPositionMs,
+    });
     return true;
   }
 
