@@ -101,6 +101,16 @@ fn coarse_energy_prediction_step(
     (predicted, next_prev)
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct CoarseEnergyBandTrace {
+    pub band: usize,
+    pub channel: usize,
+    pub qi: i32,
+    pub predicted_old_e: f32,
+    pub next_prev: f32,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn quant_coarse_energy_impl(
     m: &CeltMode,
@@ -520,6 +530,162 @@ pub fn unquant_energy_finalise(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub fn trace_quant_coarse_energy_for_test(
+    m: &CeltMode,
+    start: usize,
+    end: usize,
+    e_bands: &[f32],
+    initial_old_e_bands: &[f32],
+    budget: u32,
+    tell_start: i32,
+    channels: usize,
+    lm: usize,
+    intra: bool,
+    max_decay: f32,
+    lfe: bool,
+) -> (Vec<CoarseEnergyBandTrace>, Vec<u8>) {
+    let prob_model = &E_PROB_MODEL[lm][if intra { 1 } else { 0 }];
+    let coef = if intra { 0.0 } else { PRED_COEF[lm] };
+    let beta = if intra { BETA_INTRA } else { BETA_COEF[lm] };
+    let mut old_e_bands = initial_old_e_bands.to_vec();
+    let mut error = vec![0.0f32; old_e_bands.len()];
+    let mut prev = [0.0f32; 2];
+    let mut enc = RangeCoder::new_encoder(160);
+    let mut trace = Vec::new();
+
+    if tell_start + 3 <= budget as i32 {
+        enc.encode_bit_logp(intra, 3);
+    }
+
+    for i in start..end {
+        for c in 0..channels {
+            let x = e_bands[c * m.nb_ebands + i];
+            let old_e = old_e_bands[c * m.nb_ebands + i];
+            let clamped_old_e = old_e.max(-9.0);
+            let f = x - coef * clamped_old_e - prev[c];
+            let mut qi = (f + 0.5).floor() as i32;
+
+            let decay_bound = old_e.max(-28.0) - max_decay;
+            if qi < 0 && x < decay_bound {
+                qi += ((decay_bound - x) as i32).max(0);
+                if qi > 0 {
+                    qi = 0;
+                }
+            }
+
+            let tell = enc.tell();
+            let bits_left = budget as i32 - tell - 3 * channels as i32 * (end - i) as i32;
+            if i != start && bits_left < 30 {
+                if bits_left < 24 {
+                    qi = qi.min(1);
+                }
+                if bits_left < 16 {
+                    qi = qi.max(-1);
+                }
+            }
+            if lfe && i >= 2 {
+                qi = qi.min(0);
+            }
+
+            if tell + 15 <= budget as i32 {
+                let prob_idx = 2 * i.min(20);
+                let fs = (prob_model[prob_idx] as u32) << 7;
+                let decay = (prob_model[prob_idx + 1] as i32) << 6;
+                enc.laplace_encode(&mut qi, fs, decay);
+            } else if tell + 2 <= budget as i32 {
+                qi = qi.clamp(-1, 1);
+                enc.encode_icdf(
+                    (2 * qi) ^ (if qi < 0 { -1 } else { 0 }),
+                    &SMALL_ENERGY_ICDF,
+                    2,
+                );
+            } else if tell < budget as i32 {
+                qi = qi.min(0);
+                enc.encode_bit_logp(qi != 0, 1);
+            } else {
+                qi = -1;
+            }
+
+            let q = qi as f32;
+            error[c * m.nb_ebands + i] = f - q;
+            let (predicted_old_e, next_prev) =
+                coarse_energy_prediction_step(old_e, prev[c], coef, beta, qi);
+            old_e_bands[c * m.nb_ebands + i] = predicted_old_e;
+            prev[c] = next_prev;
+            trace.push(CoarseEnergyBandTrace {
+                band: i,
+                channel: c,
+                qi,
+                predicted_old_e,
+                next_prev,
+            });
+        }
+    }
+
+    enc.done();
+    (trace, enc.buf.clone())
+}
+
+#[cfg(test)]
+pub fn trace_unquant_coarse_energy_for_test(
+    m: &CeltMode,
+    start: usize,
+    end: usize,
+    initial_old_e_bands: &[f32],
+    packet: &[u8],
+    channels: usize,
+    lm: usize,
+    intra: bool,
+) -> Vec<CoarseEnergyBandTrace> {
+    let prob_model = &E_PROB_MODEL[lm][if intra { 1 } else { 0 }];
+    let coef = if intra { 0.0 } else { PRED_COEF[lm] };
+    let beta = if intra { BETA_INTRA } else { BETA_COEF[lm] };
+    let mut old_e_bands = initial_old_e_bands.to_vec();
+    let mut prev = [0.0f32; 2];
+    let mut dec = RangeCoder::new_decoder(packet);
+    let budget = (dec.storage * 8) as i32;
+    let mut trace = Vec::new();
+
+    let _decoded_intra = dec.decode_bit_logp(3);
+
+    for i in start..end {
+        for c in 0..channels {
+            let qi;
+            let tell = dec.tell();
+            if budget - tell >= 15 {
+                let prob_idx = 2 * i.min(20);
+                let fs = (prob_model[prob_idx] as u32) << 7;
+                let decay = (prob_model[prob_idx + 1] as i32) << 6;
+                qi = dec.laplace_decode(fs, decay);
+            } else if budget - tell >= 2 {
+                let s = dec.decode_icdf(&SMALL_ENERGY_ICDF, 2);
+                qi = (s >> 1) ^ -(s & 1);
+            } else if budget - tell >= 1 {
+                qi = if dec.decode_bit_logp(1) { -1 } else { 0 };
+            } else {
+                qi = -1;
+            }
+
+            let old_e = old_e_bands[c * m.nb_ebands + i];
+            let (predicted_old_e, next_prev) =
+                coarse_energy_prediction_step(old_e, prev[c], coef, beta, qi);
+            old_e_bands[c * m.nb_ebands + i] = predicted_old_e;
+            prev[c] = next_prev;
+            trace.push(CoarseEnergyBandTrace {
+                band: i,
+                channel: c,
+                qi,
+                predicted_old_e,
+                next_prev,
+            });
+        }
+    }
+
+    trace
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::range_coder::RangeCoder;
@@ -636,6 +802,73 @@ mod tests {
                 );
             }
             assert!((decoded_old_e_bands[i] - old_e_bands[i]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_coarse_energy_trace_matches_decoder_band_by_band() {
+        let mode = crate::modes::default_mode();
+        let channels = 1;
+        let lm = 3;
+        let start = 0;
+        let end = mode.nb_ebands;
+
+        let mut e_bands = vec![0.0f32; mode.nb_ebands];
+        for (i, v) in e_bands.iter_mut().enumerate() {
+            *v = 5.0 + (i as f32 * 0.35).sin() * 1.5;
+        }
+
+        let initial_old_e = vec![-28.0f32; mode.nb_ebands];
+        let budget = (160 * 8 * 8) as u32;
+        let tell_start = 2;
+        let intra = false;
+        let max_decay = 16.0f32;
+        let lfe = false;
+
+        let (enc_trace, packet) = trace_quant_coarse_energy_for_test(
+            mode,
+            start,
+            end,
+            &e_bands,
+            &initial_old_e,
+            budget,
+            tell_start,
+            channels,
+            lm,
+            intra,
+            max_decay,
+            lfe,
+        );
+
+        let dec_trace = trace_unquant_coarse_energy_for_test(
+            mode,
+            start,
+            end,
+            &initial_old_e,
+            &packet,
+            channels,
+            lm,
+            intra,
+        );
+
+        assert_eq!(enc_trace.len(), dec_trace.len());
+        for (enc, dec) in enc_trace.iter().zip(dec_trace.iter()) {
+            assert_eq!((enc.band, enc.channel), (dec.band, dec.channel));
+            assert_eq!(enc.qi, dec.qi, "qi mismatch at band {}", enc.band);
+            assert!(
+                (enc.predicted_old_e - dec.predicted_old_e).abs() < 1e-5,
+                "predicted old_e mismatch at band {}: enc={} dec={}",
+                enc.band,
+                enc.predicted_old_e,
+                dec.predicted_old_e
+            );
+            assert!(
+                (enc.next_prev - dec.next_prev).abs() < 1e-5,
+                "prev mismatch at band {}: enc={} dec={}",
+                enc.band,
+                enc.next_prev,
+                dec.next_prev
+            );
         }
     }
 }
