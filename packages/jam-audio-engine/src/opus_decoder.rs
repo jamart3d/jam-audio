@@ -33,7 +33,13 @@ mod pure_rust {
         num_channels: usize,
     }
 
+    // SAFETY: The raw decoder pointer is created by `opus_decoder_create`, owned
+    // by this struct, destroyed in `Drop`, and only used through `&mut self` for
+    // decode/reset operations. Immutable access does not dereference the pointer.
     unsafe impl Send for OpusDecoder {}
+
+    // SAFETY: Shared references do not permit decode/reset, so concurrent access
+    // through `&OpusDecoder` cannot mutate or free the underlying decoder.
     unsafe impl Sync for OpusDecoder {}
 
     impl Drop for OpusDecoder {
@@ -159,6 +165,9 @@ mod pure_rust {
         }
 
         fn decode(&mut self, packet: &Packet) -> Result<AudioBufferRef<'_>> {
+            // SAFETY: `self.decoder` is owned by `self` and remains valid until
+            // `Drop`. `packet.data` is borrowed for the duration of the call, and
+            // `self.pcm` has capacity for `MAX_SAMPLES_PER_CHANNEL * 2` floats.
             let samples_per_channel = unsafe {
                 opus_decode_float(
                     self.decoder,
@@ -258,6 +267,18 @@ mod pure_rust {
         fn make_decoder_rejects_invalid_channel_count() {
             let err = make_decoder(48_000, 3).unwrap_err();
             assert!(matches!(err, Error::DecodeError("opus: invalid channel count")));
+        }
+
+        #[test]
+        fn reset_keeps_decoder_usable_for_repeated_reinitialization() {
+            let mut decoder = OpusDecoder::try_new(&opus_params(), &DecoderOptions::default())
+                .expect("decoder constructs");
+
+            for _ in 0..16 {
+                decoder.reset();
+            }
+
+            assert_ne!(decoder.decoder as usize, 0, "decoder pointer must remain non-null");
         }
     }
 }
