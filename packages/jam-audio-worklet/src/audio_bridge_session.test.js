@@ -36,3 +36,11 @@ test('clearSessionMetadata removes persisted keys', () => {
   assert.ok(deleted.includes('jamdisc-session-track-id'));
   assert.ok(deleted.includes('jamdisc-session-position-ms'));
 });
+
+import { clampVolume } from './audio_bridge_transport.js';
+
+test('clampVolume constrains values into 0..1', () => {
+  assert.equal(clampVolume(-1), 0);
+  assert.equal(clampVolume(0.5), 0.5);
+  assert.equal(clampVolume(2), 1);
+});

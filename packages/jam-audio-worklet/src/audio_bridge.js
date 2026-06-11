@@ -5,6 +5,10 @@ import {
   pushHistoryPoint,
 } from './audio_diagnostics_state.js';
 import { createBridgeSessionState } from './audio_bridge_session.js';
+import {
+  clampVolume,
+  sendPreloadCommand,
+} from './audio_bridge_transport.js';
 
 
 export function createJamAudioBridge({
@@ -437,9 +441,7 @@ export function createJamAudioBridge({
     });
   }
 
-  function clampVolume(value) {
-    return Math.min(1, Math.max(0, value));
-  }
+
 
   function nowMs() {
     return Math.round(performance.now());
@@ -1399,19 +1401,21 @@ export function createJamAudioBridge({
   }
 
   function preloadNext(audioBytes, hintDurationMs = 0) {
-    void sendPlaybackWorkerCommand('preloadNext', { audioBytes, hintDurationMs }).catch((error) => {
-      if (typeof onPreloadErrorCallback === 'function') {
-        onPreloadErrorCallback(error instanceof Error ? error.message : String(error));
-      }
-    });
+    void sendPreloadCommand(
+      sendPlaybackWorkerCommand,
+      onPreloadErrorCallback,
+      'preloadNext',
+      { audioBytes, hintDurationMs },
+    );
   }
 
   function preloadNextBounded(url, totalSize) {
-    void sendPlaybackWorkerCommand('preloadNextBounded', { url, totalSize }).catch((error) => {
-      if (typeof onPreloadErrorCallback === 'function') {
-        onPreloadErrorCallback(error instanceof Error ? error.message : String(error));
-      }
-    });
+    void sendPreloadCommand(
+      sendPlaybackWorkerCommand,
+      onPreloadErrorCallback,
+      'preloadNextBounded',
+      { url, totalSize },
+    );
   }
 
   function seek(positionMs) {
