@@ -1,4 +1,7 @@
+mod quality_probe_common;
+
 use opus_rs::modes::default_mode;
+use quality_probe_common::{best_snr_with_delay, generate_sine_wave};
 
 #[test]
 fn celt_synthesis_chain_bypass() {
@@ -7,14 +10,8 @@ fn celt_synthesis_chain_bypass() {
     let overlap = mode.overlap; // 120
     let num_frames = 10;
 
-    let freq = 440.0;
-    let mut all_in = vec![0.0f32; frame_size * num_frames];
+    let all_in = generate_sine_wave(frame_size * num_frames, 48_000.0, 440.0, 0.4);
     let mut all_out = vec![0.0f32; frame_size * num_frames];
-
-    for i in 0..(frame_size * num_frames) {
-        let t = i as f32 / 48000.0;
-        all_in[i] = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.4;
-    }
 
     // Simulate encoder's pre-emphasis + MDCT forward
     let syn_mem_size = 2048 + overlap;
@@ -111,31 +108,8 @@ fn celt_synthesis_chain_bypass() {
     // Check SNR with various delays
     let start_idx = 2 * frame_size;
     let end_idx = 9 * frame_size;
-    let mut best_snr: f32 = -100.0;
-    let mut best_delay = 0;
-    for delay in 0..(frame_size * 2) {
-        let mut s_e = 0.0f64;
-        let mut n_e = 0.0f64;
-        let mut count = 0;
-        for i in start_idx..end_idx {
-            if i + delay >= all_out.len() {
-                break;
-            }
-            let s = all_in[i] as f64;
-            let d = all_out[i + delay] as f64;
-            s_e += s * s;
-            n_e += (s - d) * (s - d);
-            count += 1;
-        }
-        if count < frame_size {
-            continue;
-        }
-        let snr = 10.0 * (s_e / (n_e + 1e-12)).log10() as f32;
-        if snr > best_snr {
-            best_snr = snr;
-            best_delay = delay;
-        }
-    }
+    let (best_snr, best_delay, _) =
+        best_snr_with_delay(&all_in, &all_out, start_idx, end_idx, frame_size * 2);
 
     eprintln!(
         "Synthesis chain bypass: Best SNR = {:.2} dB at delay {}",
@@ -169,14 +143,8 @@ fn celt_energy_roundtrip_only() {
     let num_frames = 10;
     let n_bytes = 160;
 
-    let freq_hz = 440.0;
-    let mut all_in = vec![0.0f32; frame_size * num_frames];
+    let all_in = generate_sine_wave(frame_size * num_frames, 48_000.0, 440.0, 0.4);
     let mut all_out = vec![0.0f32; frame_size * num_frames];
-
-    for i in 0..(frame_size * num_frames) {
-        let t = i as f32 / 48000.0;
-        all_in[i] = (2.0 * std::f32::consts::PI * freq_hz * t).sin() * 0.4;
-    }
 
     let syn_mem_size = 2048 + overlap;
     let mut syn_mem = vec![0.0f32; syn_mem_size];
@@ -389,31 +357,8 @@ fn celt_energy_roundtrip_only() {
     // Check SNR
     let start_idx = 2 * frame_size;
     let end_idx = 9 * frame_size;
-    let mut best_snr: f32 = -100.0;
-    let mut best_delay = 0;
-    for delay in 0..(frame_size * 2) {
-        let mut s_e = 0.0f64;
-        let mut n_e = 0.0f64;
-        let mut count = 0;
-        for i in start_idx..end_idx {
-            if i + delay >= all_out.len() {
-                break;
-            }
-            let s = all_in[i] as f64;
-            let d = all_out[i + delay] as f64;
-            s_e += s * s;
-            n_e += (s - d) * (s - d);
-            count += 1;
-        }
-        if count < frame_size {
-            continue;
-        }
-        let snr = 10.0 * (s_e / (n_e + 1e-12)).log10() as f32;
-        if snr > best_snr {
-            best_snr = snr;
-            best_delay = delay;
-        }
-    }
+    let (best_snr, best_delay, _) =
+        best_snr_with_delay(&all_in, &all_out, start_idx, end_idx, frame_size * 2);
 
     eprintln!(
         "Energy roundtrip only: Best SNR = {:.2} dB at delay {}",
