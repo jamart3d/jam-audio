@@ -121,6 +121,7 @@ function createPlaybackWorkerController({
   let currentSessionId = 0;
   let diagnostics = createWorkerDiagnostics();
 
+  let lastSeamGeneration = 0;
   let pendingGaplessBytes = null;
   let gaplessPlayerNextLoaded = false;
   let gaplessEndedFallbackTimer = null;
@@ -328,6 +329,7 @@ function createPlaybackWorkerController({
     pendingGaplessSampleRate = 0;
     gaplessPlayerNextLoaded = false;
     pendingGaplessFallbackRecoveryConfirmation = false;
+    lastSeamGeneration = 0;
     currentSessionId++;
   }
 
@@ -335,6 +337,21 @@ function createPlaybackWorkerController({
     currentTrackEndPositionMs = durationMs > 0 ? durationMs : 0;
     currentTrackEndPositionKnown = isKnown;
     currentTrackEndPositionHandled = false;
+  }
+
+  function checkSeamSignal(activePlayer) {
+    if (!activePlayer || activePlayer === streamingPlayer || activePlayer === windowedPlayer || typeof activePlayer.seamGeneration !== 'function') {
+      return false;
+    }
+    const currentGen = activePlayer.seamGeneration();
+    if (currentGen < lastSeamGeneration) {
+      lastSeamGeneration = currentGen;
+    }
+    if (currentGen > lastSeamGeneration) {
+      lastSeamGeneration = currentGen;
+      return true;
+    }
+    return false;
   }
 
   function currentBoundaryDurationMs() {
@@ -430,12 +447,25 @@ function createPlaybackWorkerController({
         _pendingHandoffBasePositionMs = -1;
       }
     }
-    if (!currentTrackEndPositionKnown || currentTrackEndPositionHandled) {
-      return null;
+    let crossedTrackBoundary = false;
+    let positionMs = activePlayer.positionMs();
+
+    const hasSeamAPI = typeof activePlayer.seamGeneration === 'function' &&
+                       typeof activePlayer.lastSeamPositionMs === 'function';
+
+    if (hasSeamAPI) {
+      if (!currentTrackEndPositionHandled && checkSeamSignal(activePlayer)) {
+        crossedTrackBoundary = true;
+        positionMs = activePlayer.lastSeamPositionMs();
+      }
+    } else {
+      if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
+        crossedTrackBoundary =
+          positionMs >=
+          currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+      }
     }
-    const positionMs = activePlayer.positionMs();
-    const crossedTrackBoundary =
-      positionMs >= currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+
     if (!crossedTrackBoundary) {
       return null;
     }

@@ -4521,6 +4521,101 @@ test('P1.8: recoverFromStaleGaplessSuppression attempts handoff before clearing 
   controller.stop(); // teardown
 });
 
+test('gapless handoff uses seamGeneration and lastSeamPositionMs from engine when available', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let duration = 1000;
+  let position = 0;
+  let seamGen = 0;
+  let lastSeamPos = 0;
+  let shouldTransition = false;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (shouldTransition) {
+          seamGen = 1;
+          lastSeamPos = 505.5;
+          position = 510;
+        } else {
+          position += 250;
+        }
+        return new Float32Array(CHANNELS * 10);
+      },
+      durationMs() {
+        return duration;
+      },
+      positionMs() {
+        return position;
+      },
+      hasEnded() {
+        return false;
+      },
+      loadNext() {
+        duration = 2000;
+        return null;
+      },
+      seekToMs() {},
+      free() {},
+      seamGeneration() {
+        return seamGen;
+      },
+      lastSeamPositionMs() {
+        return lastSeamPos;
+      },
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  // Set buffer as full initially to prevent synchronous refill inside playTrack
+  sharedState[2] = 100;
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 100,
+  });
+
+  controller.preloadNext(new Uint8Array([9]));
+
+  // Request refill of 50 frames, shouldTransition is false
+  sharedState[2] = 50;
+  intervalCallback();
+  assert.equal(messages.some((m) => m.type === 'track-changed'), false);
+
+  // Enable transition, request refill again
+  shouldTransition = true;
+  sharedState[2] = 50;
+  intervalCallback();
+
+  assert.ok(
+    messages.some((message) => message.type === 'track-changed'),
+    'track-changed must be emitted when seamGeneration increments',
+  );
+
+  const trackChanged = messages.find((message) => message.type === 'track-changed');
+  assert.equal(
+    trackChanged.transitionPositionMs,
+    505,
+    'transition position must be lastSeamPositionMs, not positionMs or durationMs',
+  );
+});
+
+
 
 
 
