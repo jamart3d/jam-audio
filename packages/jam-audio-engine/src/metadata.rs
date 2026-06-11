@@ -272,4 +272,9 @@ mod tests {
         };
         assert_eq!(duration_ms_from(Some(tb), None), 0.0);
     }
+
+    #[test]
+    fn extract_artwork_public_wrapper_returns_none_for_empty_input() {
+        assert_eq!(extract_artwork(&[]), None);
+    }
 }

@@ -305,6 +305,15 @@ mod tests {
     }
 
     #[test]
+    fn position_ms_uses_total_frames_decoded_and_target_sample_rate() {
+        let mut player = GaplessPlayer::new(make_wav(48000), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        player.total_frames_decoded = 2400;
+        player.target_sample_rate = 48_000;
+
+        assert_eq!(player.position_ms(), 50.0);
+    }
+
+    #[test]
     fn seek_to_ms_repositions() {
         let mut player = GaplessPlayer::new(make_wav(48000), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
         player.seek_to_ms(500.0).unwrap();
