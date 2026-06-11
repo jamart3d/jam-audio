@@ -111,6 +111,33 @@ pub struct CoarseEnergyBandTrace {
     pub next_prev: f32,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnergyTraceStage {
+    Coarse,
+    Fine,
+    Finalise,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct EnergyStageTrace {
+    pub stage: EnergyTraceStage,
+    pub band: usize,
+    pub channel: usize,
+    pub encoder_old_e: f32,
+    pub decoder_old_e: f32,
+    pub encoder_error: f32,
+    pub decoder_error: Option<f32>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct EnergyRoundtripTrace {
+    pub stages: Vec<EnergyStageTrace>,
+    pub first_divergence: Option<EnergyStageTrace>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn quant_coarse_energy_impl(
     m: &CeltMode,
@@ -686,6 +713,194 @@ pub fn trace_unquant_coarse_energy_for_test(
 }
 
 #[cfg(test)]
+fn append_energy_stage_trace(
+    out: &mut Vec<EnergyStageTrace>,
+    stage: EnergyTraceStage,
+    encoder_old_e_bands: &[f32],
+    decoder_old_e_bands: &[f32],
+    encoder_error: &[f32],
+    decoder_error: Option<&[f32]>,
+    start: usize,
+    end: usize,
+    nb_ebands: usize,
+    channels: usize,
+) {
+    for i in start..end {
+        for c in 0..channels {
+            let idx = c * nb_ebands + i;
+            out.push(EnergyStageTrace {
+                stage: stage.clone(),
+                band: i,
+                channel: c,
+                encoder_old_e: encoder_old_e_bands[idx],
+                decoder_old_e: decoder_old_e_bands[idx],
+                encoder_error: encoder_error[idx],
+                decoder_error: decoder_error.map(|values| values[idx]),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+fn first_energy_divergence(stages: &[EnergyStageTrace]) -> Option<EnergyStageTrace> {
+    stages
+        .iter()
+        .find(|entry| (entry.encoder_old_e - entry.decoder_old_e).abs() >= 1e-5)
+        .cloned()
+}
+
+#[cfg(test)]
+pub fn trace_full_energy_roundtrip_for_test(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    e_bands: &[f32],
+    fine_quant: &[i32],
+    fine_priority: &[i32],
+    channels: usize,
+    lm: usize,
+) -> EnergyRoundtripTrace {
+    let mut encoder_old_e_bands = vec![0.0f32; mode.nb_ebands * channels];
+    let mut encoder_error = vec![0.0f32; mode.nb_ebands * channels];
+    let mut enc = RangeCoder::new_encoder(1000);
+
+    quant_coarse_energy(
+        mode,
+        start,
+        end,
+        e_bands,
+        &mut encoder_old_e_bands,
+        10000,
+        &mut encoder_error,
+        &mut enc,
+        channels,
+        lm,
+        false,
+        80,
+    );
+
+    let coarse_encoder_old_e = encoder_old_e_bands.clone();
+    let coarse_encoder_error = encoder_error.clone();
+
+    quant_fine_energy(
+        mode,
+        start,
+        end,
+        &mut encoder_old_e_bands,
+        &mut encoder_error,
+        fine_quant,
+        &mut enc,
+        channels,
+    );
+
+    let fine_encoder_old_e = encoder_old_e_bands.clone();
+    let fine_encoder_error = encoder_error.clone();
+
+    quant_energy_finalise(
+        mode,
+        start,
+        end,
+        &mut encoder_old_e_bands,
+        &mut encoder_error,
+        fine_quant,
+        fine_priority,
+        10,
+        &mut enc,
+        channels,
+    );
+
+    let final_encoder_old_e = encoder_old_e_bands.clone();
+    let final_encoder_error = encoder_error.clone();
+
+    enc.done();
+
+    let mut dec = RangeCoder::new_decoder(&enc.buf);
+    let intra = dec.decode_bit_logp(3);
+    let mut decoder_old_e_bands = vec![0.0f32; mode.nb_ebands * channels];
+    let decoder_error = vec![0.0f32; mode.nb_ebands * channels];
+
+    unquant_coarse_energy(
+        mode,
+        start,
+        end,
+        &mut decoder_old_e_bands,
+        intra,
+        &mut dec,
+        channels,
+        lm,
+    );
+    let coarse_decoder_old_e = decoder_old_e_bands.clone();
+
+    unquant_fine_energy(
+        mode,
+        start,
+        end,
+        &mut decoder_old_e_bands,
+        fine_quant,
+        &mut dec,
+        channels,
+    );
+    let fine_decoder_old_e = decoder_old_e_bands.clone();
+
+    unquant_energy_finalise(
+        mode,
+        start,
+        end,
+        &mut decoder_old_e_bands,
+        fine_quant,
+        fine_priority,
+        10,
+        &mut dec,
+        channels,
+    );
+    let final_decoder_old_e = decoder_old_e_bands.clone();
+
+    let mut stages = Vec::new();
+    append_energy_stage_trace(
+        &mut stages,
+        EnergyTraceStage::Coarse,
+        &coarse_encoder_old_e,
+        &coarse_decoder_old_e,
+        &coarse_encoder_error,
+        Some(&decoder_error),
+        start,
+        end,
+        mode.nb_ebands,
+        channels,
+    );
+    append_energy_stage_trace(
+        &mut stages,
+        EnergyTraceStage::Fine,
+        &fine_encoder_old_e,
+        &fine_decoder_old_e,
+        &fine_encoder_error,
+        Some(&decoder_error),
+        start,
+        end,
+        mode.nb_ebands,
+        channels,
+    );
+    append_energy_stage_trace(
+        &mut stages,
+        EnergyTraceStage::Finalise,
+        &final_encoder_old_e,
+        &final_decoder_old_e,
+        &final_encoder_error,
+        Some(&decoder_error),
+        start,
+        end,
+        mode.nb_ebands,
+        channels,
+    );
+
+    let first_divergence = first_energy_divergence(&stages);
+    EnergyRoundtripTrace {
+        stages,
+        first_divergence,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::range_coder::RangeCoder;
@@ -870,5 +1085,39 @@ mod tests {
                 dec.next_prev
             );
         }
+    }
+
+    #[test]
+    fn test_full_energy_trace_matches_decoder_stage_by_stage() {
+        let mode = crate::modes::default_mode();
+        let channels = 1;
+        let lm = 3;
+        let start = 0;
+        let end = mode.nb_ebands;
+
+        let mut e_bands = vec![0.0f32; mode.nb_ebands];
+        for (i, v) in e_bands.iter_mut().enumerate() {
+            *v = 5.0 + (i as f32 * 0.35).sin() * 1.5;
+        }
+
+        let fine_quant: Vec<i32> = (0..mode.nb_ebands).map(|i| (i % 3) as i32).collect();
+        let fine_priority: Vec<i32> = (0..mode.nb_ebands).map(|i| (i % 2) as i32).collect();
+
+        let trace = trace_full_energy_roundtrip_for_test(
+            mode,
+            start,
+            end,
+            &e_bands,
+            &fine_quant,
+            &fine_priority,
+            channels,
+            lm,
+        );
+
+        assert!(
+            trace.first_divergence.is_none(),
+            "first divergence = {:?}",
+            trace.first_divergence
+        );
     }
 }
