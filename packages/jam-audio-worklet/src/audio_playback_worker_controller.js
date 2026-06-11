@@ -343,15 +343,34 @@ function createPlaybackWorkerController({
     if (!activePlayer || activePlayer === streamingPlayer || activePlayer === windowedPlayer || typeof activePlayer.seamGeneration !== 'function') {
       return false;
     }
-    const currentGen = activePlayer.seamGeneration();
-    if (currentGen < lastSeamGeneration) {
-      lastSeamGeneration = currentGen;
+    const gen = activePlayer.seamGeneration();
+    if (gen < lastSeamGeneration) {
+      lastSeamGeneration = gen;
     }
-    if (currentGen > lastSeamGeneration) {
-      lastSeamGeneration = currentGen;
-      return true;
+    if (gen <= lastSeamGeneration) return false;
+
+    // New seam detected.
+    lastSeamGeneration = gen;
+    const seamPositionMs = activePlayer.lastSeamPositionMs();
+    const prevEndPositionMs = currentTrackEndPositionMs;
+
+    // Only override if the seam is meaningfully earlier than the metadata boundary.
+    // If they are within TRACK_HANDOFF_TOLERANCE_MS, the existing arithmetic already
+    // handles it — no need for seam-boundary-handoff diagnostic.
+    const DRIFT_TOLERANCE_MS = 500;
+    if (prevEndPositionMs - seamPositionMs > DRIFT_TOLERANCE_MS) {
+      currentTrackEndPositionMs = seamPositionMs;
+      emitDiagnosticsEvent({
+        type: 'seam-boundary-handoff',
+        label: 'Seam signal superseded metadata boundary',
+        timestampMs: nowMs(),
+        severity: 'info',
+        seamPositionMs,
+        metadataBoundaryMs: prevEndPositionMs,
+        headerDriftMs: prevEndPositionMs - seamPositionMs,
+      });
     }
-    return false;
+    return true;
   }
 
   function currentBoundaryDurationMs() {
@@ -454,9 +473,14 @@ function createPlaybackWorkerController({
                        typeof activePlayer.lastSeamPositionMs === 'function';
 
     if (hasSeamAPI) {
-      if (!currentTrackEndPositionHandled && checkSeamSignal(activePlayer)) {
+      const isSeam = checkSeamSignal(activePlayer);
+      if (isSeam) {
         crossedTrackBoundary = true;
         positionMs = activePlayer.lastSeamPositionMs();
+      } else if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
+        crossedTrackBoundary =
+          positionMs >=
+          currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
       }
     } else {
       if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {

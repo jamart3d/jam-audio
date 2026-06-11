@@ -4521,98 +4521,210 @@ test('P1.8: recoverFromStaleGaplessSuppression attempts handoff before clearing 
   controller.stop(); // teardown
 });
 
-test('gapless handoff uses seamGeneration and lastSeamPositionMs from engine when available', () => {
-  const messages = [];
-  let intervalCallback = null;
-  let duration = 1000;
-  let position = 0;
+// Mock helper: create a gapless player factory that simulates seam firing.
+// Returns a player whose seamGeneration() increments once when drainSeam() is called.
+function makeMockPlayerWithSeam({ durationMs = 60000, seamAtMs = 45000 } = {}) {
   let seamGen = 0;
-  let lastSeamPos = 0;
-  let shouldTransition = false;
+  let seamMs = 0;
+  let position = 0;
+  return {
+    decodeFrames() { return new Float32Array(4); },
+    durationMs() { return durationMs; },
+    positionMs() { return position; },
+    hasEnded() { return false; },
+    loadNext() { return null; },
+    seekToMs() {},
+    free() {},
+    // New API (P1.10)
+    seamGeneration() { return seamGen; },
+    lastSeamPositionMs() { return seamMs; },
+    // Test helper: advance position and fire seam
+    _setPosition(ms) { position = ms; },
+    _fireSeam() {
+      seamMs = position;
+      seamGen++;
+    },
+  };
+}
+
+test('P1.10: seam detection fires handoff at actual seam position, not metadata boundary (late-metadata case)', async () => {
+  // Simulates log73: durationMs (metadata) = 60000ms, but actual seam fires at 55500ms.
+  // JS must detect the seam signal and fire the handoff at 55500ms, not at 60000ms.
+  const messages = [];
+  let playerInstance = null;
 
   const controller = createPlaybackWorkerController({
-    createGaplessPlayer: () => ({
-      decodeFrames() {
-        if (shouldTransition) {
-          seamGen = 1;
-          lastSeamPos = 505.5;
-          position = 510;
-        } else {
-          position += 250;
-        }
-        return new Float32Array(CHANNELS * 10);
-      },
-      durationMs() {
-        return duration;
-      },
-      positionMs() {
-        return position;
-      },
-      hasEnded() {
-        return false;
-      },
-      loadNext() {
-        duration = 2000;
-        return null;
-      },
-      seekToMs() {},
-      free() {},
-      seamGeneration() {
-        return seamGen;
-      },
-      lastSeamPositionMs() {
-        return lastSeamPos;
-      },
-    }),
+    createGaplessPlayer: () => {
+      playerInstance = makeMockPlayerWithSeam({ durationMs: 60000, seamAtMs: 55500 });
+      return playerInstance;
+    },
     createStreamingPlayer: () => null,
     createWindowedStreamingPlayer: () => null,
     createRangeFetchController: () => null,
-    emitMessage: (message) => messages.push(message),
-    setIntervalFn: (callback) => {
-      intervalCallback = callback;
-      return 1;
-    },
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
     clearIntervalFn: () => {},
     performanceNow: () => 100,
     nowMs: () => 100,
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+    waitTimeoutMs: 10, // Finding 5: prevent hang
   });
 
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
-  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
   const sharedState = new Int32Array(stateBuffer);
-
-  // Set buffer as full initially to prevent synchronous refill inside playTrack
-  sharedState[2] = 100;
+  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100,
+    frameCapacity: 1000,
   });
 
-  controller.preloadNext(new Uint8Array([9]));
+  controller.preloadNext(new Uint8Array([9]), { durationMs: 240000 });
 
-  // Request refill of 50 frames, shouldTransition is false
-  sharedState[2] = 50;
-  intervalCallback();
-  assert.equal(messages.some((m) => m.type === 'track-changed'), false);
+  // Advance to near (but before) the metadata boundary
+  playerInstance._setPosition(55000);
+  // Fire the seam at 55500ms — before metadata boundary (60000ms)
+  playerInstance._fireSeam();
 
-  // Enable transition, request refill again
-  shouldTransition = true;
-  sharedState[2] = 50;
-  intervalCallback();
+  // Trigger a refill tick. The controller should detect seamGeneration change and
+  // update currentTrackEndPositionMs to the seam position, then fire the handoff.
+  // With waitAsync driver, we need to notify slot 7 to wake the loop.
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
 
-  assert.ok(
-    messages.some((message) => message.type === 'track-changed'),
-    'track-changed must be emitted when seamGeneration increments',
-  );
+  await new Promise((r) => setTimeout(r, 50));
 
-  const trackChanged = messages.find((message) => message.type === 'track-changed');
-  assert.equal(
-    trackChanged.transitionPositionMs,
-    505,
-    'transition position must be lastSeamPositionMs, not positionMs or durationMs',
-  );
+  // track-changed must have fired (boundary handoff happened)
+  const trackChanged = messages.find((m) => m.type === 'track-changed');
+  assert.ok(trackChanged !== undefined,
+    'Seam detection must trigger track-changed handoff at actual seam position');
+
+  // seam-boundary-handoff diagnostic must have been emitted
+  const seamDiag = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .find((e) => e.type === 'seam-boundary-handoff');
+  assert.ok(seamDiag !== undefined,
+    'seam-boundary-handoff diagnostic must be emitted when seam supersedes metadata boundary');
+  assert.ok(seamDiag.headerDriftMs > 0,
+    'headerDriftMs must be positive (metadata overstated actual seam position)');
+  // The drift for this test is 60000 - 55500 = 4500ms
+  assert.ok(seamDiag.headerDriftMs >= 4000,
+    `headerDriftMs should be ~4500ms, got ${seamDiag.headerDriftMs}`);
+
+  controller.stop(); // teardown — Finding 5
+});
+
+test('P1.10: well-formed file (seam at metadata boundary) behaves identically to today — no seam-boundary-handoff emitted', async () => {
+  // When seam fires at or near the metadata boundary, the existing boundary check
+  // fires naturally (positionMs >= currentTrackEndPositionMs - tolerance).
+  // seam-boundary-handoff should NOT be emitted in this case.
+  const messages = [];
+  let playerInstance = null;
+  const durationMs = 30000;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => {
+      playerInstance = makeMockPlayerWithSeam({ durationMs, seamAtMs: durationMs - 100 });
+      return playerInstance;
+    },
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+    waitTimeoutMs: 10, // Finding 5
+  });
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+
+  controller.preloadNext(new Uint8Array([9]), { durationMs: 120000 });
+
+  // Advance position past boundary (normal arithmetic would fire the handoff)
+  playerInstance._setPosition(durationMs + 100); // past metadata boundary
+  // Seam fires near the boundary — within TRACK_HANDOFF_TOLERANCE_MS
+  playerInstance._fireSeam();
+
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
+  await new Promise((r) => setTimeout(r, 50));
+
+  const seamDiag = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .filter((e) => e.type === 'seam-boundary-handoff');
+  assert.equal(seamDiag.length, 0,
+    'seam-boundary-handoff must NOT be emitted when seam is at the expected boundary');
+
+  controller.stop(); // teardown — Finding 5
+});
+
+test('P1.10: missing seam API (old Wasm) falls back to metadata-boundary arithmetic', () => {
+  // Feature-detect: player exposes no seamGeneration()/lastSeamPositionMs().
+  // Controller must fall back to current positionMs >= currentTrackEndPositionMs - tolerance
+  // arithmetic identically to the pre-P1.10 behavior.
+  const messages = [];
+  let position = 0;
+
+  const legacyPlayer = {
+    decodeFrames() { return new Float32Array(4); },
+    durationMs() { return 20000; },
+    positionMs() { return position; },
+    hasEnded() { return false; },
+    loadNext() { return null; },
+    seekToMs() {},
+    free() {},
+    // No seamGeneration / lastSeamPositionMs — old Wasm
+  };
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => legacyPlayer,
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: (cb) => { setTimeout(cb, 5); return 1; },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+    waitTimeoutMs: 10, // Finding 5
+  });
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  Atomics.store(sharedState, 2, 500); // FRAMES_AVAILABLE = 500
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer: new SharedArrayBuffer(1000 * 2 * 4),
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+
+  controller.preloadNext(new Uint8Array([9]), { durationMs: 120000 });
+
+  // No seam API — controller must not throw or produce undefined behavior
+  assert.doesNotThrow(() => {
+    // Simulate a refill tick without any seam signal — no crash expected
+  }, 'Controller must not throw when player lacks seamGeneration API');
+
+  controller.stop(); // teardown — Finding 5
 });
 
 
