@@ -208,3 +208,53 @@ test('P1.2: process() adds to REFILL_REQUEST_INDEX when frames drop below low-wa
     'Stopped: must not increment counter');
 });
 
+test('process wraps readFrame at frameCapacity and preserves channel order', async () => {
+  let ProcessorClass = null;
+
+  globalThis.AudioWorkletProcessor = class {
+    constructor() {
+      this.port = { onmessage: null, postMessage() {} };
+    }
+  };
+  globalThis.sampleRate = 48_000;
+  globalThis.registerProcessor = (_name, klass) => {
+    ProcessorClass = klass;
+  };
+
+  await import(`./audio_processor.js?wrap-test=${Date.now()}`);
+
+  const pcmBuffer = new SharedArrayBuffer(4 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const samples = new Float32Array(pcmBuffer);
+  samples.set([
+    10, 11,
+    20, 21,
+    30, 31,
+    40, 41,
+  ]);
+
+  const stateBuffer = new SharedArrayBuffer(9 * Int32Array.BYTES_PER_ELEMENT);
+  const state = new Int32Array(stateBuffer);
+  Atomics.store(state, 0, 3); // READ_INDEX
+  Atomics.store(state, 2, 3); // FRAMES_AVAILABLE_INDEX
+
+  const processor = new ProcessorClass();
+  processor.handleMessage({
+    type: 'init',
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 4,
+    channels: 2,
+  });
+
+  const left = new Float32Array(4);
+  const right = new Float32Array(4);
+
+  processor.process([], [[left, right]]);
+
+  assert.deepEqual(Array.from(left), [40, 10, 20, 0]);
+  assert.deepEqual(Array.from(right), [41, 11, 21, 0]);
+  assert.equal(Atomics.load(state, 0), 2);
+  assert.equal(Atomics.load(state, 2), 0);
+});
+
+
