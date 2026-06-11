@@ -27,9 +27,12 @@ pub use ring_buffer::{
     DEFAULT_FRAME_CAPACITY, PcmRingBuffer, RingBufferError, RingBufferLayout, SHARED_STATE_SLOTS,
 };
 
+/// Exported for wasm callers that want Rust panic messages forwarded to the
+/// browser console. On non-wasm targets this is intentionally a no-op so the
+/// symbol remains callable in host tests and mixed-target builds.
 #[wasm_bindgen]
 pub fn init_console_error_panic_hook() {
-    #[cfg(feature = "console_error_panic_hook")]
+    #[cfg(all(feature = "console_error_panic_hook", target_arch = "wasm32"))]
     console_error_panic_hook::set_once();
 }
 
@@ -974,4 +977,10 @@ mod tests {
             Ok(StreamingFrameResult::Success)
         ));
     }
+
+    #[test]
+    fn init_console_error_panic_hook_is_callable_on_host() {
+        init_console_error_panic_hook();
+    }
 }
+
