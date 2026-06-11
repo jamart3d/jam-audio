@@ -102,3 +102,16 @@ That plan should:
 - `eb45e5a test: add mdct stage quality probe`
 - `2e4bda8 test: unify celt quality measurements`
 - `1b492db refactor: expose first codec quality investigation seam`
+
+**Energy Trace Follow-Up**
+
+- Coarse trace result: PASS, encoder and decoder coarse prediction stay aligned band-by-band.
+- Fine trace result: PASS, unit-level fine-energy updates remain symmetric with no first mismatching band.
+- Finalise trace result: PASS, unit-level finalization also remains symmetric with no first mismatching band.
+- Real CELT energy harness divergence: none reported by `trace_full_energy_roundtrip_for_test(...)`; `celt_energy_roundtrip_only` still prints `Energy trace first divergence: None` while end-to-end SNR stays at `0.01 dB`.
+
+**Next Fix Target**
+
+- Chosen file: `third_party/opus-rs/src/bands.rs`
+- Reason: the quantized energy encode/decode path is symmetric both in isolation and when fed by the real CELT energy-only harness, yet overall quality still collapses. That moves the likely fault to how coefficients are normalized and denormalized around the quantized energies, especially `compute_band_energies`, `normalise_bands`, and `denormalise_bands`.
+- Explicit non-targets for the next fix pass: `mdct.rs`, pre/de-emphasis logic, and additional `quant_bands.rs` predictor surgery unless new evidence appears.
