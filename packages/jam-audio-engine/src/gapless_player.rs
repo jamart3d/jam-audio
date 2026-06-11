@@ -120,7 +120,7 @@ impl GaplessPlayer {
                     if let Some(next) = self.next.take() {
                         self.pending_skip_frames = next.encoder_delay_frames();
                         self.active = next;
-                        self.seam_generation += 1;
+                        self.seam_generation = self.seam_generation.wrapping_add(1);
                         let seam_frames = self.total_frames_decoded + (out.len() / 2) as u64;
                         self.last_seam_position_ms = seam_frames as f64 * 1000.0 / self.target_sample_rate as f64;
                     } else {
@@ -475,5 +475,99 @@ mod tests {
         }
 
         assert!(seam_detected, "Should have detected a seam transition");
+    }
+
+    /// Writes a WAV whose `data` chunk size field claims `claimed_frames` worth of data,
+    /// but only `actual_frames` worth of zero-byte PCM samples are actually present.
+    fn make_wav_with_lying_header(actual_frames: usize, claimed_frames: usize) -> Vec<u8> {
+        let channels: u16 = 2;
+        let sample_rate: u32 = 44100;
+        let bits_per_sample: u16 = 16;
+        let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+        let block_align = channels * bits_per_sample / 8;
+        let actual_data_size =
+            (actual_frames * channels as usize * (bits_per_sample as usize / 8)) as u32;
+        // The header lies: it declares `claimed_frames` worth of data.
+        let claimed_data_size =
+            (claimed_frames * channels as usize * (bits_per_sample as usize / 8)) as u32;
+        // RIFF chunk size is based on claimed size (the lie propagates to the container too).
+        let chunk_size = 36 + claimed_data_size;
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&chunk_size.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&byte_rate.to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        // The `data` sub-chunk size field is the inflated (lying) value.
+        wav.extend_from_slice(&claimed_data_size.to_le_bytes());
+        // But only `actual_frames` worth of PCM bytes follow.
+        wav.extend(vec![0u8; actual_data_size as usize]);
+        wav
+    }
+
+    #[test]
+    fn lying_header_seam_fires_at_actual_data_end_not_declared_duration() {
+        // A WAV whose header claims 2000 frames but only contains 500 frames of PCM data.
+        // At 44.1 kHz stereo 16-bit:
+        //   actual  duration ≈  500 / 44100 * 1000 ≈  11.34 ms
+        //   claimed duration ≈ 2000 / 44100 * 1000 ≈  45.35 ms
+        // The seam must fire when real data runs out (~11 ms), not at the claimed end (~45 ms).
+        let actual_frames: usize = 500;
+        let claimed_frames: usize = 2000;
+        let declared_duration_ms = claimed_frames as f64 * 1000.0 / 44100.0; // ≈ 45.35 ms
+        let expected_seam_ms = actual_frames as f64 * 1000.0 / 44100.0; // ≈ 11.34 ms
+
+        let lying_wav = make_wav_with_lying_header(actual_frames, claimed_frames);
+        let normal_wav = make_wav(1000);
+
+        let mut player = GaplessPlayer::new(lying_wav, DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        player.load_next(normal_wav).unwrap();
+
+        let mut seam_detected = false;
+
+        // Decode in chunks of 100 frames; the seam should appear well within the first few
+        // iterations since the lying track only has ~11 ms of real data.
+        for _ in 0..50 {
+            let frames = player.decode_frames(100).unwrap();
+            if player.seam_generation > 0 {
+                seam_detected = true;
+                break;
+            }
+            if frames.is_empty() {
+                break;
+            }
+        }
+
+        assert!(seam_detected, "seam should have fired before track ended");
+        assert_eq!(player.seam_generation, 1);
+        assert!(
+            player.last_seam_position_ms > 0.0,
+            "last_seam_position_ms should be non-zero, got {}",
+            player.last_seam_position_ms
+        );
+        assert!(
+            player.last_seam_position_ms < declared_duration_ms,
+            "seam fired at {} ms which is >= declared duration {} ms — it should fire at actual data end",
+            player.last_seam_position_ms,
+            declared_duration_ms
+        );
+        // The seam should be approximately at the actual data end (±30 ms tolerance for
+        // resampling overhead and chunk-boundary rounding).
+        let tolerance_ms = 30.0;
+        assert!(
+            (player.last_seam_position_ms - expected_seam_ms).abs() <= tolerance_ms,
+            "seam position {} ms is not close to expected actual-data end {} ms (tolerance ±{} ms)",
+            player.last_seam_position_ms,
+            expected_seam_ms,
+            tolerance_ms
+        );
     }
 }
