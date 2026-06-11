@@ -28,6 +28,7 @@ export function createJamAudioBridge({
   let sharedStateBuffer;
   let frameCapacity = 8192;
   let playbackWorker;
+  let workletPortWired = false;
   let playbackWorkerRequestId = 0;
   const pendingWorkerRequests = new Map();
   let diagnosticsSnapshotTimerId;
@@ -801,10 +802,26 @@ export function createJamAudioBridge({
     sharedPcmBuffer = new SharedArrayBuffer(
       frameCapacity * CHANNELS * Float32Array.BYTES_PER_ELEMENT,
     );
-    sharedStateBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 7);
+    sharedStateBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 9);
     diagnosticsState.framesAvailable = 0;
     diagnosticsState.frameCapacity = frameCapacity;
     diagnosticsState.bufferFillPercent = 0;
+  }
+
+  function wireWorkletPort() {
+    // Create a MessageChannel so the worker can receive messages from the worklet.
+    // port1 goes to the worklet (AudioWorkletProcessor), port2 goes to the worker.
+    // Both are transferred (moved), not copied.
+    if (!processorNode || !playbackWorker) return;
+    const { port1, port2 } = new MessageChannel();
+    processorNode.port.postMessage({ type: 'set-refill-port', port: port1 }, [port1]);
+    playbackWorker.postMessage({ type: 'setWorkletPort', port: port2, requestId: -1 }, [port2]);
+  }
+
+  function wireWorkletPortOnce() {
+    if (workletPortWired) return;
+    workletPortWired = true;
+    wireWorkletPort();
   }
 
   function ensurePlaybackWorker() {
@@ -1230,6 +1247,7 @@ export function createJamAudioBridge({
           frameCapacity,
           channels: CHANNELS,
         });
+        wireWorkletPortOnce();
       } catch (error) {
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
         markPlaybackState('error');
@@ -1295,6 +1313,7 @@ export function createJamAudioBridge({
           frameCapacity,
           channels: CHANNELS,
         });
+        wireWorkletPortOnce();
       } catch (error) {
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
         markPlaybackState('error');
@@ -1361,6 +1380,7 @@ export function createJamAudioBridge({
           frameCapacity,
           channels: CHANNELS,
         });
+        wireWorkletPortOnce();
       } catch (error) {
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
         markPlaybackState('error');
@@ -1872,6 +1892,8 @@ export function createJamAudioBridge({
       frameCapacity,
       channels: CHANNELS,
     });
+    workletPortWired = false;
+    wireWorkletPortOnce();
   }
 
   function scheduleSynchronousDeclickToZero() {

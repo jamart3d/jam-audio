@@ -3,6 +3,10 @@ const _WRITE_INDEX = 1;
 const FRAMES_AVAILABLE_INDEX = 2;
 const _END_OF_STREAM_INDEX = 3;
 const STOP_INDEX = 4;
+const REFILL_REQUEST_INDEX = 7; // futex: worklet stores generation counter, worker waitAsync
+const TARGET_FRAMES_INDEX = 8;  // adaptive fill target in frames (Phase 2); Phase 1: STEADY_STATE
+const LOW_WATER_FRACTION = 0.5; // low-water mark = floor(target * LOW_WATER_FRACTION)
+
 
 class JamAudioProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -26,6 +30,11 @@ class JamAudioProcessor extends AudioWorkletProcessor {
       this.channels = data.channels ?? 2;
       this.totalFramesRendered = 0;
       this.framesSinceLastPositionUpdate = 0;
+      return;
+    }
+
+    if (data.type === 'set-refill-port') {
+      this.refillPort = data.port;
       return;
     }
 
@@ -98,7 +107,22 @@ class JamAudioProcessor extends AudioWorkletProcessor {
     if (framesToProcess > 0) {
       // Single batch update for shared state indices and counters.
       Atomics.store(this.state, READ_INDEX, readFrame);
-      Atomics.sub(this.state, FRAMES_AVAILABLE_INDEX, framesToProcess);
+      const framesAfterSub = Atomics.sub(this.state, FRAMES_AVAILABLE_INDEX, framesToProcess)
+        - framesToProcess;
+
+      // Low-water signal: wake the worker if buffer is hungry.
+      // Two atomic ops only — no allocation, no postMessage in the hot path.
+      if (this.state.length > REFILL_REQUEST_INDEX &&
+          Atomics.load(this.state, STOP_INDEX) !== 1) {
+        const target = this.state.length > TARGET_FRAMES_INDEX
+          ? (Atomics.load(this.state, TARGET_FRAMES_INDEX) || 264600)
+          : 264600;
+        const lowWater = Math.floor(target * LOW_WATER_FRACTION);
+        if (framesAfterSub < lowWater) {
+          Atomics.add(this.state, REFILL_REQUEST_INDEX, 1);
+          Atomics.notify(this.state, REFILL_REQUEST_INDEX, 1);
+        }
+      }
 
       this.totalFramesRendered += framesToProcess;
       this.framesSinceLastPositionUpdate += framesToProcess;

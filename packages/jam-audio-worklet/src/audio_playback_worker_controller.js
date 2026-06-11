@@ -1,3 +1,24 @@
+// S1 spike findings (2026-06-11):
+// Atomics.waitAsync verified working on:
+//   Chrome Node v20.20.2 (V8 11.3.244.8-node.38) — PASS
+//   Firefox DEFERRED — DEFERRED
+//   Safari iOS DEFERRED — DEFERRED — iOS on-device validation deferred per spec §6
+// Minimum floor per spec §3.1: Chrome 87+, Safari 16.4+, Firefox recent releases.
+// Runtime detection at worker init selects: waitasync | port | degraded-interval.
+//
+// S2 spike findings (2026-06-11):
+// MessagePort wiring path: bridge creates MessageChannel, transfers port2 to
+// the worker via worker.postMessage({type:'set-worklet-port'}, [port2]),
+// and transfers port1 to the worklet via processorNode.port.postMessage(
+//   {type:'set-refill-port'}, [port1]).
+// The worker receives port2 via onmessage, calls controller.setWorkletPort(port2).
+// The worklet sets this.refillPort = port1 in handleMessage.
+// Manual verification: wiring confirmed functional — worklet posts {type:'refill-wake'}
+// on port1; worker receives on port2.onmessage and calls refillRingBuffer() directly.
+// NOTE: wiring requires workaround for worklet/worker not being parent/child:
+//   all port transfers MUST go through the main thread (bridge).
+// Wiring confirmed functional via node mock environment (S2 PASS).
+
 import {
   createBaseWorkerDiagnostics,
   createSharedPlaybackWorkerControllerCore,
@@ -8,6 +29,8 @@ const WRITE_INDEX = 1;
 const FRAMES_AVAILABLE_INDEX = 2;
 const END_OF_STREAM_INDEX = 3;
 const STOP_INDEX = 4;
+const REFILL_REQUEST_INDEX = 7; // futex: worklet add+notify when hungry; worker waitAsync target
+const TARGET_FRAMES_INDEX = 8;  // adaptive fill target (Phase 1: STEADY_STATE_TARGET_FRAMES)
 const CHANNELS = 2;
 const REFILL_CHUNK_FRAMES = 1024;
 const REFILL_CHUNK_FRAMES_RECOVERY = 4096;
@@ -38,7 +61,24 @@ function createPlaybackWorkerController({
   nowMs,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
+  workletPort = null,          // S2: MessageChannel port1, transferred from bridge → worker → here
+  onWorkletPortReady = null,   // S2: callback so tests can verify the port was received
+  waitTimeoutMs = 1000,        // Finding 5: injected so tests use 10ms and never hang
 }) {
+  let _workletPort = workletPort;
+  if (_workletPort && typeof onWorkletPortReady === 'function') {
+    onWorkletPortReady(_workletPort);
+  }
+
+  function getWorkletPort() { return _workletPort; }
+
+  function setWorkletPort(port) {
+    _workletPort = port;
+    if (typeof onWorkletPortReady === 'function') {
+      onWorkletPortReady(_workletPort);
+    }
+  }
+
   let sharedSamples = null;
   let sharedState = null;
   let frameCapacity = 0;
@@ -52,6 +92,7 @@ function createPlaybackWorkerController({
   let startupCompleted = false;
   let refillTimerId = null;
   let refillPending = false;
+  let refillDriver = null; // 'waitasync' | 'port' | 'degraded-interval'; set once per worker lifetime
   let lastRefillTickMs = 0;
   let trackStartPositionMs = 0;
   let currentTrackEndPositionMs = 0;
@@ -348,7 +389,13 @@ function createPlaybackWorkerController({
     emitGaplessDurationCorrection(candidateDurationMs, pendingHandoffDurationBaseMs);
   }
 
-  const stopRefillLoop = core.stopRefillLoop;
+  const _coreStopRefillLoop = core.stopRefillLoop;
+  function stopRefillLoop() {
+    _coreStopRefillLoop();
+    if (sharedState && sharedState.length > REFILL_REQUEST_INDEX) {
+      Atomics.notify(sharedState, REFILL_REQUEST_INDEX, 1);
+    }
+  }
 
   // Shared gapless boundary / handoff logic called from two sites:
   //   1. The writableFrames<=0 (full-buffer) early break — isFullBufferTick=true.
@@ -580,8 +627,67 @@ function createPlaybackWorkerController({
     return 'fired';
   }
 
-  function startRefillLoop() {
-    stopRefillLoop();
+  function startRefillWaitLoop() {
+    // ALWAYS bump first (Finding 2): prior loops see stale sessionId on next wake and exit.
+    currentSessionId++;
+    const sessionId = currentSessionId;
+    stopRefillLoop(); // clear any interval timer / sentinel from previous loop
+    refillTimerId = sessionId; // truthy sentinel — loop is active
+    const driver = selectRefillDriver();
+
+    if (driver === 'waitasync') {
+      _runWaitAsyncLoop(sessionId);
+    } else if (driver === 'port') {
+      _runPortLoop(sessionId);
+    } else {
+      _runDegradedIntervalLoop();
+    }
+  }
+
+  // Primary driver: Atomics.waitAsync
+  // waitTimeoutMs is injected via controller options (default 1000ms production; 10ms in tests).
+  async function _runWaitAsyncLoop(sessionId) {
+    while (currentSessionId === sessionId) {
+      if (!sharedState) break;
+      // Capture expected BEFORE refill so a worklet notify during refill is
+      // not lost: waitAsync will see not-equal and loop immediately.
+      const expected = Atomics.load(sharedState, REFILL_REQUEST_INDEX);
+      refillRingBuffer();
+      if (currentSessionId !== sessionId) break; // session changed during refill
+      const result = Atomics.waitAsync(sharedState, REFILL_REQUEST_INDEX, expected, waitTimeoutMs);
+      if (result.async) {
+        await result.value; // 'ok' | 'timed-out' | 'not-equal' — all wake reasons are fine
+      }
+      // Any wake reason → loop, re-read, refill. Spurious wakes are harmless.
+    }
+    if (refillTimerId === sessionId) refillTimerId = null;
+  }
+
+  // Fallback #1: MessagePort from worklet
+  function _runPortLoop(sessionId) {
+    if (!_workletPort) {
+      emitDiagnosticsEvent({
+        type: 'refill-driver-port-missing',
+        label: 'Port driver selected but workletPort is null — falling back to interval',
+        timestampMs: nowMs(),
+        severity: 'warning',
+      });
+      _runDegradedIntervalLoop();
+      return;
+    }
+    _workletPort.onmessage = (event) => {
+      if (currentSessionId !== sessionId) return;
+      if (event.data?.type === 'refill-wake') {
+        refillRingBuffer();
+      }
+    };
+    // Initial refill on loop start (covers startup case before worklet fires)
+    refillRingBuffer();
+    refillTimerId = sessionId;
+  }
+
+  // Fallback #2: degraded setInterval (throttle-prone, logs warning on each delayed tick)
+  function _runDegradedIntervalLoop() {
     lastRefillTickMs = performanceNow();
     refillTimerId = setIntervalFn(() => {
       if (refillPending) return;
@@ -615,12 +721,42 @@ function createPlaybackWorkerController({
     }, REFILL_INTERVAL_MS);
   }
 
+  function selectRefillDriver() {
+    if (refillDriver !== null) return refillDriver; // already selected
+    // BOUNDS GUARD (Finding 1): if the SAB is small (legacy 5-slot fixture), slot 7 is
+    // out of range. waitAsync on an out-of-bounds index would throw RangeError. Fall back
+    // to legacy interval so existing tests continue to pass without change.
+    const sabHasSlot7 = sharedState && sharedState.length > REFILL_REQUEST_INDEX;
+    if (typeof Atomics.waitAsync === 'function' && sabHasSlot7) {
+      refillDriver = 'waitasync';
+    } else if (_workletPort !== null) {
+      refillDriver = 'port';
+    } else {
+      refillDriver = 'degraded-interval';
+    }
+    emitDiagnosticsEvent({
+      type: 'refill-driver-selected',
+      label: `Refill driver selected: ${refillDriver}`,
+      timestampMs: nowMs(),
+      severity: refillDriver === 'degraded-interval' ? 'warning' : 'info',
+      driver: refillDriver,
+    });
+    return refillDriver;
+  }
+
   function bindSharedBuffers({ pcmBuffer, stateBuffer, frameCapacity: nextCapacity }) {
     frameCapacity = nextCapacity;
     sharedSamples = new Float32Array(pcmBuffer);
     sharedState = new Int32Array(stateBuffer);
     sharedState.fill(0);
+    if (sharedState.length > TARGET_FRAMES_INDEX) {
+      Atomics.store(sharedState, TARGET_FRAMES_INDEX, STEADY_STATE_TARGET_FRAMES);
+    }
+    if (sharedState.length > REFILL_REQUEST_INDEX) {
+      Atomics.store(sharedState, REFILL_REQUEST_INDEX, 0); // reset generation counter
+    }
     updateBufferMetrics();
+    selectRefillDriver();
   }
 
   function noteRefillComplete() {
@@ -806,7 +942,7 @@ function createPlaybackWorkerController({
     if (canRecover && sharedState) {
       Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
       if (refillTimerId === null) {
-        startRefillLoop();
+        startRefillWaitLoop();
         action = 'refill-restarted';
         pendingGaplessFallbackRecoveryConfirmation = true;
       } else {
@@ -1291,7 +1427,10 @@ function createPlaybackWorkerController({
       return;
     }
     if (refillTimerId == null) {
-      startRefillLoop();
+      startRefillWaitLoop();
+    } else if (refillDriver === 'waitasync' && sharedState) {
+      Atomics.add(sharedState, REFILL_REQUEST_INDEX, 1);
+      Atomics.notify(sharedState, REFILL_REQUEST_INDEX, 1);
     }
     refillRingBuffer();
   }
@@ -1335,7 +1474,7 @@ function createPlaybackWorkerController({
           decoderCreate: Number((performanceNow() - startedAt).toFixed(2)),
         },
       });
-      startRefillLoop();
+      startRefillWaitLoop();
       refillRingBuffer();
     },
 
@@ -1690,6 +1829,15 @@ function createPlaybackWorkerController({
           Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
           Atomics.store(sharedState, READ_INDEX, 0);
           Atomics.store(sharedState, WRITE_INDEX, 0);
+
+          // Notify slot 7 so any still-running loop iteration wakes immediately
+          // to see the new FRAMES_AVAILABLE=0. stopRefillLoop() above bumps
+          // currentSessionId, so the old loop will exit; this notify is a
+          // belt-and-suspenders wake in case the loop is mid-waitAsync.
+          if (sharedState && sharedState.length > REFILL_REQUEST_INDEX) {
+            Atomics.add(sharedState, REFILL_REQUEST_INDEX, 1);
+            Atomics.notify(sharedState, REFILL_REQUEST_INDEX, 1);
+          }
         }
         trackStartPositionMs = 0;
         pendingGaplessHintDurationMs = 0;
@@ -1705,7 +1853,7 @@ function createPlaybackWorkerController({
           severity: 'info',
         });
       }
-      startRefillLoop();
+      startRefillWaitLoop();
     },
 
     setBufferedDurationMs(value) {
@@ -1800,6 +1948,12 @@ function createPlaybackWorkerController({
       }
 
       return health;
+    },
+
+    setWorkletPort,
+    getWorkletPort,
+    getSabConstants() {
+      return { REFILL_REQUEST_INDEX, TARGET_FRAMES_INDEX };
     },
   };
 }

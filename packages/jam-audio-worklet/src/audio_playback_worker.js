@@ -66,6 +66,10 @@ export function initPlaybackWorker({
 
     try {
       switch (data.type) {
+        case 'setWorkletPort':
+          controller.setWorkletPort(data.port);
+          self.postMessage({ type: 'response', requestId });
+          return;
         case 'playTrack':
           await ensureWasm();
           controller.playTrack(data.audioBytes, {
