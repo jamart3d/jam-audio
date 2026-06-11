@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-11
+
+### Added
+- Added native decoded-frame boundary authority to `GaplessPlayer`, including seam generation and last seam position exports for JavaScript handoff coordination.
+- Added `AudioWorkletProcessor` regression coverage for seam-boundary diagnostics and double-fire prevention.
+- Expanded playback worker controller coverage for structural refill, handoff boundary, stale-duration, false-EOS, and retry behavior.
+
+### Changed
+- Reworked worklet gapless handoff authority so decoded-frame boundaries and current duration hints drive transition timing.
+- Hardened refill and boundary handoff behavior across tiny windows, hidden-tab throttling, stale duration hints, and streaming-to-gapless transitions.
+- Made seam diagnostics authoritative even when duplicate seam emissions are guarded.
+
+### Fixed
+- Prevented duplicate seam firing during gapless handoff.
+- Recovered hidden or stale false end-of-stream states instead of letting gapless suppression strand playback.
+- Used wrapping arithmetic for `seam_generation` increments and added regression coverage for lying-header seam behavior.
+
+### Verified
+- Worklet package test
+- Worklet playback worker controller test
+- Worklet audio processor test
+- Engine cargo check
+- Flutter bridge cargo check
+
 ## [0.3.8] — 2026-06-04
 
 ### Added
