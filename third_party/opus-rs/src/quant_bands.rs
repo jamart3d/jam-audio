@@ -87,6 +87,20 @@ fn loss_distortion(
     dist.min(200.0)
 }
 
+#[inline]
+fn coarse_energy_prediction_step(
+    old_energy: f32,
+    prev: f32,
+    coef: f32,
+    beta: f32,
+    qi: i32,
+) -> (f32, f32) {
+    let q = qi as f32;
+    let predicted = coef * old_energy.max(-9.0) + prev + q;
+    let next_prev = prev + q - beta * q;
+    (predicted, next_prev)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn quant_coarse_energy_impl(
     m: &CeltMode,
@@ -117,14 +131,14 @@ fn quant_coarse_energy_impl(
     for i in start..end {
         for c in 0..channels {
             let x = e_bands[c * m.nb_ebands + i];
-            let old_e_val = old_e_bands[c * m.nb_ebands + i];
-            let old_e = old_e_val.max(-9.0);
-            let f = x - coef * old_e - prev[c];
+            let old_e = old_e_bands[c * m.nb_ebands + i];
+            let clamped_old_e = old_e.max(-9.0);
+            let f = x - coef * clamped_old_e - prev[c];
 
             let mut qi = (f + 0.5).floor() as i32;
             let qi0 = qi;
 
-            let decay_bound = old_e_val.max(-28.0) - max_decay;
+            let decay_bound = old_e.max(-28.0) - max_decay;
             if qi < 0 && x < decay_bound {
                 qi += ((decay_bound - x) as i32).max(0);
                 if qi > 0 {
@@ -169,9 +183,10 @@ fn quant_coarse_energy_impl(
 
             let q = qi as f32;
             error[c * m.nb_ebands + i] = f - q;
-            let tmp = coef * old_e + prev[c] + q;
-            old_e_bands[c * m.nb_ebands + i] = tmp;
-            prev[c] = prev[c] + q - beta * q;
+            let (predicted, next_prev) =
+                coarse_energy_prediction_step(old_e, prev[c], coef, beta, qi);
+            old_e_bands[c * m.nb_ebands + i] = predicted;
+            prev[c] = next_prev;
         }
     }
 
@@ -371,14 +386,11 @@ pub fn unquant_coarse_energy(
                 qi = -1;
             }
 
-            // Clamp in-place, matching C: oldEBands[i] = MAXG(-GCONST(9.f), oldEBands[i])
-            old_e_bands[c * m.nb_ebands + i] = old_e_bands[c * m.nb_ebands + i].max(-9.0);
             let old_e = old_e_bands[c * m.nb_ebands + i];
-
-            let q = qi as f32;
-            let tmp = coef * old_e + prev[c] + q;
-            old_e_bands[c * m.nb_ebands + i] = tmp;
-            prev[c] = prev[c] + q - beta * q;
+            let (predicted, next_prev) =
+                coarse_energy_prediction_step(old_e, prev[c], coef, beta, qi);
+            old_e_bands[c * m.nb_ebands + i] = predicted;
+            prev[c] = next_prev;
         }
     }
 }
