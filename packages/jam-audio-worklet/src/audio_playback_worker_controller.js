@@ -440,7 +440,8 @@ function createPlaybackWorkerController({
       return null;
     }
     const fillPercent = frameCapacity > 0 ? (framesAvailable / frameCapacity) * 100 : 0;
-    if (fillPercent < HANDOFF_FILL_THRESHOLD_PERCENT) {
+    const activePlayerEnded = playerHasEnded(activePlayer);
+    if (fillPercent < HANDOFF_FILL_THRESHOLD_PERCENT && !activePlayerEnded) {
       if (handoffPendingUntilMs === 0) {
         handoffPendingUntilMs = nowMs() + HANDOFF_RETRY_WINDOW_MS;
       }
@@ -934,6 +935,49 @@ function createPlaybackWorkerController({
       hadActivePlayer &&
       hasKnownRemainingAudio;
 
+    // P1.8: Check if the loaded gapless next can be handed off directly BEFORE
+    // clearing gaplessPlayerNextLoaded. The original code cleared it first (bug:
+    // destroyed the loaded player reference before any handoff could be attempted).
+    if (gaplessPlayerNextLoaded && !currentTrackEndPositionHandled && sharedState) {
+      const framesAvailable = Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX);
+      // Treat recovery position as EOS boundary: set end position to current position
+      // so crossedTrackBoundary fires, then let runGaplessBoundaryHandoff do the rest.
+      const savedEndMs = currentTrackEndPositionMs;
+      currentTrackEndPositionMs = activePositionMs;
+      const handoffResult = runGaplessBoundaryHandoff(activePlayer, framesAvailable, false);
+      if (handoffResult !== null && handoffResult !== 'retry' && handoffResult !== 'unsafe') {
+        // Handoff succeeded — restart refill loop for the new track.
+        preloadHoldActive = false;
+        preloadHoldUntilMs = 0;
+        if (sharedState) Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
+        startRefillWaitLoop();
+        emitDiagnosticsEvent({
+          type: 'gapless-fallback-recovery',
+          reason: 'premature-eos-unlock',
+          action: 'handoff-succeeded',
+          hadSharedState,
+          hadActivePlayer,
+          refillLoopActiveBefore,
+          endOfStreamBefore,
+          framesAvailableBefore,
+          endOfStreamAfter: 0,
+          framesAvailableAfter: Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX),
+          currentTrackEndPositionKnown,
+          currentTrackEndPositionMs: activePositionMs,
+          activePositionMs,
+          remainingMs,
+          activePlayerEnded,
+          hasKnownRemainingAudio,
+        });
+        return;
+      }
+      // Handoff was not applicable — restore state and fall through to old recovery logic.
+      currentTrackEndPositionMs = savedEndMs;
+      currentTrackEndPositionHandled = false;
+    }
+
+    // Old recovery logic (unchanged) — only reached when gapless handoff was not available
+    // or not applicable. Now safe to clear gaplessPlayerNextLoaded.
     gaplessPlayerNextLoaded = false;
     preloadHoldActive = false;
     preloadHoldUntilMs = 0;
@@ -1003,6 +1047,47 @@ function createPlaybackWorkerController({
     if (sharedState) {
       Atomics.store(sharedState, END_OF_STREAM_INDEX, 1);
       if (Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX) === 0) {
+        // P1.8: When a gapless next track is loaded, decoder-confirmed EOS is the
+        // boundary — the file has no more bytes regardless of position arithmetic.
+        // Trigger the handoff directly rather than stopping the loop and waiting
+        // for recoverFromStaleGaplessSuppression to (mis-)handle it.
+        if (!currentTrackEndPositionHandled &&
+            (gaplessPlayerNextLoaded || pendingGaplessBytes !== null)) {
+          const activePlayer = currentPlayer();
+          const positionMs = playerPositionMs(activePlayer);
+          emitDiagnosticsEvent({
+            type: 'eos-boundary-handoff',
+            label: 'EOS triggered direct gapless handoff (decoder confirmed end)',
+            timestampMs: nowMs(),
+            severity: 'info',
+            positionMs: Math.floor(positionMs),
+            expectedEndMs: Math.floor(currentTrackEndPositionMs),
+            shortfallMs: Math.floor(currentTrackEndPositionMs - positionMs),
+          });
+          // Reuse runGaplessBoundaryHandoff: force positionMs past boundary by
+          // temporarily setting currentTrackEndPositionMs to positionMs so the
+          // crossedTrackBoundary check passes.
+          const savedEndMs = currentTrackEndPositionMs;
+          currentTrackEndPositionMs = positionMs; // EOS position IS the boundary
+          const framesAvailable = Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX);
+          const handoffResult = runGaplessBoundaryHandoff(activePlayer, framesAvailable, false);
+          if (handoffResult === null || handoffResult === 'retry' || handoffResult === 'unsafe') {
+            // Handoff was not performed (e.g. unsafe fill level) — restore end position
+            // and fall through to scheduleGaplessFallback for a second chance.
+            currentTrackEndPositionMs = savedEndMs;
+            currentTrackEndPositionHandled = false; // allow fallback recovery to retry
+            stopRefillLoop();
+            emitEnded();
+            if (!endedEmitted && (gaplessPlayerNextLoaded || pendingGaplessBytes !== null)) {
+              scheduleGaplessFallback();
+            }
+          } else {
+            // Handoff succeeded — restart refill loop for the new track.
+            stopRefillLoop();
+            startRefillWaitLoop();
+          }
+          return;
+        }
         stopRefillLoop();
         emitEnded();
         if (!endedEmitted && gaplessPlayerNextLoaded && pendingGaplessBytes === null) {

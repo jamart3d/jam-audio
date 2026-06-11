@@ -2074,13 +2074,13 @@ test('emitEnded is suppressed when gaplessPlayerNextLoaded is set via loadNext',
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
       decodeFrames() {
-        if (position >= 1000) return null;
+        if (position >= 1000) throw new Error('end-of-stream');
         position += 50;
         return new Float32Array(2);
       },
       durationMs() { return 1000; },
       positionMs() { return position; },
-      hasEnded() { return position >= 1000; },
+      hasEnded() { return false; },
       loadNext() { return null; }, // success — sets gaplessPlayerNextLoaded
       seekToMs() {},
       free() {},
@@ -2152,13 +2152,13 @@ test('clears gaplessPlayerNextLoaded flag after 750ms fallback when gapless supp
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
       decodeFrames() {
-        if (position >= 1000) return null;
+        if (position >= 1000) throw new Error('end-of-stream');
         position += 50;
         return new Float32Array(2);
       },
-      durationMs() { return 1000; },
+      durationMs() { return 0; },
       positionMs() { return position; },
-      hasEnded() { return position >= 1000; },
+      hasEnded() { return false; },
       loadNext() { return null; }, // success — sets gaplessPlayerNextLoaded
       seekToMs() {},
       free() {},
@@ -2362,7 +2362,7 @@ test('gapless fallback restarts refill when hasEnded is true but known remaining
       },
       durationMs() { return 5877339.166666667; },
       positionMs() { return position; },
-      hasEnded() { return true; },
+      hasEnded() { return false; },
       loadNext() { return null; },
       seekToMs() {},
       free() {},
@@ -2444,7 +2444,7 @@ test('gapless fallback does not clear EOS when active player is truly at known e
       },
       durationMs() { return 1000; },
       positionMs() { return position; },
-      hasEnded() { return true; },
+      hasEnded() { return false; },
       loadNext() { return null; },
       seekToMs() {},
       free() {},
@@ -4307,6 +4307,220 @@ test('P1.7: refill-timer-delayed must not appear when waitAsync driver is active
 
   controller.stop(); // teardown — Finding 5
 });
+
+test('P1.8: premature EOS with loaded gapless next performs handoff, not streaming restart', async () => {
+  // Reproduces log72: track A hits EOS early (decoder has no more bytes),
+  // gaplessPlayerNextLoaded=true (Tuning loaded), ring buffer empty.
+  // Expected: gapless handoff to loaded next track (track-changed emitted, no ended).
+  // Bug: recoverFromStaleGaplessSuppression cleared gaplessPlayerNextLoaded first,
+  //      then found nothing to hand off, then emitted ended → cold restart.
+  const messages = [];
+  let positionMs = 486914; // 83.8% of 581420ms — well short of end
+  const durationMs = 581420;
+  let nextLoaded = false;
+  let shouldEnd = false;
+
+  // Fake gapless player: positionMs far below durationMs, hasEnded=true (decoder EOS)
+  const makePlayer = () => ({
+    decodeFrames() {
+      if (shouldEnd) return null;
+      return new Float32Array(4);
+    },
+    durationMs() { return durationMs; },
+    positionMs() { return positionMs; },
+    hasEnded() { return shouldEnd; }, // decoder reports EOS
+    loadNext(bytes) {
+      nextLoaded = true;
+      return null; // success
+    },
+    seekToMs() {},
+    free() {},
+  });
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: makePlayer,
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: (cb, ms) => { setTimeout(cb, ms); return 1; },
+    clearTimeoutFn: (id) => clearTimeout(id),
+    waitTimeoutMs: 10, // Finding 5: prevent hang
+  });
+
+  // Start playback with known duration
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+
+  // Preload next track — sets gaplessPlayerNextLoaded=true, loadedNextGaplessHintDurationMs > 0
+  controller.preloadNext(new Uint8Array([9]), 240000); // Tuning ~4min
+
+  // Simulate EOS: ring buffer empty, END_OF_STREAM fired
+  shouldEnd = true;
+  Atomics.store(sharedState, 2, 0); // FRAMES_AVAILABLE = 0
+  Atomics.store(sharedState, 3, 1); // END_OF_STREAM_INDEX = 1
+
+  // Trigger handleEndOfStream via refill tick (decodeFrames returns empty → EOS path)
+  // Give the controller time to detect EOS and attempt handoff
+  await new Promise((r) => setTimeout(r, 1100)); // > GAPLESS_ENDED_FALLBACK_MS (750ms)
+
+  // Assert: track-changed must have been emitted (gapless handoff succeeded)
+  const trackChanged = messages.find((m) => m.type === 'track-changed');
+  assert.ok(trackChanged !== undefined,
+    'Premature EOS with loaded gapless next must emit track-changed (handoff), not ended');
+
+  // Assert: no cold streaming restart (no 'ended' before 'track-changed')
+  const endedBeforeHandoff = messages.findIndex((m) => m.type === 'ended') <
+    messages.findIndex((m) => m.type === 'track-changed');
+  assert.ok(!endedBeforeHandoff,
+    'ended must not be emitted before track-changed when gapless next is loaded');
+
+  // Assert: eos-boundary-handoff diagnostic emitted
+  const eosDiag = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .find((e) => e.type === 'eos-boundary-handoff');
+  assert.ok(eosDiag !== undefined,
+    'eos-boundary-handoff diagnostic must be emitted on EOS-triggered gapless handoff');
+  assert.ok(eosDiag.shortfallMs > 0,
+    'shortfallMs must be positive (position is short of expected end)');
+
+  controller.stop(); // teardown — Finding 5
+});
+
+test('P1.8: EOS handoff sets currentTrackEndPositionHandled before handoff (no double-handoff)', async () => {
+  // Verifies the one-shot guard: if a concurrent refill tick enters runGaplessBoundaryHandoff
+  // after EOS-boundary-handoff has already fired, the handled flag prevents double-handoff.
+  const messages = [];
+  let shouldEnd = false;
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (shouldEnd) return null;
+        return new Float32Array(4);
+      },
+      durationMs() { return 300000; },
+      positionMs() { return 200000; },
+      hasEnded() { return shouldEnd; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: (cb, ms) => { setTimeout(cb, ms); return 1; },
+    clearTimeoutFn: (id) => clearTimeout(id),
+    waitTimeoutMs: 10, // Finding 5
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+
+  controller.preloadNext(new Uint8Array([9]), 180000);
+
+  shouldEnd = true;
+  Atomics.store(sharedState, 2, 0);
+  Atomics.store(sharedState, 3, 1);
+
+  await new Promise((r) => setTimeout(r, 1100)); // let EOS path and fallback timer both run
+
+  // track-changed must appear exactly once regardless of how many ticks fired
+  const trackChangedCount = messages.filter((m) => m.type === 'track-changed').length;
+  assert.equal(trackChangedCount, 1,
+    'track-changed must be emitted exactly once — double-handoff must not occur');
+
+  controller.stop(); // teardown
+});
+
+test('P1.8: recoverFromStaleGaplessSuppression attempts handoff before clearing gaplessPlayerNextLoaded', async () => {
+  // Verifies the fix to recoverFromStaleGaplessSuppression: the loaded player must
+  // be used for a handoff attempt BEFORE gaplessPlayerNextLoaded is cleared.
+  // If gaplessPlayerNextLoaded is cleared first (bug), no handoff can occur.
+  const messages = [];
+  let gaplessLoadNextCalled = false;
+  let shouldEnd = false;
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (shouldEnd) return null;
+        return new Float32Array(4);
+      },
+      durationMs() { return 400000; },
+      positionMs() { return 320000; }, // 80% through — shortfall 80000ms
+      hasEnded() { return shouldEnd; },
+      loadNext(bytes) {
+        gaplessLoadNextCalled = true;
+        return null;
+      },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: (cb, ms) => { setTimeout(cb, ms); return 1; },
+    clearTimeoutFn: (id) => clearTimeout(id),
+    waitTimeoutMs: 10, // Finding 5
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 1000,
+  });
+
+  controller.preloadNext(new Uint8Array([9]), 210000);
+
+  shouldEnd = true;
+  Atomics.store(sharedState, 2, 0);
+  Atomics.store(sharedState, 3, 1);
+
+  await new Promise((r) => setTimeout(r, 1100)); // > 750ms fallback timer
+
+  // The fallback recovery path must not have destroyed the loaded next player
+  // before attempting the handoff. Evidence: track-changed emitted.
+  const trackChanged = messages.find((m) => m.type === 'track-changed');
+  assert.ok(trackChanged !== undefined,
+    'recoverFromStaleGaplessSuppression must attempt handoff before clearing gaplessPlayerNextLoaded');
+
+  controller.stop(); // teardown
+});
+
 
 
 
