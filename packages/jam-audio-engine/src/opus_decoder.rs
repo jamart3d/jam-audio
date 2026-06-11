@@ -38,11 +38,7 @@ mod pure_rust {
 
     impl Drop for OpusDecoder {
         fn drop(&mut self) {
-            unsafe {
-                if !self.decoder.is_null() {
-                    opus_decoder_destroy(self.decoder);
-                }
-            }
+            destroy_decoder(self.decoder);
         }
     }
 
@@ -80,8 +76,25 @@ mod pure_rust {
         Ok(AudioBuffer::new(samples_per_channel, spec))
     }
 
+    fn destroy_decoder(decoder: *mut RawOpusDecoder) {
+        // SAFETY: `decoder` either comes from `opus_decoder_create` or is null.
+        // `opus_decoder_destroy` accepts null-checkable ownership and must run
+        // exactly once for each successful create.
+        unsafe {
+            if !decoder.is_null() {
+                opus_decoder_destroy(decoder);
+            }
+        }
+    }
+
     fn make_decoder(sample_rate: u32, num_channels: usize) -> Result<*mut RawOpusDecoder> {
+        if !(1..=2).contains(&num_channels) {
+            return Err(Error::DecodeError("opus: invalid channel count"));
+        }
+
         let mut err = 0;
+        // SAFETY: `sample_rate` and `num_channels` are plain integer inputs and
+        // `&mut err` points to valid writable memory for the duration of the call.
         let decoder =
             unsafe { opus_decoder_create(sample_rate as i32, num_channels as i32, &mut err) };
         if decoder.is_null() || err != 0 {
@@ -135,11 +148,7 @@ mod pure_rust {
 
         fn reset(&mut self) {
             if let Ok(decoder) = make_decoder(self.sample_rate, self.num_channels) {
-                unsafe {
-                    if !self.decoder.is_null() {
-                        opus_decoder_destroy(self.decoder);
-                    }
-                }
+                destroy_decoder(self.decoder);
                 self.decoder = decoder;
                 self.buf.clear();
             }
@@ -243,6 +252,12 @@ mod pure_rust {
             for _ in 0..16 {
                 decoder.reset();
             }
+        }
+
+        #[test]
+        fn make_decoder_rejects_invalid_channel_count() {
+            let err = make_decoder(48_000, 3).unwrap_err();
+            assert!(matches!(err, Error::DecodeError("opus: invalid channel count")));
         }
     }
 }
