@@ -29,6 +29,25 @@ struct StereoResampler {
     chunk_frames: usize,
 }
 
+fn extend_interleaved_stereo(out: &mut Vec<f32>, left: &[f32], right: &[f32]) {
+    let frames = left.len().min(right.len());
+    let start = out.len();
+    out.resize(start + frames * 2, 0.0);
+
+    for index in 0..frames {
+        let base = start + index * 2;
+        out[base] = left[index];
+        out[base + 1] = right[index];
+    }
+}
+
+fn extend_first_two_channels(out: &mut Vec<f32>, samples: &[f32], source_channels: usize) {
+    out.reserve((samples.len() / source_channels) * 2);
+    for frame in samples.chunks_exact(source_channels) {
+        out.extend_from_slice(&frame[..2]);
+    }
+}
+
 impl StereoResampler {
     fn new(source_rate: u32, target_rate: u32, chunk_frames: usize) -> Self {
         let ratio = target_rate as f64 / source_rate as f64;
@@ -84,12 +103,7 @@ impl StereoResampler {
         let r: Vec<f32> = self.pending[1].drain(..self.chunk_frames).collect();
         let in_buf = [l, r];
         if let Ok(resampled) = self.inner.process(&in_buf, None) {
-            let frames = resampled[0].len();
-            out.reserve(frames * 2);
-            for i in 0..frames {
-                out.push(resampled[0][i]);
-                out.push(resampled[1][i]);
-            }
+            extend_interleaved_stereo(out, &resampled[0], &resampled[1]);
         }
     }
 }
@@ -540,12 +554,11 @@ impl StreamingDecoder {
                 self.stereo_scratch.extend_from_slice(samples);
             }
             _ => {
-                self.stereo_scratch
-                    .reserve((samples.len() / source_channels as usize) * 2);
-                for frame in samples.chunks_exact(source_channels as usize) {
-                    self.stereo_scratch.push(frame[0]);
-                    self.stereo_scratch.push(frame[1]);
-                }
+                extend_first_two_channels(
+                    &mut self.stereo_scratch,
+                    samples,
+                    source_channels as usize,
+                );
             }
         }
 
@@ -1537,4 +1550,19 @@ mod tests {
         let ms = duration_ms_from(Some(tb), Some(44100));
         assert!((ms - 1000.0).abs() < 0.01, "expected ~1000ms, got {ms}");
     }
+
+    #[test]
+    fn extend_interleaved_stereo_preserves_left_right_order() {
+        let mut out = vec![9.0];
+        extend_interleaved_stereo(&mut out, &[1.0, 3.0], &[2.0, 4.0]);
+        assert_eq!(out, vec![9.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn extend_first_two_channels_discards_extra_channels() {
+        let mut out = Vec::new();
+        extend_first_two_channels(&mut out, &[1.0, 2.0, 9.0, 3.0, 4.0, 8.0], 3);
+        assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0]);
+    }
 }
+
