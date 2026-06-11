@@ -111,7 +111,7 @@ pub struct CoarseEnergyBandTrace {
     pub next_prev: f32,
 }
 
-#[cfg(test)]
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnergyTraceStage {
     Coarse,
@@ -119,7 +119,7 @@ pub enum EnergyTraceStage {
     Finalise,
 }
 
-#[cfg(test)]
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct EnergyStageTrace {
     pub stage: EnergyTraceStage,
@@ -131,7 +131,7 @@ pub struct EnergyStageTrace {
     pub decoder_error: Option<f32>,
 }
 
-#[cfg(test)]
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct EnergyRoundtripTrace {
     pub stages: Vec<EnergyStageTrace>,
@@ -712,7 +712,6 @@ pub fn trace_unquant_coarse_energy_for_test(
     trace
 }
 
-#[cfg(test)]
 fn append_energy_stage_trace(
     out: &mut Vec<EnergyStageTrace>,
     stage: EnergyTraceStage,
@@ -741,7 +740,6 @@ fn append_energy_stage_trace(
     }
 }
 
-#[cfg(test)]
 fn first_energy_divergence(stages: &[EnergyStageTrace]) -> Option<EnergyStageTrace> {
     stages
         .iter()
@@ -749,7 +747,7 @@ fn first_energy_divergence(stages: &[EnergyStageTrace]) -> Option<EnergyStageTra
         .cloned()
 }
 
-#[cfg(test)]
+#[doc(hidden)]
 pub fn trace_full_energy_roundtrip_for_test(
     mode: &CeltMode,
     start: usize,

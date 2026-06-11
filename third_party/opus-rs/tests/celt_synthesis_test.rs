@@ -131,7 +131,10 @@ fn celt_synthesis_chain_bypass() {
 #[test]
 fn celt_energy_roundtrip_only() {
     use opus_rs::bands::{amp2log2, compute_band_energies, denormalise_bands, normalise_bands};
-    use opus_rs::quant_bands::{quant_coarse_energy, quant_energy_finalise, quant_fine_energy};
+    use opus_rs::quant_bands::{
+        quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
+        trace_full_energy_roundtrip_for_test,
+    };
     use opus_rs::range_coder::RangeCoder;
     use opus_rs::rate::clt_compute_allocation;
 
@@ -286,6 +289,20 @@ fn celt_energy_roundtrip_only() {
             0,
             nb_ebands as i32 - 1,
         );
+
+        let fine_priority_snapshot = fine_priority.clone();
+        let fine_quant_snapshot = ebits.clone();
+        let trace = trace_full_energy_roundtrip_for_test(
+            mode,
+            0,
+            nb_ebands,
+            &band_log_e,
+            &fine_quant_snapshot,
+            &fine_priority_snapshot,
+            channels,
+            lm,
+        );
+        eprintln!("Energy trace first divergence: {:?}", trace.first_divergence);
 
         quant_fine_energy(
             mode,
