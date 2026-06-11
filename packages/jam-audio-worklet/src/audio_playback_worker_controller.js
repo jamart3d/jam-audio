@@ -29,6 +29,10 @@ import {
   playerHasEnded,
   playerPositionMs,
 } from './playback_worker_controller_runtime.js';
+import {
+  startPortLoop,
+  nudgeWaitAsyncState,
+} from './playback_worker_controller_refill.js';
 
 
 const READ_INDEX = 0;
@@ -716,8 +720,12 @@ function createPlaybackWorkerController({
 
   // Fallback #1: MessagePort from worklet
   function _runPortLoop(sessionId) {
-    const port = getWorkletPort();
-    if (!port) {
+    const success = startPortLoop({
+      getWorkletPort,
+      refillRingBuffer,
+      shouldKeepRunning: () => sessionId === currentSessionId,
+    });
+    if (!success) {
       emitDiagnosticsEvent({
         type: 'refill-driver-port-missing',
         label: 'Port driver selected but workletPort is null — falling back to interval',
@@ -727,12 +735,6 @@ function createPlaybackWorkerController({
       _runDegradedIntervalLoop();
       return;
     }
-    port.onmessage = (event) => {
-      if (currentSessionId !== sessionId) return;
-      if (event.data?.type === 'refill-wake') {
-        refillRingBuffer();
-      }
-    };
     // Initial refill on loop start (covers startup case before worklet fires)
     refillRingBuffer();
     refillTimerId = sessionId;
@@ -1565,8 +1567,7 @@ function createPlaybackWorkerController({
     if (refillTimerId == null) {
       startRefillWaitLoop();
     } else if (refillDriver === 'waitasync' && sharedState) {
-      Atomics.add(sharedState, REFILL_REQUEST_INDEX, 1);
-      Atomics.notify(sharedState, REFILL_REQUEST_INDEX, 1);
+      nudgeWaitAsyncState(sharedState, REFILL_REQUEST_INDEX);
     }
     refillRingBuffer();
   }

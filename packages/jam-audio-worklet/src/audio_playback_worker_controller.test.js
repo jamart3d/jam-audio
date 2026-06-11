@@ -4966,6 +4966,27 @@ test('P1.8: recoverFromStaleGaplessSuppression performs handoff before clearing 
   controller.stop(); // teardown — Finding 5
 });
 
+test('setWorkletPort still allows port-driven refill startup after helper extraction', () => {
+  let readyPort = null;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => null,
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: () => {},
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    onWorkletPortReady: (port) => { readyPort = port; },
+  });
+
+  controller.setWorkletPort('port-2');
+  assert.equal(controller.getWorkletPort(), 'port-2');
+  assert.equal(readyPort, 'port-2');
+});
+
 
 
 
