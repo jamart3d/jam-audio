@@ -23,6 +23,13 @@ import {
   createBaseWorkerDiagnostics,
   createSharedPlaybackWorkerControllerCore,
 } from '../shared/playback_worker_controller_core.js';
+import {
+  createWorkletPortState,
+  currentPlayerFrom,
+  playerHasEnded,
+  playerPositionMs,
+} from './playback_worker_controller_runtime.js';
+
 
 const READ_INDEX = 0;
 const WRITE_INDEX = 1;
@@ -65,19 +72,13 @@ function createPlaybackWorkerController({
   onWorkletPortReady = null,   // S2: callback so tests can verify the port was received
   waitTimeoutMs = 1000,        // Finding 5: injected so tests use 10ms and never hang
 }) {
-  let _workletPort = workletPort;
-  if (_workletPort && typeof onWorkletPortReady === 'function') {
-    onWorkletPortReady(_workletPort);
-  }
+  const workletPortState = createWorkletPortState({
+    initialPort: workletPort,
+    onWorkletPortReady,
+  });
 
-  function getWorkletPort() { return _workletPort; }
-
-  function setWorkletPort(port) {
-    _workletPort = port;
-    if (typeof onWorkletPortReady === 'function') {
-      onWorkletPortReady(_workletPort);
-    }
-  }
+  const getWorkletPort = workletPortState.getWorkletPort;
+  const setWorkletPort = workletPortState.setWorkletPort;
 
   let sharedSamples = null;
   let sharedState = null;
@@ -201,17 +202,7 @@ function createPlaybackWorkerController({
   }
 
   function currentPlayer() {
-    return windowedPlayer ?? streamingPlayer ?? player;
-  }
-
-  function playerHasEnded(candidatePlayer) {
-    return typeof candidatePlayer?.hasEnded === 'function' && candidatePlayer.hasEnded();
-  }
-
-  function playerPositionMs(candidatePlayer) {
-    return typeof candidatePlayer?.positionMs === 'function'
-      ? candidatePlayer.positionMs()
-      : 0;
+    return currentPlayerFrom({ windowedPlayer, streamingPlayer, player });
   }
 
   let isBelowLowWaterMark = false;
@@ -725,7 +716,8 @@ function createPlaybackWorkerController({
 
   // Fallback #1: MessagePort from worklet
   function _runPortLoop(sessionId) {
-    if (!_workletPort) {
+    const port = getWorkletPort();
+    if (!port) {
       emitDiagnosticsEvent({
         type: 'refill-driver-port-missing',
         label: 'Port driver selected but workletPort is null — falling back to interval',
@@ -735,7 +727,7 @@ function createPlaybackWorkerController({
       _runDegradedIntervalLoop();
       return;
     }
-    _workletPort.onmessage = (event) => {
+    port.onmessage = (event) => {
       if (currentSessionId !== sessionId) return;
       if (event.data?.type === 'refill-wake') {
         refillRingBuffer();
@@ -789,7 +781,7 @@ function createPlaybackWorkerController({
     const sabHasSlot7 = sharedState && sharedState.length > REFILL_REQUEST_INDEX;
     if (typeof Atomics.waitAsync === 'function' && sabHasSlot7) {
       refillDriver = 'waitasync';
-    } else if (_workletPort !== null) {
+    } else if (getWorkletPort() !== null) {
       refillDriver = 'port';
     } else {
       refillDriver = 'degraded-interval';
