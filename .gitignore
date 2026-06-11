@@ -18,6 +18,7 @@
 docs/
 reports/
 plans/
+.worktrees/
 
 # OS/IDE
 .DS_Store
