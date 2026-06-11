@@ -4,6 +4,8 @@ import {
   pushEvent,
   pushHistoryPoint,
 } from './audio_diagnostics_state.js';
+import { createBridgeSessionState } from './audio_bridge_session.js';
+
 
 export function createJamAudioBridge({
   wasmModuleLoader,
@@ -118,66 +120,43 @@ export function createJamAudioBridge({
     return sessionGeneration === playbackSessionGeneration;
   }
 
-  function saveSessionMetadataToLocalStorage() {
-    try {
-      if (typeof window === 'undefined' || !window.localStorage) return;
-      const storage = window.localStorage;
-      if (!activeTrackId) return;
+  const sessionState = createBridgeSessionState({
+    storage: typeof window !== 'undefined' ? window.localStorage : null,
+    resetProcessorPosition: () => {
+      diagnosticsState.positionMs = 0;
+      diagnosticsState.decodedPositionMs = 0;
+      processorNode?.port.postMessage({ type: 'reset_position' });
+    },
+  });
 
-      storage.setItem('jamdisc-session-track-id', activeTrackId);
-      storage.setItem('jamdisc-session-track-title', activeTrackTitle || '');
-      const posMs = diagnosticsState.positionMs || 0;
-      storage.setItem('jamdisc-session-position-ms', posMs.toString());
-      storage.setItem('jamdisc-session-track-index', activeTrackIndex.toString());
-      storage.setItem('jamdisc-session-has-queue', (queueTrackIds && queueTrackIds.length > 0).toString());
-      storage.setItem('jamdisc-session-timestamp', Date.now().toString());
-    } catch (e) {
-      console.error('[audio_bridge] Failed to save session to localStorage from JS:', e);
-    }
-  }
+  const saveSessionMetadataToLocalStorage = () => {
+    sessionState.setSessionQueue(queueTrackIds, activeTrackIndex);
+    sessionState.setPositionMs(diagnosticsState.positionMs || 0);
+    sessionState.setDecodedPositionMs(diagnosticsState.decodedPositionMs || 0);
+    sessionState.setActiveTrackTitle(activeTrackTitle);
+    sessionState.saveSessionMetadataToLocalStorage();
+  };
 
-  function clearSessionMetadataFromLocalStorage() {
-    try {
-      if (typeof window === 'undefined' || !window.localStorage) return;
-      const storage = window.localStorage;
-      storage.removeItem('jamdisc-session-track-id');
-      storage.removeItem('jamdisc-session-track-title');
-      storage.removeItem('jamdisc-session-position-ms');
-      storage.removeItem('jamdisc-session-track-index');
-      storage.removeItem('jamdisc-session-has-queue');
-      storage.removeItem('jamdisc-session-timestamp');
-    } catch (e) {
-      console.error('[audio_bridge] Failed to clear session metadata from localStorage:', e);
-    }
-  }
+  const clearSessionMetadataFromLocalStorage = () => {
+    sessionState.clearSessionMetadataFromLocalStorage();
+  };
 
-  function setSessionQueue(trackIds, currentIndex) {
-    const oldTrackId = activeTrackId;
+  const setSessionQueue = (trackIds, currentIndex) => {
+    sessionState.setSessionQueue(trackIds, currentIndex);
+    const snap = sessionState.getPlaybackSessionSnapshot();
+    activeTrackIndex = snap.activeTrackIndex;
+    activeTrackId = snap.activeTrackId;
     queueTrackIds = trackIds || [];
-    activeTrackIndex = currentIndex || 0;
-    if (queueTrackIds.length > 0 && activeTrackIndex >= 0 && activeTrackIndex < queueTrackIds.length) {
-      activeTrackId = queueTrackIds[activeTrackIndex];
-      if (activeTrackId !== oldTrackId) {
-        diagnosticsState.positionMs = 0;
-        diagnosticsState.decodedPositionMs = 0;
-        processorNode?.port.postMessage({ type: 'reset_position' });
-      }
-      saveSessionMetadataToLocalStorage();
-    } else {
-      activeTrackId = null;
-      clearSessionMetadataFromLocalStorage();
-    }
-  }
+  };
 
-  function getPlaybackSessionSnapshot() {
-    return {
-      activeTrackIndex,
-      activeTrackId,
-      positionMs: diagnosticsState.positionMs || 0,
-      decodedPositionMs: diagnosticsState.decodedPositionMs || 0,
-      queueLength: queueTrackIds ? queueTrackIds.length : 0,
-    };
-  }
+  const getPlaybackSessionSnapshot = () => {
+    sessionState.setSessionQueue(queueTrackIds, activeTrackIndex);
+    sessionState.setPositionMs(diagnosticsState.positionMs || 0);
+    sessionState.setDecodedPositionMs(diagnosticsState.decodedPositionMs || 0);
+    sessionState.setActiveTrackTitle(activeTrackTitle);
+    return sessionState.getPlaybackSessionSnapshot();
+  };
+
 
   const isAndroidTransport = /Android/i.test(navigator.userAgent ?? '');
 
