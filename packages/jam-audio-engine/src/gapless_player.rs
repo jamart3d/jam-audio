@@ -27,6 +27,8 @@ pub struct GaplessPlayer {
     target_sample_rate: u32,
     ended: bool,
     pending_skip_frames: u64,
+    seam_generation: u32,
+    last_seam_position_ms: f64,
 }
 
 impl GaplessPlayer {
@@ -44,6 +46,8 @@ impl GaplessPlayer {
             target_sample_rate,
             ended: false,
             pending_skip_frames: 0,
+            seam_generation: 0,
+            last_seam_position_ms: 0.0,
         })
     }
 
@@ -116,6 +120,9 @@ impl GaplessPlayer {
                     if let Some(next) = self.next.take() {
                         self.pending_skip_frames = next.encoder_delay_frames();
                         self.active = next;
+                        self.seam_generation += 1;
+                        let seam_frames = self.total_frames_decoded + (out.len() / 2) as u64;
+                        self.last_seam_position_ms = seam_frames as f64 * 1000.0 / self.target_sample_rate as f64;
                     } else {
                         self.ended = true;
                         break;
@@ -156,6 +163,14 @@ impl GaplessPlayer {
 
     pub fn has_ended(&self) -> bool {
         self.ended
+    }
+
+    pub fn seam_generation(&self) -> u32 {
+        self.seam_generation
+    }
+
+    pub fn last_seam_position_ms(&self) -> f64 {
+        self.last_seam_position_ms
     }
 
     pub fn clear_next(&mut self) {
@@ -422,5 +437,43 @@ mod tests {
             0,
             "seek should clear residual"
         );
+    }
+
+    #[test]
+    fn seam_generation_increments_at_actual_pcm_end_not_declared_duration() {
+        let wav1 = make_wav(1000);
+        let wav2 = make_wav(1000);
+        let mut player = GaplessPlayer::new(wav1, DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
+        player.load_next(wav2).unwrap();
+
+        assert_eq!(player.seam_generation, 0);
+        assert_eq!(player.last_seam_position_ms, 0.0);
+
+        // Decode in small chunks until seam_generation increments
+        let mut seam_detected = false;
+
+        for _ in 0..20 {
+            let frames = player.decode_frames(100).unwrap();
+            if frames.is_empty() {
+                break;
+            }
+
+            if player.seam_generation > 0 {
+                seam_detected = true;
+                assert_eq!(player.seam_generation, 1);
+                assert!(player.last_seam_position_ms > 0.0);
+                let expected_seam_pos_min = 20.0;
+                let expected_seam_pos_max = 30.0;
+                assert!(
+                    player.last_seam_position_ms >= expected_seam_pos_min
+                        && player.last_seam_position_ms <= expected_seam_pos_max,
+                    "last_seam_position_ms {} was outside expected range",
+                    player.last_seam_position_ms
+                );
+                break;
+            }
+        }
+
+        assert!(seam_detected, "Should have detected a seam transition");
     }
 }

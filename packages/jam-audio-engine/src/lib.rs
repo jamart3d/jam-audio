@@ -98,6 +98,16 @@ impl WasmGaplessPlayer {
         self.inner.has_ended()
     }
 
+    #[wasm_bindgen(js_name = seamGeneration)]
+    pub fn seam_generation(&self) -> u32 {
+        self.inner.seam_generation()
+    }
+
+    #[wasm_bindgen(js_name = lastSeamPositionMs)]
+    pub fn last_seam_position_ms(&self) -> f64 {
+        self.inner.last_seam_position_ms()
+    }
+
     #[wasm_bindgen(js_name = clearNext)]
     pub fn clear_next(&mut self) {
         self.inner.clear_next();

@@ -121,6 +121,7 @@ function createPlaybackWorkerController({
   let currentSessionId = 0;
   let diagnostics = createWorkerDiagnostics();
 
+  let lastSeamGeneration = 0;
   let pendingGaplessBytes = null;
   let gaplessPlayerNextLoaded = false;
   let gaplessEndedFallbackTimer = null;
@@ -328,6 +329,7 @@ function createPlaybackWorkerController({
     pendingGaplessSampleRate = 0;
     gaplessPlayerNextLoaded = false;
     pendingGaplessFallbackRecoveryConfirmation = false;
+    lastSeamGeneration = 0;
     currentSessionId++;
   }
 
@@ -335,6 +337,40 @@ function createPlaybackWorkerController({
     currentTrackEndPositionMs = durationMs > 0 ? durationMs : 0;
     currentTrackEndPositionKnown = isKnown;
     currentTrackEndPositionHandled = false;
+  }
+
+  function checkSeamSignal(activePlayer) {
+    if (!activePlayer || activePlayer === streamingPlayer || activePlayer === windowedPlayer || typeof activePlayer.seamGeneration !== 'function') {
+      return false;
+    }
+    const gen = activePlayer.seamGeneration();
+    if (gen < lastSeamGeneration) {
+      lastSeamGeneration = gen;
+    }
+    if (gen <= lastSeamGeneration) return false;
+
+    // New seam detected.
+    lastSeamGeneration = gen;
+    const seamPositionMs = activePlayer.lastSeamPositionMs();
+    const prevEndPositionMs = currentTrackEndPositionMs;
+
+    // Only override if the seam is meaningfully earlier than the metadata boundary.
+    // If they are within TRACK_HANDOFF_TOLERANCE_MS, the existing arithmetic already
+    // handles it — no need for seam-boundary-handoff diagnostic.
+    const DRIFT_TOLERANCE_MS = 500;
+    if (prevEndPositionMs - seamPositionMs > DRIFT_TOLERANCE_MS) {
+      currentTrackEndPositionMs = seamPositionMs;
+      emitDiagnosticsEvent({
+        type: 'seam-boundary-handoff',
+        label: 'Seam signal superseded metadata boundary',
+        timestampMs: nowMs(),
+        severity: 'info',
+        seamPositionMs,
+        metadataBoundaryMs: prevEndPositionMs,
+        headerDriftMs: prevEndPositionMs - seamPositionMs,
+      });
+    }
+    return true;
   }
 
   function currentBoundaryDurationMs() {
@@ -430,12 +466,30 @@ function createPlaybackWorkerController({
         _pendingHandoffBasePositionMs = -1;
       }
     }
-    if (!currentTrackEndPositionKnown || currentTrackEndPositionHandled) {
-      return null;
+    let crossedTrackBoundary = false;
+    let positionMs = activePlayer.positionMs();
+
+    const hasSeamAPI = typeof activePlayer.seamGeneration === 'function' &&
+                       typeof activePlayer.lastSeamPositionMs === 'function';
+
+    if (hasSeamAPI) {
+      const isSeam = checkSeamSignal(activePlayer);
+      if (isSeam) {
+        crossedTrackBoundary = true;
+        positionMs = activePlayer.lastSeamPositionMs();
+      } else if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
+        crossedTrackBoundary =
+          positionMs >=
+          currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+      }
+    } else {
+      if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
+        crossedTrackBoundary =
+          positionMs >=
+          currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+      }
     }
-    const positionMs = activePlayer.positionMs();
-    const crossedTrackBoundary =
-      positionMs >= currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+
     if (!crossedTrackBoundary) {
       return null;
     }
