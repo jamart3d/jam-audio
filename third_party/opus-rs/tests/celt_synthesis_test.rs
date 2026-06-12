@@ -240,6 +240,11 @@ fn celt_energy_roundtrip_only() {
             lm,
             n_bytes,
         );
+        assert!(
+            allocation.ebits[nb_ebands - 2] > 1 || allocation.ebits[nb_ebands - 1] > 1,
+            "high-distortion tail bands are starved: ebits={:?}",
+            allocation.ebits
+        );
         eprintln!(
             "Allocation snapshot: coded_bands={} balance={} ebits={:?} fine_priority={:?}",
             allocation.coded_bands,
