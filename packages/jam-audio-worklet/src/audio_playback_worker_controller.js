@@ -1143,7 +1143,14 @@ function createPlaybackWorkerController({
         }
         stopRefillLoop();
         emitEnded();
-        if (!endedEmitted && gaplessPlayerNextLoaded && pendingGaplessBytes === null) {
+        // Fix B (log77): schedule a fallback window whenever ended has not yet
+        // been emitted, regardless of whether a gapless signal has arrived yet.
+        // Previously the guard required gaplessPlayerNextLoaded===true, so a
+        // truncated stream with no signal present never scheduled the fallback —
+        // the 500 ms emitEnded hold fired late and health_recovery restarted the
+        // track. The interior check inside scheduleGaplessFallback still guards
+        // what actually happens when the timer fires.
+        if (!endedEmitted) {
           scheduleGaplessFallback();
         }
       }
