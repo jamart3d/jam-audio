@@ -209,3 +209,51 @@ That plan should:
 - The next targeted investigation should move to the real PVQ / band-shape path under:
   - `third_party/opus-rs/src/bands.rs`
   - supporting VQ helpers it calls during `quant_all_bands(...)`
+
+**Track 4F Real PVQ Shape Follow-Up**
+
+- Added a real PVQ / band-shape trace surface in `third_party/opus-rs/src/bands.rs`.
+- Added high-bitrate regression evidence in:
+  - `third_party/opus-rs/tests/celt_pvq_shape_trace.rs`
+  - `third_party/opus-rs/tests/celt_loopback_test.rs`
+- First high-bitrate trace showed a hard mismatch between the encoded pulse vector and the decoded pulse vector on the worst band:
+  - `y_enc=[-1, 1, -3, 3, -5, 6, -8, 9]`
+  - `y_dec=[9, -8, 6, -5, 3, -3, 1, -1]`
+- Root cause was in `third_party/opus-rs/src/pvq.rs`:
+  - `cwrsi(...)` was reconstructing decoded pulses in reverse order for this real CELT path.
+- Bounded production fix:
+  - changed `cwrsi(...)` to write decoded magnitudes back in forward vector order instead of reversed order
+
+**Fresh Verification After the PVQ Fix**
+
+- `cargo test -p opus-rs celt_traced_band_pulse_coding_roundtrip_matches -- --nocapture`
+  - PASS
+- `cargo test -p opus-rs test_pvq_sync -- --nocapture`
+  - PASS
+- `cargo test -p opus-rs celt_traced_band_direct_pvq_roundtrip_matches -- --nocapture`
+  - PASS
+- `cargo test -p opus-rs test_celt_loopback -- --nocapture`
+  - PASS at `2.02 dB` best SNR, up from `0.04 dB`
+- `cargo test -p opus-rs test_celt_realistic_bitrate -- --nocapture`
+  - PASS at `0.72 dB`, up from `0.28 dB`
+- `cargo test -p opus-rs opus_celt_roundtrip_basic -- --nocapture`
+  - PASS at `1.26 dB`, up from `0.21 dB`
+- `cargo test -p opus-rs celt_loopback_160bytes -- --nocapture`
+  - still FAILS at `0.72 dB` against the test’s `>1.0 dB` gate
+
+**Interpretation After the Fix**
+
+- The reversed pulse reconstruction bug in `pvq.rs` was real and materially affected CELT quality.
+- Fixing it is enough to restore the high-bitrate CELT loopback test above its regression threshold.
+- It is not enough to finish the constrained 160-byte loopback path.
+
+**Remaining Live Surface**
+
+- The remaining 160-byte failure no longer looks like the same direct pulse-order bug.
+- The worst low-bitrate traced band now points deeper into the split / partition path:
+  - band `17`
+  - len `64`
+  - allocated bitres `804`
+  - `pvq_k=5`
+  - `max_abs_error_vs_quantized=0.40040216`
+- That suggests the next investigation target should move from base PVQ coding to recursive band partition / split handling in `third_party/opus-rs/src/bands.rs`, especially the `quant_partition(...)` and `compute_theta(...)` path under tighter budgets.
