@@ -138,6 +138,24 @@ pub struct EnergyRoundtripTrace {
     pub first_divergence: Option<EnergyStageTrace>,
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct QuantEnergyDistortionEntry {
+    pub band: usize,
+    pub channel: usize,
+    pub original: f32,
+    pub quantized: f32,
+    pub abs_error: f32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct QuantEnergyDistortionTrace {
+    pub coarse: Vec<QuantEnergyDistortionEntry>,
+    pub fine: Vec<QuantEnergyDistortionEntry>,
+    pub finalise: Vec<QuantEnergyDistortionEntry>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn quant_coarse_energy_impl(
     m: &CeltMode,
@@ -554,6 +572,141 @@ pub fn unquant_energy_finalise(
             i += 1;
         }
     }
+}
+
+#[doc(hidden)]
+pub fn trace_quant_energy_distortion_for_test(
+    m: &CeltMode,
+    start: usize,
+    end: usize,
+    band_log_e: &[f32],
+    channels: usize,
+    lm: usize,
+    n_bytes: usize,
+) -> QuantEnergyDistortionTrace {
+    use crate::rate::clt_compute_allocation;
+
+    let total_bits = n_bytes * 8;
+    let total_bits_i32 = total_bits as i32;
+    let mut error = vec![0.0f32; m.nb_ebands * channels];
+    let mut old_e_bands = vec![-28.0f32; m.nb_ebands * channels];
+    let mut enc = RangeCoder::new_encoder(n_bytes as u32);
+
+    enc.encode_bit_logp(false, 1);
+    enc.encode_bit_logp(false, 3);
+
+    quant_coarse_energy(
+        m,
+        start,
+        end,
+        band_log_e,
+        &mut old_e_bands,
+        (total_bits << 3) as u32,
+        &mut error,
+        &mut enc,
+        channels,
+        lm,
+        false,
+        total_bits,
+    );
+
+    let coarse = collect_quant_energy_distortion(m, start, end, band_log_e, &old_e_bands, channels);
+
+    let offsets = vec![0i32; end];
+    let mut cap = vec![0i32; end];
+    for i in 0..end {
+        cap[i] =
+            (m.cache.caps[end * (2 * lm + channels - 1) + i] as i32 + 64) * channels as i32 * 2;
+    }
+    let alloc_trim = 6;
+    enc.encode_icdf(alloc_trim, &crate::modes::TRIM_ICDF, 7);
+
+    let mut intensity = 0i32;
+    let mut dual_stereo = 0i32;
+    let mut balance = 0;
+    let mut pulses = vec![0i32; end];
+    let mut ebits = vec![0i32; end];
+    let mut fine_priority = vec![0i32; end];
+    let _coded_bands = clt_compute_allocation(
+        m,
+        start,
+        end,
+        &offsets,
+        &cap,
+        alloc_trim,
+        &mut intensity,
+        &mut dual_stereo,
+        total_bits_i32 << 3,
+        &mut balance,
+        &mut pulses,
+        &mut ebits,
+        &mut fine_priority,
+        channels as i32,
+        lm as i32,
+        &mut enc,
+        true,
+        0,
+        end as i32 - 1,
+    );
+
+    quant_fine_energy(
+        m,
+        start,
+        end,
+        &mut old_e_bands,
+        &mut error,
+        &ebits,
+        &mut enc,
+        channels,
+    );
+
+    let fine = collect_quant_energy_distortion(m, start, end, band_log_e, &old_e_bands, channels);
+
+    quant_energy_finalise(
+        m,
+        start,
+        end,
+        &mut old_e_bands,
+        &mut error,
+        &ebits,
+        &fine_priority,
+        (total_bits_i32 - enc.tell()) << 3,
+        &mut enc,
+        channels,
+    );
+
+    let finalise =
+        collect_quant_energy_distortion(m, start, end, band_log_e, &old_e_bands, channels);
+
+    QuantEnergyDistortionTrace {
+        coarse,
+        fine,
+        finalise,
+    }
+}
+
+fn collect_quant_energy_distortion(
+    m: &CeltMode,
+    start: usize,
+    end: usize,
+    band_log_e: &[f32],
+    quantized: &[f32],
+    channels: usize,
+) -> Vec<QuantEnergyDistortionEntry> {
+    let mut out = Vec::with_capacity((end - start) * channels);
+    for band in start..end {
+        for channel in 0..channels {
+            let idx = channel * m.nb_ebands + band;
+            out.push(QuantEnergyDistortionEntry {
+                band,
+                channel,
+                original: band_log_e[idx],
+                quantized: quantized[idx],
+                abs_error: (band_log_e[idx] - quantized[idx]).abs(),
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
