@@ -148,10 +148,11 @@ That plan should:
 - Worst finalised quantized-energy distortion:
   - `QuantEnergyDistortionEntry { band: 20, channel: 0, original: -22.148365, quantized: -22.02472, abs_error: 0.12364578 }`
 - Allocation snapshot:
-  - `coded_bands=19`
-  - `balance=372`
-  - `ebits=[6, 7, 7, 7, 7, 7, 7, 7, 6, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 1, 1]`
-  - `fine_priority=[0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]`
+  - corrected helper matching the real encoder budget now reports:
+    - `coded_bands=20`
+    - `balance=0`
+    - `ebits=[3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 1]`
+    - `fine_priority=[0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0]`
 - `Energy trace first divergence: None` still holds.
 - `Band roundtrip worst entry` remains effectively lossless, with max coefficient errors in the `1e-8` range.
 - Post-correction `celt_energy_roundtrip_only`: `0.16 dB`
@@ -161,5 +162,5 @@ That plan should:
 
 **Decision**
 
-- Primary next fix site: `third_party/opus-rs/src/celt.rs`
-- Reason: the measured quantized-energy distortion is real but modest, while the real CELT allocation path rigidly starves the last two highest-distortion bands to `1` bit each across frames. The next bounded fix should target allocation / remaining-bit integration before changing quantizer math.
+- Primary next fix site remains `third_party/opus-rs/src/celt.rs`, but the exact target changed.
+- Reason: after correcting the allocation helper to match the real encoder budget handoff, the earlier “both tail bands are starved” claim is no longer true. The live issue is now narrower: the last band still receives only `1` bit while the worst quantized distortion still concentrates in bands `19-20`, and Track 4D's energy-only regression cannot validate a `celt.rs` production fix because that harness bypasses the production encoder path entirely.
