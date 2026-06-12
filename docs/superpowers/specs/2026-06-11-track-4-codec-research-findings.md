@@ -115,3 +115,30 @@ That plan should:
 - Chosen file: `third_party/opus-rs/src/bands.rs`
 - Reason: the quantized energy encode/decode path is symmetric both in isolation and when fed by the real CELT energy-only harness, yet overall quality still collapses. That moves the likely fault to how coefficients are normalized and denormalized around the quantized energies, especially `compute_band_energies`, `normalise_bands`, and `denormalise_bands`.
 - Explicit non-targets for the next fix pass: `mdct.rs`, pre/de-emphasis logic, and additional `quant_bands.rs` predictor surgery unless new evidence appears.
+
+**Band Trace Correction Follow-Up**
+
+- The initial `bands.rs` suspicion was based on two diagnostic mistakes in the test harness:
+  - feeding `denormalise_bands(...)` raw `amp2log2(...)` output instead of `log2amp(...)` output
+  - calling `amp2log2(mode, nb_ebands, nb_ebands, ...)`, which fills the entire working range with `-14` instead of computing real band log energies
+- After correcting those diagnostics to match the actual CELT path:
+  - `bands_roundtrip_recovers_coefficients_before_quantization` passes
+  - worst in-band reconstruction error is effectively zero (`5.9604645e-8`)
+  - `trace_band_roundtrip_for_test(...)` stays clean inside `celt_energy_roundtrip_only`
+- Corrected `celt_energy_roundtrip_only` improves from `0.01 dB` to `0.16 dB`, but still remains far below the expected `>10 dB`
+- Real production quality remains unchanged at the same order of magnitude:
+  - `celt_loopback_160bytes`: still fails at `0.28 dB`
+
+**Updated Interpretation**
+
+- `third_party/opus-rs/src/bands.rs` is not the current primary suspect.
+- The band energy normalization/denormalization seam is functioning correctly when exercised with codec-accurate inputs.
+- The remaining collapse is more likely upstream in how quantized energies are chosen or integrated, not how already-chosen energies are applied to coefficients.
+
+**Updated Next Target**
+
+- Primary next target shifts back to `third_party/opus-rs/src/quant_bands.rs` and `third_party/opus-rs/src/celt.rs`
+- Specifically:
+  - measure distortion between original `band_log_e` and post-quantization `old_band_e`
+  - verify whether coarse/fine/finalize symmetry is masking a quantizer step-size, allocation, or predictor-bias problem
+  - inspect how `clt_compute_allocation(...)`, `ebits`, and `fine_priority` interact with the CELT-only energy path
