@@ -3,8 +3,53 @@ use crate::pvq::*;
 use crate::range_coder::RangeCoder;
 use crate::rate::{BITRES, bits2pulses, get_pulses, pulses2bits};
 use crate::tell_frac_inline;
+use std::sync::{Mutex, OnceLock};
 
 const MIN_STEREO_ENERGY: f32 = 1e-10;
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct PvqBandShapeTrace {
+    pub band: usize,
+    pub len: usize,
+    pub allocated_bitres: i32,
+    pub pulses_hint: i32,
+    pub collapse_mask: u32,
+    pub encode_norm: Vec<f32>,
+    pub decode_norm: Vec<f32>,
+    pub max_abs_error: f32,
+    pub rms_error: f32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct PvqShapeTrace {
+    pub bands: Vec<PvqBandShapeTrace>,
+}
+
+#[derive(Clone)]
+struct EncodeBandSnapshot {
+    band: usize,
+    allocated_bitres: i32,
+    pulses_hint: i32,
+    encode_norm: Vec<f32>,
+}
+
+static LAST_PVQ_ENCODE_SNAPSHOTS: OnceLock<Mutex<Vec<EncodeBandSnapshot>>> = OnceLock::new();
+static LAST_PVQ_ROUNDTRIP_TRACE: OnceLock<Mutex<Option<PvqShapeTrace>>> = OnceLock::new();
+
+fn pvq_encode_snapshots_slot() -> &'static Mutex<Vec<EncodeBandSnapshot>> {
+    LAST_PVQ_ENCODE_SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn pvq_roundtrip_trace_slot() -> &'static Mutex<Option<PvqShapeTrace>> {
+    LAST_PVQ_ROUNDTRIP_TRACE.get_or_init(|| Mutex::new(None))
+}
+
+#[doc(hidden)]
+pub fn take_last_pvq_shape_trace_for_test() -> Option<PvqShapeTrace> {
+    pvq_roundtrip_trace_slot().lock().unwrap().take()
+}
 
 pub struct BandCtx<'a> {
     pub encode: bool,
@@ -2246,6 +2291,13 @@ pub fn quant_all_bands(
     let e_bands = &m.e_bands;
     let mut ctx_seed = *seed;
 
+    if c_channels == 1 && start == 0 {
+        if encode {
+            pvq_encode_snapshots_slot().lock().unwrap().clear();
+            *pvq_roundtrip_trace_slot().lock().unwrap() = Some(PvqShapeTrace { bands: Vec::new() });
+        }
+    }
+
     for i in start..end {
         let e_band_i = e_bands[i] as usize;
         let e_band_i1 = e_bands[i + 1] as usize;
@@ -2356,6 +2408,12 @@ pub fn quant_all_bands(
             }
         }
 
+        let encode_norm_before = if encode && c_channels == 1 {
+            Some(x_slice.to_vec())
+        } else {
+            None
+        };
+
         if *dual_stereo {
             let y_slice = &mut y.as_mut().unwrap()[offset..offset + n];
 
@@ -2444,6 +2502,60 @@ pub fn quant_all_bands(
         collapse_masks[i * c_channels] = (x_cm & 0xFF) as u8 as u32;
         if c_channels == 2 {
             collapse_masks[i * c_channels + 1] = (y_cm & 0xFF) as u8 as u32;
+        }
+
+        if c_channels == 1 {
+            if encode {
+                if let Some(encode_norm) = encode_norm_before {
+                    pvq_encode_snapshots_slot()
+                        .lock()
+                        .unwrap()
+                        .push(EncodeBandSnapshot {
+                            band: i,
+                            allocated_bitres: b,
+                            pulses_hint: pulses[i],
+                            encode_norm,
+                        });
+                }
+            } else {
+                let maybe_snapshot = pvq_encode_snapshots_slot()
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|snapshot| snapshot.band == i)
+                    .cloned();
+                if let Some(snapshot) = maybe_snapshot {
+                    let decode_norm = x_slice.to_vec();
+                    let mut max_abs_error = 0.0f32;
+                    let mut sq_error = 0.0f32;
+                    let mut count = 0usize;
+                    for (expected, actual) in snapshot.encode_norm.iter().zip(decode_norm.iter()) {
+                        let err = (expected - actual).abs();
+                        max_abs_error = max_abs_error.max(err);
+                        sq_error += err * err;
+                        count += 1;
+                    }
+                    let rms_error = if count == 0 {
+                        0.0
+                    } else {
+                        (sq_error / count as f32).sqrt()
+                    };
+                    let collapse_mask = x_cm & 0xFF;
+                    if let Some(trace) = pvq_roundtrip_trace_slot().lock().unwrap().as_mut() {
+                        trace.bands.push(PvqBandShapeTrace {
+                            band: i,
+                            len: snapshot.encode_norm.len(),
+                            allocated_bitres: snapshot.allocated_bitres,
+                            pulses_hint: snapshot.pulses_hint,
+                            collapse_mask,
+                            encode_norm: snapshot.encode_norm,
+                            decode_norm,
+                            max_abs_error,
+                            rms_error,
+                        });
+                    }
+                }
+            }
         }
 
         balance_val += pulses[i] + tell;
