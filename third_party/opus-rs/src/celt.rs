@@ -98,6 +98,11 @@ pub struct CeltEnergyAllocationTrace {
     pub pulses: Vec<i32>,
     pub ebits: Vec<i32>,
     pub fine_priority: Vec<i32>,
+    pub alloc_trim: i32,
+    pub total_boost: i32,
+    pub is_transient: bool,
+    pub anti_collapse_rsv: i32,
+    pub alloc_budget_bitres: i32,
 }
 
 static LAST_ENCODER_ALLOCATION_TRACE: OnceLock<Mutex<Option<CeltEnergyAllocationTrace>>> =
@@ -177,6 +182,11 @@ pub fn trace_celt_energy_allocation_for_test(
         pulses,
         ebits,
         fine_priority,
+        alloc_trim,
+        total_boost: 0,
+        is_transient: false,
+        anti_collapse_rsv: 0,
+        alloc_budget_bitres: total_bits_bitres - rc.tell_frac() - 1,
     }
 }
 
@@ -2236,6 +2246,7 @@ impl CeltEncoder {
         let ebits = &mut self.w_ebits[..ebands_stereo];
         let mut balance = 0;
 
+        let alloc_budget_bitres = (total_bits << BITRES) - rc.tell_frac() - 1;
         self.last_coded_bands = clt_compute_allocation(
             mode,
             start_band,
@@ -2245,7 +2256,7 @@ impl CeltEncoder {
             alloc_trim,
             &mut intensity,
             &mut dual_stereo_val,
-            (total_bits << BITRES) - rc.tell_frac() - 1,
+            alloc_budget_bitres,
             &mut balance,
             pulses,
             ebits,
@@ -2257,14 +2268,6 @@ impl CeltEncoder {
             0,
             nb_ebands as i32 - 1,
         );
-        *encoder_allocation_trace_slot().lock().unwrap() = Some(CeltEnergyAllocationTrace {
-            coded_bands: self.last_coded_bands,
-            balance,
-            pulses: pulses.to_vec(),
-            ebits: ebits.to_vec(),
-            fine_priority: fine_priority.to_vec(),
-        });
-
         quant_fine_energy(
             mode,
             start_band,
@@ -2291,6 +2294,19 @@ impl CeltEncoder {
         } else {
             0
         };
+
+        *encoder_allocation_trace_slot().lock().unwrap() = Some(CeltEnergyAllocationTrace {
+            coded_bands: self.last_coded_bands,
+            balance,
+            pulses: pulses.to_vec(),
+            ebits: ebits.to_vec(),
+            fine_priority: fine_priority.to_vec(),
+            alloc_trim,
+            total_boost,
+            is_transient,
+            anti_collapse_rsv,
+            alloc_budget_bitres,
+        });
 
         let mut dual_stereo = dual_stereo_val != 0;
 

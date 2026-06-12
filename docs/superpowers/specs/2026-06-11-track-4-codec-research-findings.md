@@ -164,3 +164,48 @@ That plan should:
 
 - Primary next fix site remains `third_party/opus-rs/src/celt.rs`, but the exact target changed.
 - Reason: after correcting the allocation helper to match the real encoder budget handoff, the earlier “both tail bands are starved” claim is no longer true. The live issue is now narrower: the last band still receives only `1` bit while the worst quantized distortion still concentrates in bands `19-20`, and Track 4D's energy-only regression cannot validate a `celt.rs` production fix because that harness bypasses the production encoder path entirely.
+
+**Real Encoder Allocation Follow-Up**
+
+- Added a real encoder trace surface via `take_last_encoder_allocation_trace_for_test()` and a single-frame integration test that records allocation directly from `CeltEncoder::encode`.
+- First real encoder trace at `160` bytes:
+  - `coded_bands=20`
+  - `balance=0`
+  - `pulses=[262, 250, 278, 268, 212, 202, 192, 190, 365, 345, 325, 305, 595, 543, 503, 707, 647, 791, 1054, 1062, 0]`
+  - `ebits=[3, 3, 4, 4, 3, 3, 3, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 1]`
+  - `fine_priority=[0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0]`
+  - `alloc_trim=6`
+  - `total_boost=96`
+  - `is_transient=false`
+  - `anti_collapse_rsv=0`
+  - `alloc_budget_bitres=9608`
+- `celt_loopback_160bytes` fails immediately against that real trace with the final band still at `1` fine bit.
+
+**Track 4E Premise Check**
+
+- The Track 4E assumption was that the remaining quality collapse might be primarily caused by `celt.rs` allocation pressure in the real encoder path.
+- Fresh verification contradicts that:
+  - `cargo test -p opus-rs celt_loopback_160bytes -- --nocapture`
+    - still fails with the trace above
+  - `cargo test -p opus-rs test_celt_loopback -- --nocapture`
+    - fails at `0.04 dB` even with `RangeCoder::new_encoder(2048)`
+- That high-bitrate loopback result matters more than the 160-byte allocation trace:
+  - if CELT quality remains near zero with a very large packet budget, the dominant fault is not ordinary bitrate starvation or allocation trim pressure
+  - the remaining fault is more likely in pulse-vector quantization / band-shape coding or in how the encoded band shapes are reconstructed
+
+**Allocation Hypothesis Outcome**
+
+- Tested one bounded encoder-only hypothesis: forcing neutral `alloc_trim = 5`
+- Result:
+  - `test_celt_realistic_bitrate` moved only from `0.28 dB` to `0.29 dB`
+  - `opus_celt_roundtrip_basic` moved only from `0.21 dB` to `0.22 dB`
+- That is not a meaningful fix. The change was reverted.
+
+**Updated Conclusion**
+
+- Track 4E should stop at diagnostics.
+- The real encoder allocation trace is useful and should be kept.
+- A production allocation tweak in `third_party/opus-rs/src/celt.rs` is not justified as the next main fix.
+- The next targeted investigation should move to the real PVQ / band-shape path under:
+  - `third_party/opus-rs/src/bands.rs`
+  - supporting VQ helpers it calls during `quant_all_bands(...)`
