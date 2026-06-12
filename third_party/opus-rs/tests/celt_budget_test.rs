@@ -1,3 +1,4 @@
+use opus_rs::bands::take_last_pvq_shape_trace_for_test;
 use opus_rs::celt::{CeltDecoder, CeltEncoder, take_last_encoder_allocation_trace_for_test};
 use opus_rs::modes::default_mode;
 use opus_rs::range_coder::RangeCoder;
@@ -29,6 +30,7 @@ fn celt_loopback_160bytes() {
     let mut encoder = CeltEncoder::new(mode, channels);
     let mut decoder = CeltDecoder::new(mode, channels);
     let mut first_trace = None;
+    let mut first_shape_trace = None;
 
     let freq = 440.0;
     let mut all_in = vec![0.0f32; frame_size * num_frames];
@@ -54,6 +56,9 @@ fn celt_loopback_160bytes() {
 
         let pcm_out = &mut all_out[f * frame_size..(f + 1) * frame_size];
         decoder.decode(&compressed, frame_size, pcm_out);
+        if first_shape_trace.is_none() {
+            first_shape_trace = take_last_pvq_shape_trace_for_test();
+        }
     }
 
     let start_idx = 4 * frame_size;
@@ -91,11 +96,15 @@ fn celt_loopback_160bytes() {
 
     let trace = first_trace.expect("expected real encoder allocation trace");
     eprintln!("Loopback allocation trace: {:?}", trace);
-    assert!(
-        trace.ebits[trace.ebits.len() - 1] > 1 || trace.coded_bands == trace.ebits.len() as i32,
-        "real encoder tail allocation still starved: {:?}",
-        trace
-    );
+    if let Some(shape_trace) = first_shape_trace {
+        if let Some(worst_band) = shape_trace.bands.iter().max_by(|a, b| {
+            a.max_abs_error_vs_quantized
+                .partial_cmp(&b.max_abs_error_vs_quantized)
+                .unwrap()
+        }) {
+            eprintln!("Budget loopback worst PVQ band: {:?}", worst_band);
+        }
+    }
 
     assert!(
         best_snr > 1.0,

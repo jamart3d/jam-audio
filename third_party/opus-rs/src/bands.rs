@@ -12,13 +12,20 @@ const MIN_STEREO_ENERGY: f32 = 1e-10;
 pub struct PvqBandShapeTrace {
     pub band: usize,
     pub len: usize,
+    pub lm: i32,
+    pub stride: usize,
+    pub spread: i32,
     pub allocated_bitres: i32,
     pub pulses_hint: i32,
+    pub pvq_k: i32,
     pub collapse_mask: u32,
-    pub encode_norm: Vec<f32>,
+    pub encode_input_norm: Vec<f32>,
+    pub encode_quantized_norm: Vec<f32>,
     pub decode_norm: Vec<f32>,
-    pub max_abs_error: f32,
-    pub rms_error: f32,
+    pub max_abs_error_vs_input: f32,
+    pub rms_error_vs_input: f32,
+    pub max_abs_error_vs_quantized: f32,
+    pub rms_error_vs_quantized: f32,
 }
 
 #[doc(hidden)]
@@ -30,9 +37,14 @@ pub struct PvqShapeTrace {
 #[derive(Clone)]
 struct EncodeBandSnapshot {
     band: usize,
+    lm: i32,
+    stride: usize,
+    spread: i32,
     allocated_bitres: i32,
     pulses_hint: i32,
-    encode_norm: Vec<f32>,
+    pvq_k: i32,
+    encode_input_norm: Vec<f32>,
+    encode_quantized_norm: Vec<f32>,
 }
 
 static LAST_PVQ_ENCODE_SNAPSHOTS: OnceLock<Mutex<Vec<EncodeBandSnapshot>>> = OnceLock::new();
@@ -2319,6 +2331,7 @@ pub fn quant_all_bands(
 
         let norm_pos = m_val * e_band_i - norm_offset;
         let tf_change = tf_res[i];
+        let pvq_k_hint = get_pulses(bits2pulses(m, i, lm, b));
 
         let mut effective_lowband: i32 = -1;
         let mut x_cm: u32;
@@ -2512,9 +2525,14 @@ pub fn quant_all_bands(
                         .unwrap()
                         .push(EncodeBandSnapshot {
                             band: i,
+                            lm,
+                            stride: b_blocks as usize,
+                            spread,
                             allocated_bitres: b,
                             pulses_hint: pulses[i],
-                            encode_norm,
+                            pvq_k: pvq_k_hint,
+                            encode_input_norm: encode_norm,
+                            encode_quantized_norm: x_slice.to_vec(),
                         });
                 }
             } else {
@@ -2526,32 +2544,53 @@ pub fn quant_all_bands(
                     .cloned();
                 if let Some(snapshot) = maybe_snapshot {
                     let decode_norm = x_slice.to_vec();
-                    let mut max_abs_error = 0.0f32;
-                    let mut sq_error = 0.0f32;
+                    let mut max_abs_error_vs_input = 0.0f32;
+                    let mut sq_error_vs_input = 0.0f32;
+                    let mut max_abs_error_vs_quantized = 0.0f32;
+                    let mut sq_error_vs_quantized = 0.0f32;
                     let mut count = 0usize;
-                    for (expected, actual) in snapshot.encode_norm.iter().zip(decode_norm.iter()) {
-                        let err = (expected - actual).abs();
-                        max_abs_error = max_abs_error.max(err);
-                        sq_error += err * err;
+                    for ((expected_input, expected_quantized), actual) in snapshot
+                        .encode_input_norm
+                        .iter()
+                        .zip(snapshot.encode_quantized_norm.iter())
+                        .zip(decode_norm.iter())
+                    {
+                        let err_vs_input = (expected_input - actual).abs();
+                        let err_vs_quantized = (expected_quantized - actual).abs();
+                        max_abs_error_vs_input = max_abs_error_vs_input.max(err_vs_input);
+                        max_abs_error_vs_quantized =
+                            max_abs_error_vs_quantized.max(err_vs_quantized);
+                        sq_error_vs_input += err_vs_input * err_vs_input;
+                        sq_error_vs_quantized += err_vs_quantized * err_vs_quantized;
                         count += 1;
                     }
-                    let rms_error = if count == 0 {
-                        0.0
+                    let (rms_error_vs_input, rms_error_vs_quantized) = if count == 0 {
+                        (0.0, 0.0)
                     } else {
-                        (sq_error / count as f32).sqrt()
+                        (
+                            (sq_error_vs_input / count as f32).sqrt(),
+                            (sq_error_vs_quantized / count as f32).sqrt(),
+                        )
                     };
                     let collapse_mask = x_cm & 0xFF;
                     if let Some(trace) = pvq_roundtrip_trace_slot().lock().unwrap().as_mut() {
                         trace.bands.push(PvqBandShapeTrace {
                             band: i,
-                            len: snapshot.encode_norm.len(),
+                            len: snapshot.encode_input_norm.len(),
+                            lm: snapshot.lm,
+                            stride: snapshot.stride,
+                            spread: snapshot.spread,
                             allocated_bitres: snapshot.allocated_bitres,
                             pulses_hint: snapshot.pulses_hint,
+                            pvq_k: snapshot.pvq_k,
                             collapse_mask,
-                            encode_norm: snapshot.encode_norm,
+                            encode_input_norm: snapshot.encode_input_norm,
+                            encode_quantized_norm: snapshot.encode_quantized_norm,
                             decode_norm,
-                            max_abs_error,
-                            rms_error,
+                            max_abs_error_vs_input,
+                            rms_error_vs_input,
+                            max_abs_error_vs_quantized,
+                            rms_error_vs_quantized,
                         });
                     }
                 }

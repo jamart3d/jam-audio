@@ -127,12 +127,16 @@ fn test_celt_loopback() {
     let worst_band = trace
         .bands
         .iter()
-        .max_by(|a, b| a.max_abs_error.partial_cmp(&b.max_abs_error).unwrap())
+        .max_by(|a, b| {
+            a.max_abs_error_vs_quantized
+                .partial_cmp(&b.max_abs_error_vs_quantized)
+                .unwrap()
+        })
         .unwrap();
     println!("Worst PVQ shape band: {:?}", worst_band);
     assert!(
-        worst_band.max_abs_error < 0.5,
-        "real celt shape path is badly distorted: {:?}",
+        worst_band.max_abs_error_vs_quantized < 0.5,
+        "real celt encode/decode shape path is badly distorted: {:?}",
         worst_band
     );
 
