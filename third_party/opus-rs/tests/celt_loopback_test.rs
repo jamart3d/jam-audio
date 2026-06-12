@@ -1,3 +1,4 @@
+use opus_rs::bands::take_last_pvq_shape_trace_for_test;
 use opus_rs::celt::{CeltDecoder, CeltEncoder};
 use opus_rs::modes::default_mode;
 use opus_rs::range_coder::RangeCoder;
@@ -11,6 +12,7 @@ fn test_celt_loopback() {
 
     let mut encoder = CeltEncoder::new(mode, channels);
     let mut decoder = CeltDecoder::new(mode, channels);
+    let mut first_trace = None;
 
     let nb_frames = 12;
     let mut all_in = Vec::new();
@@ -33,6 +35,9 @@ fn test_celt_loopback() {
         let mut pcm_out = vec![0.0f32; frame_size * channels];
         let decoded_len = decoder.decode(&compressed, frame_size, &mut pcm_out);
         assert_eq!(decoded_len, frame_size);
+        if first_trace.is_none() {
+            first_trace = take_last_pvq_shape_trace_for_test();
+        }
         all_out.extend_from_slice(&pcm_out);
 
         println!("Frame {}:", f);
@@ -117,6 +122,19 @@ fn test_celt_loopback() {
             );
         }
     }
+
+    let trace = first_trace.expect("expected pvq shape trace");
+    let worst_band = trace
+        .bands
+        .iter()
+        .max_by(|a, b| a.max_abs_error.partial_cmp(&b.max_abs_error).unwrap())
+        .unwrap();
+    println!("Worst PVQ shape band: {:?}", worst_band);
+    assert!(
+        worst_band.max_abs_error < 0.5,
+        "real celt shape path is badly distorted: {:?}",
+        worst_band
+    );
 
     // Current Rust CELT loopback baseline on this test shape is around 2 dB.
     // Keep a floor to catch regressions while avoiding false failures.
