@@ -142,3 +142,24 @@ That plan should:
   - measure distortion between original `band_log_e` and post-quantization `old_band_e`
   - verify whether coarse/fine/finalize symmetry is masking a quantizer step-size, allocation, or predictor-bias problem
   - inspect how `clt_compute_allocation(...)`, `ebits`, and `fine_priority` interact with the CELT-only energy path
+
+**Energy Distortion and Allocation Follow-Up**
+
+- Worst finalised quantized-energy distortion:
+  - `QuantEnergyDistortionEntry { band: 20, channel: 0, original: -22.148365, quantized: -22.02472, abs_error: 0.12364578 }`
+- Allocation snapshot:
+  - `coded_bands=19`
+  - `balance=372`
+  - `ebits=[6, 7, 7, 7, 7, 7, 7, 7, 6, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 1, 1]`
+  - `fine_priority=[0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]`
+- `Energy trace first divergence: None` still holds.
+- `Band roundtrip worst entry` remains effectively lossless, with max coefficient errors in the `1e-8` range.
+- Post-correction `celt_energy_roundtrip_only`: `0.16 dB`
+- `celt_loopback_160bytes`: `0.28 dB` and still fails
+- `test_celt_realistic_bitrate`: `0.28 dB`
+- `opus_celt_roundtrip_basic`: `0.21 dB`
+
+**Decision**
+
+- Primary next fix site: `third_party/opus-rs/src/celt.rs`
+- Reason: the measured quantized-energy distortion is real but modest, while the real CELT allocation path rigidly starves the last two highest-distortion bands to `1` bit each across frames. The next bounded fix should target allocation / remaining-bit integration before changing quantizer math.
