@@ -44,14 +44,7 @@ fn celt_energy_trace_reports_first_divergence_band() {
     compute_band_energies(mode, &freq_coeffs, &mut band_e, nb_ebands, channels, lm);
 
     let mut band_log_e = vec![0.0f32; nb_ebands * channels];
-    amp2log2(
-        mode,
-        nb_ebands,
-        nb_ebands,
-        &band_e,
-        &mut band_log_e,
-        channels,
-    );
+    amp2log2(mode, 0, nb_ebands, &band_e, &mut band_log_e, channels);
 
     let fine_quant: Vec<i32> = (0..nb_ebands).map(|i| (i % 3) as i32).collect();
     let fine_priority: Vec<i32> = (0..nb_ebands).map(|i| (i % 2) as i32).collect();

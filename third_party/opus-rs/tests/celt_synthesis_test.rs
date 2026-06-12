@@ -130,7 +130,10 @@ fn celt_synthesis_chain_bypass() {
 /// This isolates whether the energy quantization alone causes the issue.
 #[test]
 fn celt_energy_roundtrip_only() {
-    use opus_rs::bands::{amp2log2, compute_band_energies, denormalise_bands, normalise_bands};
+    use opus_rs::bands::{
+        amp2log2, compute_band_energies, denormalise_bands, normalise_bands,
+        trace_band_roundtrip_for_test,
+    };
     use opus_rs::quant_bands::{
         quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
         trace_full_energy_roundtrip_for_test,
@@ -210,14 +213,7 @@ fn celt_energy_roundtrip_only() {
 
         // Convert to log domain
         let mut band_log_e = vec![0.0f32; nb_ebands * channels];
-        amp2log2(
-            mode,
-            nb_ebands,
-            nb_ebands,
-            &band_e,
-            &mut band_log_e,
-            channels,
-        );
+        amp2log2(mode, 0, nb_ebands, &band_e, &mut band_log_e, channels);
 
         // Encode coarse + fine energy
         let total_bits = n_bytes * 8;
@@ -303,6 +299,12 @@ fn celt_energy_roundtrip_only() {
             lm,
         );
         eprintln!("Energy trace first divergence: {:?}", trace.first_divergence);
+        let band_trace = trace_band_roundtrip_for_test(mode, &freq_coeffs, channels, lm);
+        let worst_band = band_trace
+            .iter()
+            .max_by(|a, b| a.max_coeff_error.partial_cmp(&b.max_coeff_error).unwrap())
+            .unwrap();
+        eprintln!("Band roundtrip worst entry: {:?}", worst_band);
 
         quant_fine_energy(
             mode,

@@ -2758,6 +2758,95 @@ pub fn denormalise_bands(
     }
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct BandTraceEntry {
+    pub band: usize,
+    pub input_energy: f32,
+    pub normalised_rms: f32,
+    pub reconstructed_rms: f32,
+    pub max_coeff_error: f32,
+}
+
+fn slice_rms(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let sum = values.iter().fold(0.0f32, |acc, &v| acc + v * v);
+    (sum / values.len() as f32).sqrt()
+}
+
+fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
+}
+
+#[doc(hidden)]
+pub fn trace_band_roundtrip_for_test(
+    mode: &CeltMode,
+    coeffs: &[f32],
+    channels: usize,
+    lm: usize,
+) -> Vec<BandTraceEntry> {
+    let frame_size = mode.short_mdct_size << lm;
+    let nb_ebands = mode.nb_ebands;
+    let m_val = 1 << lm;
+
+    let mut band_e = vec![0.0f32; nb_ebands * channels];
+    compute_band_energies(mode, coeffs, &mut band_e, nb_ebands, channels, lm);
+
+    let mut normalised = vec![0.0f32; frame_size * channels];
+    normalise_bands(
+        mode,
+        coeffs,
+        &mut normalised,
+        &band_e,
+        nb_ebands,
+        channels,
+        m_val,
+    );
+
+    let mut band_log_e = vec![0.0f32; nb_ebands * channels];
+    amp2log2(mode, 0, nb_ebands, &band_e, &mut band_log_e, channels);
+
+    let mut band_amp = vec![0.0f32; nb_ebands * channels];
+    log2amp(mode, nb_ebands, &mut band_amp, &band_log_e, channels);
+
+    let mut reconstructed = vec![0.0f32; frame_size * channels];
+    denormalise_bands(
+        mode,
+        &normalised,
+        &mut reconstructed,
+        &band_amp,
+        0,
+        nb_ebands,
+        channels,
+        m_val,
+    );
+
+    let mut trace = Vec::with_capacity(nb_ebands * channels);
+    for c in 0..channels {
+        for band in 0..nb_ebands {
+            let base = c * frame_size + ((mode.e_bands[band] as usize) << lm);
+            let n = ((mode.e_bands[band + 1] - mode.e_bands[band]) as usize) << lm;
+            let input = &coeffs[base..base + n];
+            let norm = &normalised[base..base + n];
+            let recon = &reconstructed[base..base + n];
+            trace.push(BandTraceEntry {
+                band,
+                input_energy: band_e[c * nb_ebands + band],
+                normalised_rms: slice_rms(norm),
+                reconstructed_rms: slice_rms(recon),
+                max_coeff_error: max_abs_diff(input, recon),
+            });
+        }
+    }
+
+    trace
+}
+
 pub fn celt_lcg_rand(seed: u32) -> u32 {
     seed.wrapping_mul(1664525).wrapping_add(1013904223)
 }
