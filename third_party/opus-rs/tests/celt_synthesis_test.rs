@@ -134,9 +134,10 @@ fn celt_energy_roundtrip_only() {
         amp2log2, compute_band_energies, denormalise_bands, normalise_bands,
         trace_band_roundtrip_for_test,
     };
+    use opus_rs::celt::trace_celt_energy_allocation_for_test;
     use opus_rs::quant_bands::{
         quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
-        trace_full_energy_roundtrip_for_test,
+        trace_full_energy_roundtrip_for_test, trace_quant_energy_distortion_for_test,
     };
     use opus_rs::range_coder::RangeCoder;
     use opus_rs::rate::clt_compute_allocation;
@@ -215,8 +216,41 @@ fn celt_energy_roundtrip_only() {
         let mut band_log_e = vec![0.0f32; nb_ebands * channels];
         amp2log2(mode, 0, nb_ebands, &band_e, &mut band_log_e, channels);
 
+        let distortion = trace_quant_energy_distortion_for_test(
+            mode,
+            0,
+            nb_ebands,
+            &band_log_e,
+            channels,
+            lm,
+            n_bytes,
+        );
+        let worst_final = distortion
+            .finalise
+            .iter()
+            .max_by(|a, b| a.abs_error.partial_cmp(&b.abs_error).unwrap())
+            .unwrap();
+        eprintln!("Worst quantized band distortion: {:?}", worst_final);
+
+        let allocation = trace_celt_energy_allocation_for_test(
+            mode,
+            0,
+            nb_ebands,
+            channels,
+            lm,
+            n_bytes,
+        );
+        eprintln!(
+            "Allocation snapshot: coded_bands={} balance={} ebits={:?} fine_priority={:?}",
+            allocation.coded_bands,
+            allocation.balance,
+            allocation.ebits,
+            allocation.fine_priority
+        );
+
         // Encode coarse + fine energy
         let total_bits = n_bytes * 8;
+        let total_bits_i32 = total_bits as i32;
         let mut error = vec![0.0f32; nb_ebands * channels];
         let mut rc = RangeCoder::new_encoder(n_bytes as u32);
 
@@ -273,7 +307,7 @@ fn celt_energy_roundtrip_only() {
             alloc_trim,
             &mut intensity,
             &mut dual_stereo,
-            total_bits << 3,
+            total_bits_i32 << 3,
             &mut balance,
             &mut pulses,
             &mut ebits,
@@ -327,7 +361,7 @@ fn celt_energy_roundtrip_only() {
             &mut error,
             &ebits,
             &fine_priority,
-            (total_bits - rc.tell()) << 3,
+            (total_bits_i32 - rc.tell()) << 3,
             &mut rc,
             channels,
         );
