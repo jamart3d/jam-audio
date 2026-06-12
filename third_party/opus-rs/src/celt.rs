@@ -9,6 +9,7 @@ use crate::quant_bands::{
 };
 use crate::range_coder::RangeCoder;
 use crate::rate::{BITRES, clt_compute_allocation};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
@@ -97,6 +98,18 @@ pub struct CeltEnergyAllocationTrace {
     pub pulses: Vec<i32>,
     pub ebits: Vec<i32>,
     pub fine_priority: Vec<i32>,
+}
+
+static LAST_ENCODER_ALLOCATION_TRACE: OnceLock<Mutex<Option<CeltEnergyAllocationTrace>>> =
+    OnceLock::new();
+
+fn encoder_allocation_trace_slot() -> &'static Mutex<Option<CeltEnergyAllocationTrace>> {
+    LAST_ENCODER_ALLOCATION_TRACE.get_or_init(|| Mutex::new(None))
+}
+
+#[doc(hidden)]
+pub fn take_last_encoder_allocation_trace_for_test() -> Option<CeltEnergyAllocationTrace> {
+    encoder_allocation_trace_slot().lock().unwrap().take()
 }
 
 #[doc(hidden)]
@@ -2244,6 +2257,13 @@ impl CeltEncoder {
             0,
             nb_ebands as i32 - 1,
         );
+        *encoder_allocation_trace_slot().lock().unwrap() = Some(CeltEnergyAllocationTrace {
+            coded_bands: self.last_coded_bands,
+            balance,
+            pulses: pulses.to_vec(),
+            ebits: ebits.to_vec(),
+            fine_priority: fine_priority.to_vec(),
+        });
 
         quant_fine_energy(
             mode,
