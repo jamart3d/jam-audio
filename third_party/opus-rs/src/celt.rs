@@ -89,6 +89,78 @@ const INV_TABLE: [u8; 128] = [
 
 const MAX_TRANSIENT_LEN: usize = 3000;
 
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct CeltEnergyAllocationTrace {
+    pub coded_bands: i32,
+    pub balance: i32,
+    pub pulses: Vec<i32>,
+    pub ebits: Vec<i32>,
+    pub fine_priority: Vec<i32>,
+}
+
+#[doc(hidden)]
+pub fn trace_celt_energy_allocation_for_test(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    channels: usize,
+    lm: usize,
+    n_bytes: usize,
+) -> CeltEnergyAllocationTrace {
+    let total_bits = n_bytes as i32 * 8;
+    let mut rc = RangeCoder::new_encoder(n_bytes as u32);
+    rc.encode_bit_logp(false, 1);
+    rc.encode_bit_logp(false, 3);
+
+    let offsets = vec![0i32; end];
+    let mut cap = vec![0i32; end];
+    for i in 0..end {
+        cap[i] =
+            (mode.cache.caps[end * (2 * lm + channels - 1) + i] as i32 + 64) * channels as i32 * 2;
+    }
+
+    let alloc_trim = 6;
+    rc.encode_icdf(alloc_trim, &TRIM_ICDF, 7);
+
+    let mut intensity = 0i32;
+    let mut dual_stereo = 0i32;
+    let mut balance = 0;
+    let mut pulses = vec![0i32; end];
+    let mut ebits = vec![0i32; end];
+    let mut fine_priority = vec![0i32; end];
+
+    let coded_bands = clt_compute_allocation(
+        mode,
+        start,
+        end,
+        &offsets,
+        &cap,
+        alloc_trim,
+        &mut intensity,
+        &mut dual_stereo,
+        total_bits << BITRES,
+        &mut balance,
+        &mut pulses,
+        &mut ebits,
+        &mut fine_priority,
+        channels as i32,
+        lm as i32,
+        &mut rc,
+        true,
+        0,
+        end as i32 - 1,
+    );
+
+    CeltEnergyAllocationTrace {
+        coded_bands,
+        balance,
+        pulses,
+        ebits,
+        fine_priority,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisInfo {
     pub valid: bool,
@@ -2913,5 +2985,19 @@ impl CeltDecoder {
         self.rng = rc.rng;
 
         frame_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trace_celt_energy_allocation_for_test;
+
+    #[test]
+    fn test_celt_allocation_trace_returns_nonempty_ebits() {
+        let mode = crate::modes::default_mode();
+        let trace = trace_celt_energy_allocation_for_test(&mode, 0, mode.nb_ebands, 1, 3, 160);
+        assert_eq!(trace.ebits.len(), mode.nb_ebands);
+        assert_eq!(trace.fine_priority.len(), mode.nb_ebands);
+        assert!(trace.coded_bands > 0, "coded_bands should be positive");
     }
 }
