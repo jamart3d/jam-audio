@@ -1,4 +1,4 @@
-use opus_rs::celt::{CeltDecoder, CeltEncoder};
+use opus_rs::celt::{CeltDecoder, CeltEncoder, take_last_encoder_allocation_trace_for_test};
 use opus_rs::modes::default_mode;
 use opus_rs::range_coder::RangeCoder;
 
@@ -28,6 +28,7 @@ fn celt_loopback_160bytes() {
 
     let mut encoder = CeltEncoder::new(mode, channels);
     let mut decoder = CeltDecoder::new(mode, channels);
+    let mut first_trace = None;
 
     let freq = 440.0;
     let mut all_in = vec![0.0f32; frame_size * num_frames];
@@ -44,6 +45,9 @@ fn celt_loopback_160bytes() {
         let mut rc = RangeCoder::new_encoder(n_bytes as u32);
         encoder.encode(pcm_in, frame_size, &mut rc);
         rc.done();
+        if first_trace.is_none() {
+            first_trace = take_last_encoder_allocation_trace_for_test();
+        }
 
         // Copy the full buffer (maintaining front/end layout for the decoder)
         let compressed: Vec<u8> = rc.buf[..n_bytes].to_vec();
@@ -84,6 +88,14 @@ fn celt_loopback_160bytes() {
         let snr_0 = snr_with_delay(&all_in[start..end], &all_out[start..end], 0);
         eprintln!("  Frame {} SNR(delay=0): {:.2} dB", f, snr_0);
     }
+
+    let trace = first_trace.expect("expected real encoder allocation trace");
+    eprintln!("Loopback allocation trace: {:?}", trace);
+    assert!(
+        trace.ebits[trace.ebits.len() - 1] > 1 || trace.coded_bands == trace.ebits.len() as i32,
+        "real encoder tail allocation still starved: {:?}",
+        trace
+    );
 
     assert!(
         best_snr > 1.0,
