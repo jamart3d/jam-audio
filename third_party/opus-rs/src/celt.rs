@@ -116,12 +116,18 @@ pub fn trace_celt_energy_allocation_for_test(
     let offsets = vec![0i32; end];
     let mut cap = vec![0i32; end];
     for i in 0..end {
-        cap[i] =
-            (mode.cache.caps[end * (2 * lm + channels - 1) + i] as i32 + 64) * channels as i32 * 2;
+        let n = (mode.e_bands[i + 1] - mode.e_bands[i]) << lm;
+        cap[i] = ((mode.cache.caps[end * (2 * lm + channels - 1) + i] as i32 + 64)
+            * channels as i32
+            * n as i32)
+            >> 2;
     }
 
     let alloc_trim = 6;
-    rc.encode_icdf(alloc_trim, &TRIM_ICDF, 7);
+    let total_bits_bitres = total_bits << BITRES;
+    if rc.tell_frac() + (6 << BITRES) <= total_bits_bitres {
+        rc.encode_icdf(alloc_trim, &TRIM_ICDF, 7);
+    }
 
     let mut intensity = 0i32;
     let mut dual_stereo = 0i32;
@@ -139,7 +145,7 @@ pub fn trace_celt_energy_allocation_for_test(
         alloc_trim,
         &mut intensity,
         &mut dual_stereo,
-        total_bits << BITRES,
+        total_bits_bitres - rc.tell_frac() - 1,
         &mut balance,
         &mut pulses,
         &mut ebits,
