@@ -22,6 +22,12 @@ pub struct PvqBandShapeTrace {
     pub encode_input_norm: Vec<f32>,
     pub encode_quantized_norm: Vec<f32>,
     pub decode_norm: Vec<f32>,
+    pub encode_post_partition_norm: Vec<f32>,
+    pub decode_post_partition_norm: Vec<f32>,
+    pub encode_post_recombine_norm: Vec<f32>,
+    pub decode_post_recombine_norm: Vec<f32>,
+    pub post_partition_max_abs_error: f32,
+    pub post_recombine_max_abs_error: f32,
     pub max_abs_error_vs_input: f32,
     pub rms_error_vs_input: f32,
     pub max_abs_error_vs_quantized: f32,
@@ -34,6 +40,193 @@ pub struct PvqShapeTrace {
     pub bands: Vec<PvqBandShapeTrace>,
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct PartitionNodeRoundtripTrace {
+    pub band: usize,
+    pub path_bits: u64,
+    pub depth: u8,
+    pub encode_visit_index: usize,
+    pub decode_visit_index: usize,
+    pub encode_parent_node_visit_index: usize,
+    pub decode_parent_node_visit_index: usize,
+    pub n: usize,
+    pub lm: i32,
+    pub encode_b: i32,
+    pub decode_b: i32,
+    pub b_blocks: i32,
+    pub fill_before: u32,
+    pub fill_after_theta: u32,
+    pub encode_qn: i32,
+    pub decode_qn: i32,
+    pub encode_b_after_theta: i32,
+    pub decode_b_after_theta: i32,
+    pub encode_remaining_bits_before_qalloc: i32,
+    pub decode_remaining_bits_before_qalloc: i32,
+    pub encode_remaining_bits_after_qalloc: i32,
+    pub decode_remaining_bits_after_qalloc: i32,
+    pub encode_tell_before_qalloc: i32,
+    pub decode_tell_before_qalloc: i32,
+    pub encode_tell_after_qalloc: i32,
+    pub decode_tell_after_qalloc: i32,
+    pub encode_itheta: i32,
+    pub decode_itheta: i32,
+    pub encode_qalloc: i32,
+    pub decode_qalloc: i32,
+    pub encode_delta: i32,
+    pub decode_delta: i32,
+    pub encode_mbits: i32,
+    pub decode_mbits: i32,
+    pub encode_sbits: i32,
+    pub decode_sbits: i32,
+    pub encode_recurse_mid_first: bool,
+    pub decode_recurse_mid_first: bool,
+    pub encode_left_call_source_b_after_theta: i32,
+    pub decode_left_call_source_b_after_theta: i32,
+    pub encode_left_call_source_fill_after_theta: u32,
+    pub decode_left_call_source_fill_after_theta: u32,
+    pub encode_left_call_source_recurse_mid_first: bool,
+    pub decode_left_call_source_recurse_mid_first: bool,
+    pub encode_left_child_budget_before_call: i32,
+    pub decode_left_child_budget_before_call: i32,
+    pub encode_left_child_fill_before_call: u32,
+    pub decode_left_child_fill_before_call: u32,
+    pub encode_left_child_gain_before_call: f32,
+    pub decode_left_child_gain_before_call: f32,
+    pub encode_child_remaining_bits_on_entry: i32,
+    pub decode_child_remaining_bits_on_entry: i32,
+    pub encode_child_tell_on_entry: i32,
+    pub decode_child_tell_on_entry: i32,
+    pub encode_child_fill_on_entry: u32,
+    pub decode_child_fill_on_entry: u32,
+    pub encode_child_theta_qalloc: i32,
+    pub decode_child_theta_qalloc: i32,
+    pub encode_child_theta_delta: i32,
+    pub decode_child_theta_delta: i32,
+    pub encode_child_theta_itheta: i32,
+    pub decode_child_theta_itheta: i32,
+    pub encode_subchild_remaining_bits_on_entry: i32,
+    pub decode_subchild_remaining_bits_on_entry: i32,
+    pub encode_subchild_tell_on_entry: i32,
+    pub decode_subchild_tell_on_entry: i32,
+    pub encode_subchild_fill_on_entry: u32,
+    pub decode_subchild_fill_on_entry: u32,
+    pub encode_subchild_theta_qalloc: i32,
+    pub decode_subchild_theta_qalloc: i32,
+    pub encode_subchild_theta_delta: i32,
+    pub decode_subchild_theta_delta: i32,
+    pub encode_subchild_theta_itheta: i32,
+    pub decode_subchild_theta_itheta: i32,
+    pub encode_subchild_left_budget_before_call: i32,
+    pub decode_subchild_left_budget_before_call: i32,
+    pub encode_subchild_left_fill_before_call: u32,
+    pub decode_subchild_left_fill_before_call: u32,
+    pub encode_subchild_left_gain_before_call: f32,
+    pub decode_subchild_left_gain_before_call: f32,
+    pub encode_child_left_descendant_visit_index: usize,
+    pub decode_child_left_descendant_visit_index: usize,
+    pub encode_child_right_descendant_visit_index: usize,
+    pub decode_child_right_descendant_visit_index: usize,
+    pub encode_left_child_after_return: Vec<f32>,
+    pub decode_left_child_after_return: Vec<f32>,
+    pub encode_parent_left_slice_after_left_return: Vec<f32>,
+    pub decode_parent_left_slice_after_left_return: Vec<f32>,
+    pub encode_right_child_after_return: Vec<f32>,
+    pub decode_right_child_after_return: Vec<f32>,
+    pub encode_parent_before_final_return: Vec<f32>,
+    pub decode_parent_before_final_return: Vec<f32>,
+    pub encode_left_child_vector: Vec<f32>,
+    pub decode_left_child_vector: Vec<f32>,
+    pub encode_right_child_vector: Vec<f32>,
+    pub decode_right_child_vector: Vec<f32>,
+    pub encode_parent_after_children: Vec<f32>,
+    pub decode_parent_after_children: Vec<f32>,
+    pub left_child_max_abs_error: f32,
+    pub left_return_parent_slice_max_abs_error: f32,
+    pub right_child_max_abs_error: f32,
+    pub parent_after_children_max_abs_error: f32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct PartitionLeafRoundtripTrace {
+    pub band: usize,
+    pub path_bits: u64,
+    pub depth: u8,
+    pub encode_visit_index: usize,
+    pub decode_visit_index: usize,
+    pub encode_parent_node_visit_index: usize,
+    pub decode_parent_node_visit_index: usize,
+    pub n: usize,
+    pub lm: i32,
+    pub b: i32,
+    pub b_blocks: i32,
+    pub fill: u32,
+    pub encode_remaining_bits_on_entry: i32,
+    pub decode_remaining_bits_on_entry: i32,
+    pub encode_tell_on_entry: i32,
+    pub decode_tell_on_entry: i32,
+    pub encode_curr_bits: i32,
+    pub decode_curr_bits: i32,
+    pub encode_q: i32,
+    pub decode_q: i32,
+    pub encode_k: i32,
+    pub decode_k: i32,
+    pub encode_remaining_bits_after_budget: i32,
+    pub decode_remaining_bits_after_budget: i32,
+    pub encode_has_lowband: bool,
+    pub decode_has_lowband: bool,
+    pub encode_zero_pulse_mode: u8,
+    pub decode_zero_pulse_mode: u8,
+    pub encode_fill_masked: u32,
+    pub decode_fill_masked: u32,
+    pub encode_input_vector: Vec<f32>,
+    pub decode_input_vector: Vec<f32>,
+    pub encode_quantized_vector: Vec<f32>,
+    pub encode_vector: Vec<f32>,
+    pub decode_vector: Vec<f32>,
+    pub decode_zero_pulse_seed_on_entry: Option<u32>,
+    pub decode_zero_pulse_lowband: Option<Vec<f32>>,
+    pub decode_zero_pulse_pre_renorm_vector: Option<Vec<f32>>,
+    pub decode_zero_pulse_post_renorm_vector: Option<Vec<f32>>,
+    pub max_abs_error: f32,
+    pub rms_error: f32,
+    pub max_abs_error_vs_quantized: f32,
+    pub rms_error_vs_quantized: f32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct PartitionRoundtripTrace {
+    pub nodes: Vec<PartitionNodeRoundtripTrace>,
+    pub leaves: Vec<PartitionLeafRoundtripTrace>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct RootBandBudgetTrace {
+    pub band: usize,
+    pub encode_visit_index: usize,
+    pub decode_visit_index: usize,
+    pub encode_tell: i32,
+    pub decode_tell: i32,
+    pub encode_balance_before_tell_adjust: i32,
+    pub decode_balance_before_tell_adjust: i32,
+    pub encode_balance_after_tell_adjust: i32,
+    pub decode_balance_after_tell_adjust: i32,
+    pub encode_remaining_bits: i32,
+    pub decode_remaining_bits: i32,
+    pub encode_curr_balance: i32,
+    pub decode_curr_balance: i32,
+    pub encode_pulses: i32,
+    pub decode_pulses: i32,
+    pub encode_b: i32,
+    pub decode_b: i32,
+    pub b_blocks: i32,
+    pub tf_change: i32,
+    pub n: usize,
+}
+
 #[derive(Clone)]
 struct EncodeBandSnapshot {
     band: usize,
@@ -44,11 +237,141 @@ struct EncodeBandSnapshot {
     pulses_hint: i32,
     pvq_k: i32,
     encode_input_norm: Vec<f32>,
+    encode_post_partition_norm: Vec<f32>,
+    encode_post_recombine_norm: Vec<f32>,
     encode_quantized_norm: Vec<f32>,
+}
+
+#[derive(Clone)]
+struct EncodePartitionNodeSnapshot {
+    band: usize,
+    path_bits: u64,
+    depth: u8,
+    visit_index: usize,
+    parent_node_visit_index: usize,
+    n: usize,
+    lm: i32,
+    b: i32,
+    b_blocks: i32,
+    fill_before: u32,
+    fill_after_theta: u32,
+    qn: i32,
+    b_after_theta: i32,
+    remaining_bits_before_qalloc: i32,
+    remaining_bits_after_qalloc: i32,
+    tell_before_qalloc: i32,
+    tell_after_qalloc: i32,
+    itheta: i32,
+    qalloc: i32,
+    delta: i32,
+    mbits: i32,
+    sbits: i32,
+    recurse_mid_first: bool,
+    left_call_source_b_after_theta: i32,
+    left_call_source_fill_after_theta: u32,
+    left_call_source_recurse_mid_first: bool,
+    left_child_budget_before_call: i32,
+    left_child_fill_before_call: u32,
+    left_child_gain_before_call: f32,
+    child_remaining_bits_on_entry: i32,
+    child_tell_on_entry: i32,
+    child_fill_on_entry: u32,
+    child_theta_qalloc: i32,
+    child_theta_delta: i32,
+    child_theta_itheta: i32,
+    subchild_remaining_bits_on_entry: i32,
+    subchild_tell_on_entry: i32,
+    subchild_fill_on_entry: u32,
+    subchild_theta_qalloc: i32,
+    subchild_theta_delta: i32,
+    subchild_theta_itheta: i32,
+    subchild_left_budget_before_call: i32,
+    subchild_left_fill_before_call: u32,
+    subchild_left_gain_before_call: f32,
+    child_left_descendant_visit_index: usize,
+    child_right_descendant_visit_index: usize,
+    left_child_after_return: Vec<f32>,
+    parent_left_slice_after_left_return: Vec<f32>,
+    right_child_after_return: Vec<f32>,
+    parent_before_final_return: Vec<f32>,
+    left_child_vector: Vec<f32>,
+    right_child_vector: Vec<f32>,
+    parent_after_children: Vec<f32>,
+}
+
+#[derive(Clone)]
+struct EncodePartitionLeafSnapshot {
+    band: usize,
+    path_bits: u64,
+    depth: u8,
+    visit_index: usize,
+    parent_node_visit_index: usize,
+    n: usize,
+    lm: i32,
+    b: i32,
+    b_blocks: i32,
+    fill: u32,
+    remaining_bits_on_entry: i32,
+    tell_on_entry: i32,
+    curr_bits: i32,
+    q: i32,
+    k: i32,
+    remaining_bits_after_budget: i32,
+    has_lowband: bool,
+    zero_pulse_mode: u8,
+    fill_masked: u32,
+    input_vector: Vec<f32>,
+    quantized_vector: Vec<f32>,
+    vector: Vec<f32>,
+}
+
+#[derive(Clone)]
+struct DecodeZeroPulseSnapshot {
+    seed_on_entry: u32,
+    lowband: Option<Vec<f32>>,
+    pre_renorm_vector: Vec<f32>,
+    post_renorm_vector: Vec<f32>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ZeroPulseReferenceModel {
+    pub mode: u8,
+    pub fill_masked: u32,
+    pub seed_on_entry: u32,
+    pub seed_after: u32,
+    pub lowband: Option<Vec<f32>>,
+    pub pre_renorm_vector: Vec<f32>,
+    pub post_renorm_vector: Vec<f32>,
+}
+
+#[derive(Clone)]
+struct EncodeRootBandBudgetSnapshot {
+    band: usize,
+    visit_index: usize,
+    tell: i32,
+    balance_before_tell_adjust: i32,
+    balance_after_tell_adjust: i32,
+    remaining_bits: i32,
+    curr_balance: i32,
+    pulses: i32,
+    b: i32,
+    b_blocks: i32,
+    tf_change: i32,
+    n: usize,
 }
 
 static LAST_PVQ_ENCODE_SNAPSHOTS: OnceLock<Mutex<Vec<EncodeBandSnapshot>>> = OnceLock::new();
 static LAST_PVQ_ROUNDTRIP_TRACE: OnceLock<Mutex<Option<PvqShapeTrace>>> = OnceLock::new();
+static LAST_PARTITION_ENCODE_NODE_SNAPSHOTS: OnceLock<Mutex<Vec<EncodePartitionNodeSnapshot>>> =
+    OnceLock::new();
+static LAST_PARTITION_ENCODE_LEAF_SNAPSHOTS: OnceLock<Mutex<Vec<EncodePartitionLeafSnapshot>>> =
+    OnceLock::new();
+static LAST_PARTITION_ROUNDTRIP_TRACE: OnceLock<Mutex<Option<PartitionRoundtripTrace>>> =
+    OnceLock::new();
+static LAST_ROOT_BAND_BUDGET_ENCODE_SNAPSHOTS: OnceLock<Mutex<Vec<EncodeRootBandBudgetSnapshot>>> =
+    OnceLock::new();
+static LAST_ROOT_BAND_BUDGET_TRACE: OnceLock<Mutex<Vec<RootBandBudgetTrace>>> = OnceLock::new();
 
 fn pvq_encode_snapshots_slot() -> &'static Mutex<Vec<EncodeBandSnapshot>> {
     LAST_PVQ_ENCODE_SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()))
@@ -58,9 +381,56 @@ fn pvq_roundtrip_trace_slot() -> &'static Mutex<Option<PvqShapeTrace>> {
     LAST_PVQ_ROUNDTRIP_TRACE.get_or_init(|| Mutex::new(None))
 }
 
+fn partition_encode_node_snapshots_slot() -> &'static Mutex<Vec<EncodePartitionNodeSnapshot>> {
+    LAST_PARTITION_ENCODE_NODE_SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn partition_encode_leaf_snapshots_slot() -> &'static Mutex<Vec<EncodePartitionLeafSnapshot>> {
+    LAST_PARTITION_ENCODE_LEAF_SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn partition_roundtrip_trace_slot() -> &'static Mutex<Option<PartitionRoundtripTrace>> {
+    LAST_PARTITION_ROUNDTRIP_TRACE.get_or_init(|| Mutex::new(None))
+}
+
+fn root_band_budget_encode_snapshots_slot() -> &'static Mutex<Vec<EncodeRootBandBudgetSnapshot>> {
+    LAST_ROOT_BAND_BUDGET_ENCODE_SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn root_band_budget_trace_slot() -> &'static Mutex<Vec<RootBandBudgetTrace>> {
+    LAST_ROOT_BAND_BUDGET_TRACE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 #[doc(hidden)]
 pub fn take_last_pvq_shape_trace_for_test() -> Option<PvqShapeTrace> {
     pvq_roundtrip_trace_slot().lock().unwrap().take()
+}
+
+#[doc(hidden)]
+pub fn take_last_partition_roundtrip_trace_for_test() -> Option<PartitionRoundtripTrace> {
+    partition_roundtrip_trace_slot().lock().unwrap().take()
+}
+
+#[doc(hidden)]
+pub fn last_partition_encode_node_snapshot_sizes_for_test() -> Vec<(usize, usize, usize, usize)> {
+    partition_encode_node_snapshots_slot()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|snapshot| {
+            (
+                snapshot.visit_index,
+                snapshot.left_child_vector.len(),
+                snapshot.right_child_vector.len(),
+                snapshot.parent_after_children.len(),
+            )
+        })
+        .collect()
+}
+
+#[doc(hidden)]
+pub fn take_last_root_band_budget_trace_for_test() -> Vec<RootBandBudgetTrace> {
+    std::mem::take(&mut *root_band_budget_trace_slot().lock().unwrap())
 }
 
 pub struct BandCtx<'a> {
@@ -79,6 +449,9 @@ pub struct BandCtx<'a> {
     pub arch: i32,
     pub disable_inv: bool,
     pub seed: u32,
+    pub trace_path_bits: u64,
+    pub trace_depth: u8,
+    pub trace_post_partition_norm: Vec<f32>,
 }
 
 #[inline]
@@ -615,6 +988,799 @@ pub struct SplitCtx {
     pub delta: i32,
     pub itheta: i32,
     pub qalloc: i32,
+    pub qn: i32,
+}
+
+fn record_partition_node_snapshot(
+    ctx: &BandCtx,
+    n: usize,
+    lm: i32,
+    b: i32,
+    b_blocks: i32,
+    fill_before: u32,
+    fill_after_theta: u32,
+    qn: i32,
+    b_after_theta: i32,
+    remaining_bits_before_qalloc: i32,
+    remaining_bits_after_qalloc: i32,
+    tell_before_qalloc: i32,
+    tell_after_qalloc: i32,
+    child_remaining_bits_on_entry: i32,
+    child_tell_on_entry: i32,
+    child_fill_on_entry: u32,
+    sctx: &SplitCtx,
+    mbits: i32,
+    sbits: i32,
+    recurse_mid_first: bool,
+    left_child_budget_before_call: i32,
+    left_child_fill_before_call: u32,
+    left_child_gain_before_call: f32,
+) -> Option<usize> {
+    if ctx.encode {
+        let mut snapshots = partition_encode_node_snapshots_slot().lock().unwrap();
+        let visit_index = snapshots.len();
+        let parent_node_visit_index = snapshots
+            .iter()
+            .rev()
+            .find(|snapshot| {
+                snapshot.depth < ctx.trace_depth
+                    && ctx.trace_depth.saturating_sub(snapshot.depth) <= 64
+                    && (ctx.trace_path_bits >> (ctx.trace_depth - snapshot.depth))
+                        == snapshot.path_bits
+            })
+            .map(|snapshot| snapshot.visit_index)
+            .unwrap_or(usize::MAX);
+        snapshots.push(EncodePartitionNodeSnapshot {
+            band: ctx.i,
+            path_bits: ctx.trace_path_bits,
+            depth: ctx.trace_depth,
+            visit_index,
+            parent_node_visit_index,
+            n,
+            lm,
+            b,
+            b_blocks,
+            fill_before,
+            fill_after_theta,
+            qn,
+            b_after_theta,
+            remaining_bits_before_qalloc,
+            remaining_bits_after_qalloc,
+            tell_before_qalloc,
+            tell_after_qalloc,
+            itheta: sctx.itheta,
+            qalloc: sctx.qalloc,
+            delta: sctx.delta,
+            mbits,
+            sbits,
+            recurse_mid_first,
+            left_call_source_b_after_theta: b_after_theta,
+            left_call_source_fill_after_theta: fill_after_theta,
+            left_call_source_recurse_mid_first: recurse_mid_first,
+            left_child_budget_before_call,
+            left_child_fill_before_call,
+            left_child_gain_before_call,
+            child_remaining_bits_on_entry,
+            child_tell_on_entry,
+            child_fill_on_entry,
+            child_theta_qalloc: sctx.qalloc,
+            child_theta_delta: sctx.delta,
+            child_theta_itheta: sctx.itheta,
+            subchild_remaining_bits_on_entry: child_remaining_bits_on_entry,
+            subchild_tell_on_entry: child_tell_on_entry,
+            subchild_fill_on_entry: child_fill_on_entry,
+            subchild_theta_qalloc: sctx.qalloc,
+            subchild_theta_delta: sctx.delta,
+            subchild_theta_itheta: sctx.itheta,
+            subchild_left_budget_before_call: left_child_budget_before_call,
+            subchild_left_fill_before_call: left_child_fill_before_call,
+            subchild_left_gain_before_call: left_child_gain_before_call,
+            child_left_descendant_visit_index: usize::MAX,
+            child_right_descendant_visit_index: usize::MAX,
+            left_child_after_return: Vec::new(),
+            parent_left_slice_after_left_return: Vec::new(),
+            right_child_after_return: Vec::new(),
+            parent_before_final_return: Vec::new(),
+            left_child_vector: Vec::new(),
+            right_child_vector: Vec::new(),
+            parent_after_children: Vec::new(),
+        });
+        Some(visit_index)
+    } else {
+        let decode_visit_index = partition_roundtrip_trace_slot()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|trace| trace.nodes.len())
+            .unwrap_or(0);
+        let snapshots = partition_encode_node_snapshots_slot().lock().unwrap();
+        let maybe_snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.visit_index == decode_visit_index)
+            .or_else(|| {
+                snapshots.iter().find(|snapshot| {
+                    snapshot.band == ctx.i
+                        && snapshot.path_bits == ctx.trace_path_bits
+                        && snapshot.depth == ctx.trace_depth
+                        && snapshot.n == n
+                })
+            })
+            .cloned();
+        if let Some(snapshot) = maybe_snapshot {
+            if let Some(trace) = partition_roundtrip_trace_slot().lock().unwrap().as_mut() {
+                trace.nodes.push(PartitionNodeRoundtripTrace {
+                    band: ctx.i,
+                    path_bits: ctx.trace_path_bits,
+                    depth: ctx.trace_depth,
+                    encode_visit_index: snapshot.visit_index,
+                    decode_visit_index,
+                    encode_parent_node_visit_index: snapshot.parent_node_visit_index,
+                    decode_parent_node_visit_index: trace
+                        .nodes
+                        .iter()
+                        .rev()
+                        .find(|node| {
+                            node.depth < ctx.trace_depth
+                                && ctx.trace_depth.saturating_sub(node.depth) <= 64
+                                && (ctx.trace_path_bits >> (ctx.trace_depth - node.depth))
+                                    == node.path_bits
+                        })
+                        .map(|node| node.decode_visit_index)
+                        .unwrap_or(usize::MAX),
+                    n,
+                    lm,
+                    encode_b: snapshot.b,
+                    decode_b: b,
+                    b_blocks,
+                    fill_before,
+                    fill_after_theta,
+                    encode_qn: snapshot.qn,
+                    decode_qn: qn,
+                    encode_b_after_theta: snapshot.b_after_theta,
+                    decode_b_after_theta: b_after_theta,
+                    encode_remaining_bits_before_qalloc: snapshot.remaining_bits_before_qalloc,
+                    decode_remaining_bits_before_qalloc: remaining_bits_before_qalloc,
+                    encode_remaining_bits_after_qalloc: snapshot.remaining_bits_after_qalloc,
+                    decode_remaining_bits_after_qalloc: remaining_bits_after_qalloc,
+                    encode_tell_before_qalloc: snapshot.tell_before_qalloc,
+                    decode_tell_before_qalloc: tell_before_qalloc,
+                    encode_tell_after_qalloc: snapshot.tell_after_qalloc,
+                    decode_tell_after_qalloc: tell_after_qalloc,
+                    encode_itheta: snapshot.itheta,
+                    decode_itheta: sctx.itheta,
+                    encode_qalloc: snapshot.qalloc,
+                    decode_qalloc: sctx.qalloc,
+                    encode_delta: snapshot.delta,
+                    decode_delta: sctx.delta,
+                    encode_mbits: snapshot.mbits,
+                    decode_mbits: mbits,
+                    encode_sbits: snapshot.sbits,
+                    decode_sbits: sbits,
+                    encode_recurse_mid_first: snapshot.recurse_mid_first,
+                    decode_recurse_mid_first: recurse_mid_first,
+                    encode_left_call_source_b_after_theta: snapshot.left_call_source_b_after_theta,
+                    decode_left_call_source_b_after_theta: b_after_theta,
+                    encode_left_call_source_fill_after_theta: snapshot
+                        .left_call_source_fill_after_theta,
+                    decode_left_call_source_fill_after_theta: fill_after_theta,
+                    encode_left_call_source_recurse_mid_first: snapshot
+                        .left_call_source_recurse_mid_first,
+                    decode_left_call_source_recurse_mid_first: recurse_mid_first,
+                    encode_left_child_budget_before_call: snapshot.left_child_budget_before_call,
+                    decode_left_child_budget_before_call: 0,
+                    encode_left_child_fill_before_call: snapshot.left_child_fill_before_call,
+                    decode_left_child_fill_before_call: 0,
+                    encode_left_child_gain_before_call: snapshot.left_child_gain_before_call,
+                    decode_left_child_gain_before_call: 0.0,
+                    encode_child_remaining_bits_on_entry: snapshot.child_remaining_bits_on_entry,
+                    decode_child_remaining_bits_on_entry: child_remaining_bits_on_entry,
+                    encode_child_tell_on_entry: snapshot.child_tell_on_entry,
+                    decode_child_tell_on_entry: child_tell_on_entry,
+                    encode_child_fill_on_entry: snapshot.child_fill_on_entry,
+                    decode_child_fill_on_entry: child_fill_on_entry,
+                    encode_child_theta_qalloc: snapshot.child_theta_qalloc,
+                    decode_child_theta_qalloc: sctx.qalloc,
+                    encode_child_theta_delta: snapshot.child_theta_delta,
+                    decode_child_theta_delta: sctx.delta,
+                    encode_child_theta_itheta: snapshot.child_theta_itheta,
+                    decode_child_theta_itheta: sctx.itheta,
+                    encode_subchild_remaining_bits_on_entry: snapshot
+                        .subchild_remaining_bits_on_entry,
+                    decode_subchild_remaining_bits_on_entry: child_remaining_bits_on_entry,
+                    encode_subchild_tell_on_entry: snapshot.subchild_tell_on_entry,
+                    decode_subchild_tell_on_entry: child_tell_on_entry,
+                    encode_subchild_fill_on_entry: snapshot.subchild_fill_on_entry,
+                    decode_subchild_fill_on_entry: child_fill_on_entry,
+                    encode_subchild_theta_qalloc: snapshot.subchild_theta_qalloc,
+                    decode_subchild_theta_qalloc: sctx.qalloc,
+                    encode_subchild_theta_delta: snapshot.subchild_theta_delta,
+                    decode_subchild_theta_delta: sctx.delta,
+                    encode_subchild_theta_itheta: snapshot.subchild_theta_itheta,
+                    decode_subchild_theta_itheta: sctx.itheta,
+                    encode_subchild_left_budget_before_call: snapshot
+                        .subchild_left_budget_before_call,
+                    decode_subchild_left_budget_before_call: 0,
+                    encode_subchild_left_fill_before_call: snapshot
+                        .subchild_left_fill_before_call,
+                    decode_subchild_left_fill_before_call: 0,
+                    encode_subchild_left_gain_before_call: snapshot
+                        .subchild_left_gain_before_call,
+                    decode_subchild_left_gain_before_call: 0.0,
+                    encode_child_left_descendant_visit_index: snapshot
+                        .child_left_descendant_visit_index,
+                    decode_child_left_descendant_visit_index: usize::MAX,
+                    encode_child_right_descendant_visit_index: snapshot
+                        .child_right_descendant_visit_index,
+                    decode_child_right_descendant_visit_index: usize::MAX,
+                    encode_left_child_after_return: Vec::new(),
+                    decode_left_child_after_return: Vec::new(),
+                    encode_parent_left_slice_after_left_return: Vec::new(),
+                    decode_parent_left_slice_after_left_return: Vec::new(),
+                    encode_right_child_after_return: Vec::new(),
+                    decode_right_child_after_return: Vec::new(),
+                    encode_parent_before_final_return: Vec::new(),
+                    decode_parent_before_final_return: Vec::new(),
+                    encode_left_child_vector: Vec::new(),
+                    decode_left_child_vector: Vec::new(),
+                    encode_right_child_vector: Vec::new(),
+                    decode_right_child_vector: Vec::new(),
+                    encode_parent_after_children: Vec::new(),
+                    decode_parent_after_children: Vec::new(),
+                    left_child_max_abs_error: 0.0,
+                    left_return_parent_slice_max_abs_error: 0.0,
+                    right_child_max_abs_error: 0.0,
+                    parent_after_children_max_abs_error: 0.0,
+                });
+                return Some(decode_visit_index);
+            }
+        }
+        None
+    }
+}
+
+fn max_abs_error(expected: &[f32], actual: &[f32]) -> f32 {
+    expected
+        .iter()
+        .zip(actual.iter())
+        .fold(0.0f32, |max_err, (expected, actual)| {
+            max_err.max((expected - actual).abs())
+        })
+}
+
+fn record_partition_node_post_children(
+    ctx: &BandCtx,
+    node_visit_index: usize,
+    left_child_vector: &[f32],
+    right_child_vector: &[f32],
+    parent_after_children: &[f32],
+) {
+    if ctx.encode {
+        let mut snapshots = partition_encode_node_snapshots_slot().lock().unwrap();
+        let left_descendant_visit_index = snapshots
+            .iter()
+            .find(|candidate| {
+                candidate.depth == snapshots[node_visit_index].depth + 1
+                    && candidate.path_bits == (snapshots[node_visit_index].path_bits << 1)
+            })
+            .map(|candidate| candidate.visit_index)
+            .unwrap_or(usize::MAX);
+        let right_descendant_visit_index = snapshots
+            .iter()
+            .find(|candidate| {
+                candidate.depth == snapshots[node_visit_index].depth + 1
+                    && candidate.path_bits == ((snapshots[node_visit_index].path_bits << 1) | 1)
+            })
+            .map(|candidate| candidate.visit_index)
+            .unwrap_or(usize::MAX);
+        if let Some(snapshot) = snapshots.get_mut(node_visit_index) {
+            snapshot.left_child_vector = left_child_vector.to_vec();
+            snapshot.right_child_vector = right_child_vector.to_vec();
+            snapshot.parent_after_children = parent_after_children.to_vec();
+            snapshot.left_child_after_return = left_child_vector.to_vec();
+            if snapshot.parent_left_slice_after_left_return.is_empty() {
+                snapshot.parent_left_slice_after_left_return = left_child_vector.to_vec();
+            }
+            snapshot.right_child_after_return = right_child_vector.to_vec();
+            snapshot.parent_before_final_return = parent_after_children.to_vec();
+            snapshot.child_left_descendant_visit_index = left_descendant_visit_index;
+            snapshot.child_right_descendant_visit_index = right_descendant_visit_index;
+        }
+    } else if let Some(trace) = partition_roundtrip_trace_slot().lock().unwrap().as_mut()
+        && let Some(snapshot) = partition_encode_node_snapshots_slot()
+            .lock()
+            .unwrap()
+            .get(trace.nodes[node_visit_index].encode_visit_index)
+            .cloned()
+    {
+        let node_depth = trace.nodes[node_visit_index].depth;
+        let node_path_bits = trace.nodes[node_visit_index].path_bits;
+        let decode_child_left_descendant_visit_index = trace
+            .nodes
+            .iter()
+            .find(|candidate| {
+                candidate.depth == node_depth + 1
+                    && candidate.path_bits == (node_path_bits << 1)
+            })
+            .map(|candidate| candidate.decode_visit_index)
+            .unwrap_or(usize::MAX);
+        let decode_child_right_descendant_visit_index = trace
+            .nodes
+            .iter()
+            .find(|candidate| {
+                candidate.depth == node_depth + 1
+                    && candidate.path_bits == ((node_path_bits << 1) | 1)
+            })
+            .map(|candidate| candidate.decode_visit_index)
+            .unwrap_or(usize::MAX);
+        let node = trace
+            .nodes
+            .get_mut(node_visit_index)
+            .expect("expected traced partition node");
+        node.encode_left_child_after_return = snapshot.left_child_after_return.clone();
+        node.decode_left_child_after_return = left_child_vector.to_vec();
+        node.encode_right_child_after_return = snapshot.right_child_after_return.clone();
+        node.decode_right_child_after_return = right_child_vector.to_vec();
+        node.encode_parent_before_final_return = snapshot.parent_before_final_return.clone();
+        node.decode_parent_before_final_return = parent_after_children.to_vec();
+        node.encode_child_left_descendant_visit_index = snapshot.child_left_descendant_visit_index;
+        node.encode_child_right_descendant_visit_index =
+            snapshot.child_right_descendant_visit_index;
+        node.decode_child_left_descendant_visit_index =
+            decode_child_left_descendant_visit_index;
+        node.decode_child_right_descendant_visit_index =
+            decode_child_right_descendant_visit_index;
+        node.encode_left_child_vector = snapshot.left_child_vector.clone();
+        node.decode_left_child_vector = left_child_vector.to_vec();
+        node.encode_right_child_vector = snapshot.right_child_vector.clone();
+        node.decode_right_child_vector = right_child_vector.to_vec();
+        node.encode_parent_after_children = snapshot.parent_after_children.clone();
+        node.decode_parent_after_children = parent_after_children.to_vec();
+        node.left_child_max_abs_error = max_abs_error(&snapshot.left_child_vector, left_child_vector);
+        node.right_child_max_abs_error =
+            max_abs_error(&snapshot.right_child_vector, right_child_vector);
+        node.parent_after_children_max_abs_error =
+            max_abs_error(&snapshot.parent_after_children, parent_after_children);
+    }
+}
+
+fn record_partition_node_left_return(
+    ctx: &BandCtx,
+    node_visit_index: usize,
+    left_child_vector: &[f32],
+    parent_left_slice_after_left_return: &[f32],
+) {
+    if ctx.encode {
+        if let Some(snapshot) = partition_encode_node_snapshots_slot()
+            .lock()
+            .unwrap()
+            .get_mut(node_visit_index)
+        {
+            snapshot.left_child_after_return = left_child_vector.to_vec();
+            snapshot.parent_left_slice_after_left_return =
+                parent_left_slice_after_left_return.to_vec();
+        }
+    } else if let Some(trace) = partition_roundtrip_trace_slot().lock().unwrap().as_mut()
+        && let Some(node) = trace.nodes.get_mut(node_visit_index)
+        && let Some(snapshot) = partition_encode_node_snapshots_slot()
+            .lock()
+            .unwrap()
+            .get(node.encode_visit_index)
+            .cloned()
+    {
+        if node.decode_parent_left_slice_after_left_return.is_empty() {
+            node.decode_parent_left_slice_after_left_return = left_child_vector.to_vec();
+        }
+        node.encode_left_child_after_return = snapshot.left_child_after_return.clone();
+        node.decode_left_child_after_return = left_child_vector.to_vec();
+        node.encode_parent_left_slice_after_left_return =
+            snapshot.parent_left_slice_after_left_return.clone();
+        node.decode_parent_left_slice_after_left_return =
+            parent_left_slice_after_left_return.to_vec();
+        node.left_child_max_abs_error =
+            max_abs_error(&snapshot.left_child_after_return, left_child_vector);
+        node.left_return_parent_slice_max_abs_error = max_abs_error(
+            &snapshot.parent_left_slice_after_left_return,
+            parent_left_slice_after_left_return,
+        );
+    }
+}
+
+fn record_partition_node_left_call_inputs(
+    ctx: &BandCtx,
+    node_visit_index: usize,
+    budget: i32,
+    fill: u32,
+    gain: f32,
+) {
+    if ctx.encode {
+        if let Some(snapshot) = partition_encode_node_snapshots_slot()
+            .lock()
+            .unwrap()
+            .get_mut(node_visit_index)
+        {
+            snapshot.left_child_budget_before_call = budget;
+            snapshot.left_child_fill_before_call = fill;
+            snapshot.left_child_gain_before_call = gain;
+        }
+    } else if let Some(trace) = partition_roundtrip_trace_slot().lock().unwrap().as_mut()
+        && let Some(node) = trace.nodes.get_mut(node_visit_index)
+    {
+        node.decode_left_child_budget_before_call = budget;
+        node.decode_left_child_fill_before_call = fill;
+        node.decode_left_child_gain_before_call = gain;
+        node.decode_subchild_left_budget_before_call = budget;
+        node.decode_subchild_left_fill_before_call = fill;
+        node.decode_subchild_left_gain_before_call = gain;
+    }
+}
+
+fn record_partition_leaf_snapshot(
+    ctx: &BandCtx,
+    n: usize,
+    lm: i32,
+    b: i32,
+    b_blocks: i32,
+    fill: u32,
+    remaining_bits_on_entry: i32,
+    tell_on_entry: i32,
+    curr_bits: i32,
+    q: i32,
+    k: i32,
+    remaining_bits_after_budget: i32,
+    has_lowband: bool,
+    zero_pulse_mode: u8,
+    fill_masked: u32,
+    decode_zero_pulse_snapshot: Option<DecodeZeroPulseSnapshot>,
+    input_vector: &[f32],
+    quantized_vector: &[f32],
+    vector: &[f32],
+) {
+    if ctx.encode {
+        let mut snapshots = partition_encode_leaf_snapshots_slot().lock().unwrap();
+        let visit_index = snapshots.len();
+        let parent_node_visit_index = partition_encode_node_snapshots_slot()
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|snapshot| {
+                snapshot.depth < ctx.trace_depth
+                    && ctx.trace_depth.saturating_sub(snapshot.depth) <= 64
+                    && (ctx.trace_path_bits >> (ctx.trace_depth - snapshot.depth))
+                        == snapshot.path_bits
+            })
+            .map(|snapshot| snapshot.visit_index)
+            .unwrap_or(usize::MAX);
+        snapshots.push(EncodePartitionLeafSnapshot {
+                band: ctx.i,
+                path_bits: ctx.trace_path_bits,
+                depth: ctx.trace_depth,
+                visit_index,
+                parent_node_visit_index,
+                n,
+                lm,
+                b,
+                b_blocks,
+                fill,
+                remaining_bits_on_entry,
+                tell_on_entry,
+                curr_bits,
+                q,
+                k,
+                remaining_bits_after_budget,
+                has_lowband,
+                zero_pulse_mode,
+                fill_masked,
+                input_vector: input_vector.to_vec(),
+                quantized_vector: quantized_vector.to_vec(),
+                vector: vector.to_vec(),
+            });
+    } else {
+        let maybe_snapshot = partition_encode_leaf_snapshots_slot()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|snapshot| {
+                snapshot.band == ctx.i
+                    && snapshot.path_bits == ctx.trace_path_bits
+                    && snapshot.depth == ctx.trace_depth
+                    && snapshot.n == n
+            })
+            .cloned();
+        if let Some(snapshot) = maybe_snapshot {
+            let mut max_abs_error = 0.0f32;
+            let mut sq_error = 0.0f32;
+            let mut count = 0usize;
+            for (expected, actual) in snapshot.vector.iter().zip(vector.iter()) {
+                let err = (expected - actual).abs();
+                max_abs_error = max_abs_error.max(err);
+                sq_error += err * err;
+                count += 1;
+            }
+            let rms_error = if count == 0 {
+                0.0
+            } else {
+                (sq_error / count as f32).sqrt()
+            };
+            let mut max_abs_error_vs_quantized = 0.0f32;
+            let mut sq_error_vs_quantized = 0.0f32;
+            let mut quantized_count = 0usize;
+            for (expected, actual) in snapshot.quantized_vector.iter().zip(vector.iter()) {
+                let err = (expected - actual).abs();
+                max_abs_error_vs_quantized = max_abs_error_vs_quantized.max(err);
+                sq_error_vs_quantized += err * err;
+                quantized_count += 1;
+            }
+            let rms_error_vs_quantized = if quantized_count == 0 {
+                0.0
+            } else {
+                (sq_error_vs_quantized / quantized_count as f32).sqrt()
+            };
+            if let Some(trace) = partition_roundtrip_trace_slot().lock().unwrap().as_mut() {
+                let decode_visit_index = trace.leaves.len();
+                let decode_parent_node_visit_index = trace
+                    .nodes
+                    .iter()
+                    .rev()
+                    .find(|node| {
+                        node.depth < ctx.trace_depth
+                            && ctx.trace_depth.saturating_sub(node.depth) <= 64
+                            && (ctx.trace_path_bits >> (ctx.trace_depth - node.depth))
+                                == node.path_bits
+                    })
+                    .map(|node| node.decode_visit_index)
+                    .unwrap_or(usize::MAX);
+                trace.leaves.push(PartitionLeafRoundtripTrace {
+                    band: ctx.i,
+                    path_bits: ctx.trace_path_bits,
+                    depth: ctx.trace_depth,
+                    encode_visit_index: snapshot.visit_index,
+                    decode_visit_index,
+                    encode_parent_node_visit_index: snapshot.parent_node_visit_index,
+                    decode_parent_node_visit_index,
+                    n,
+                    lm: snapshot.lm,
+                    b,
+                    b_blocks,
+                    fill,
+                    encode_remaining_bits_on_entry: snapshot.remaining_bits_on_entry,
+                    decode_remaining_bits_on_entry: remaining_bits_on_entry,
+                    encode_tell_on_entry: snapshot.tell_on_entry,
+                    decode_tell_on_entry: tell_on_entry,
+                    encode_curr_bits: snapshot.curr_bits,
+                    decode_curr_bits: curr_bits,
+                    encode_q: snapshot.q,
+                    decode_q: q,
+                    encode_k: snapshot.k,
+                    decode_k: k,
+                    encode_remaining_bits_after_budget: snapshot.remaining_bits_after_budget,
+                    decode_remaining_bits_after_budget: remaining_bits_after_budget,
+                    encode_has_lowband: snapshot.has_lowband,
+                    decode_has_lowband: has_lowband,
+                    encode_zero_pulse_mode: snapshot.zero_pulse_mode,
+                    decode_zero_pulse_mode: zero_pulse_mode,
+                    encode_fill_masked: snapshot.fill_masked,
+                    decode_fill_masked: fill_masked,
+                    encode_input_vector: snapshot.input_vector,
+                    decode_input_vector: input_vector.to_vec(),
+                    encode_quantized_vector: snapshot.quantized_vector,
+                    encode_vector: snapshot.vector,
+                    decode_vector: vector.to_vec(),
+                    decode_zero_pulse_seed_on_entry: decode_zero_pulse_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.seed_on_entry),
+                    decode_zero_pulse_lowband: decode_zero_pulse_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.lowband.clone()),
+                    decode_zero_pulse_pre_renorm_vector: decode_zero_pulse_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.pre_renorm_vector.clone()),
+                    decode_zero_pulse_post_renorm_vector: decode_zero_pulse_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.post_renorm_vector.clone()),
+                    max_abs_error,
+                    rms_error,
+                    max_abs_error_vs_quantized,
+                    rms_error_vs_quantized,
+                });
+            }
+        }
+    }
+}
+
+fn apply_zero_pulse_reconstruction(
+    x: &mut [f32],
+    lowband: Option<&[f32]>,
+    b_blocks: i32,
+    fill: u32,
+    gain: f32,
+    seed: &mut u32,
+) -> (u32, u8, u32, Vec<f32>) {
+    let cm_mask = (1u32 << b_blocks) - 1;
+    let fill_masked = fill & cm_mask;
+    if fill_masked == 0 {
+        x.fill(0.0);
+        return (0, 1, fill_masked, x.to_vec());
+    }
+
+    if let Some(lb) = lowband {
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use std::arch::aarch64::*;
+            let n8 = x.len() & !7;
+            let mut i = 0;
+            while i < n8 {
+                let mut vals = [0.0f32; 8];
+                for j in 0..8 {
+                    *seed = celt_lcg_rand(*seed);
+                    vals[j] = if *seed & 0x8000 != 0 {
+                        1.0 / 256.0
+                    } else {
+                        -1.0 / 256.0
+                    };
+                }
+                let vnoise = vld1q_f32(vals.as_ptr());
+                let vnoise1 = vld1q_f32(vals.as_ptr().add(4));
+                let vlb = vld1q_f32(lb.as_ptr().add(i));
+                let vlb1 = vld1q_f32(lb.as_ptr().add(i + 4));
+                let vres = vaddq_f32(vlb, vnoise);
+                let vres1 = vaddq_f32(vlb1, vnoise1);
+                vst1q_f32(x.as_mut_ptr().add(i), vres);
+                vst1q_f32(x.as_mut_ptr().add(i + 4), vres1);
+                i += 8;
+            }
+            for j in i..x.len() {
+                *seed = celt_lcg_rand(*seed);
+                x[j] = lb[j]
+                    + if *seed & 0x8000 != 0 {
+                        1.0 / 256.0
+                    } else {
+                        -1.0 / 256.0
+                    };
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            for j in 0..x.len() {
+                *seed = celt_lcg_rand(*seed);
+                x[j] = lb[j]
+                    + if *seed & 0x8000 != 0 {
+                        1.0 / 256.0
+                    } else {
+                        -1.0 / 256.0
+                    };
+            }
+        }
+        let pre_renorm = x.to_vec();
+        renormalise_vector(x, x.len(), gain);
+        return (fill_masked, 2, fill_masked, pre_renorm);
+    }
+
+    for xv in x.iter_mut() {
+        *seed = celt_lcg_rand(*seed);
+        *xv = ((*seed as i32 >> 20) as f32) / 16384.0;
+    }
+    let pre_renorm = x.to_vec();
+    renormalise_vector(x, x.len(), gain);
+    (cm_mask, 3, fill_masked, pre_renorm)
+}
+
+#[doc(hidden)]
+pub fn model_zero_pulse_reference_for_test(
+    n: usize,
+    b_blocks: i32,
+    fill: u32,
+    lowband: Option<&[f32]>,
+    gain: f32,
+    seed_on_entry: u32,
+) -> ZeroPulseReferenceModel {
+    let mut vector = vec![0.0f32; n];
+    let mut seed = seed_on_entry;
+    let (cm, mode, fill_masked, pre_renorm_vector) =
+        apply_zero_pulse_reconstruction(&mut vector, lowband, b_blocks, fill, gain, &mut seed);
+    let _ = cm;
+    ZeroPulseReferenceModel {
+        mode,
+        fill_masked,
+        seed_on_entry,
+        seed_after: seed,
+        lowband: lowband.map(|lb| lb.to_vec()),
+        pre_renorm_vector,
+        post_renorm_vector: vector,
+    }
+}
+
+fn leaf_quantized_reference_vector(
+    input_vector: &[f32],
+    n: usize,
+    k: i32,
+    spread: i32,
+    b_blocks: i32,
+    gain: f32,
+) -> Vec<f32> {
+    if k == 0 {
+        return input_vector.to_vec();
+    }
+    let mut reference = input_vector.to_vec();
+    let mut scratch = RangeCoder::new_encoder(1024);
+    let _ = alg_quant(
+        &mut reference,
+        n,
+        k,
+        spread,
+        b_blocks as usize,
+        &mut scratch,
+        gain,
+        true,
+    );
+    reference
+}
+
+fn record_root_band_budget_snapshot(
+    encode: bool,
+    band: usize,
+    tell: i32,
+    balance_before_tell_adjust: i32,
+    balance_after_tell_adjust: i32,
+    remaining_bits: i32,
+    curr_balance: i32,
+    pulses: i32,
+    b: i32,
+    b_blocks: i32,
+    tf_change: i32,
+    n: usize,
+) {
+    if encode {
+        let mut snapshots = root_band_budget_encode_snapshots_slot().lock().unwrap();
+        let visit_index = snapshots.len();
+        snapshots.push(EncodeRootBandBudgetSnapshot {
+            band,
+            visit_index,
+            tell,
+            balance_before_tell_adjust,
+            balance_after_tell_adjust,
+            remaining_bits,
+            curr_balance,
+            pulses,
+            b,
+            b_blocks,
+            tf_change,
+            n,
+        });
+    } else {
+        let maybe_snapshot = root_band_budget_encode_snapshots_slot()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|snapshot| snapshot.band == band)
+            .cloned();
+        if let Some(snapshot) = maybe_snapshot {
+            let mut traces = root_band_budget_trace_slot().lock().unwrap();
+            let decode_visit_index = traces.len();
+            traces.push(RootBandBudgetTrace {
+                band,
+                encode_visit_index: snapshot.visit_index,
+                decode_visit_index,
+                encode_tell: snapshot.tell,
+                decode_tell: tell,
+                encode_balance_before_tell_adjust: snapshot.balance_before_tell_adjust,
+                decode_balance_before_tell_adjust: balance_before_tell_adjust,
+                encode_balance_after_tell_adjust: snapshot.balance_after_tell_adjust,
+                decode_balance_after_tell_adjust: balance_after_tell_adjust,
+                encode_remaining_bits: snapshot.remaining_bits,
+                decode_remaining_bits: remaining_bits,
+                encode_curr_balance: snapshot.curr_balance,
+                decode_curr_balance: curr_balance,
+                encode_pulses: snapshot.pulses,
+                decode_pulses: pulses,
+                encode_b: snapshot.b,
+                decode_b: b,
+                b_blocks: snapshot.b_blocks,
+                tf_change: snapshot.tf_change,
+                n: snapshot.n,
+            });
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -639,6 +1805,7 @@ pub fn compute_theta(
     if stereo && ctx.i >= ctx.intensity {
         qn = 1;
     }
+    sctx.qn = qn;
 
     let mut itheta = 0;
     if ctx.encode {
@@ -834,6 +2001,9 @@ fn quant_partition_n2_encode(
     gain: f32,
     fill: u32,
 ) -> u32 {
+    let remaining_bits_on_entry = ctx.remaining_bits;
+    let tell_on_entry = tell_frac_inline!(ctx.rc);
+    let input_vector = x.to_vec();
     let mut q = bits2pulses(ctx.m, ctx.i, lm, b);
     let mut curr_bits = pulses2bits(ctx.m, ctx.i, lm, q);
     ctx.remaining_bits -= curr_bits;
@@ -845,17 +2015,57 @@ fn quant_partition_n2_encode(
         ctx.remaining_bits -= curr_bits;
     }
 
-    if q != 0 {
-        let k = get_pulses(q);
-        alg_quant(x, 2, k, ctx.spread, b_blocks as usize, ctx.rc, gain, false)
+    let k = if q != 0 { get_pulses(q) } else { 0 };
+    let quantized_reference = leaf_quantized_reference_vector(
+        &input_vector,
+        2,
+        k,
+        ctx.spread,
+        b_blocks,
+        gain,
+    );
+    let has_lowband = lowband.is_some();
+    let fill_masked = fill & ((1u32 << b_blocks) - 1);
+    let zero_pulse_mode = if q == 0 {
+        if has_lowband {
+            2
+        } else {
+            3
+        }
     } else {
-        let has_lowband = lowband.is_some();
+        0
+    };
+    let cm = if q != 0 {
+        alg_quant(x, 2, k, ctx.spread, b_blocks as usize, ctx.rc, gain, true)
+    } else {
         if has_lowband {
             fill
         } else {
             (1u32 << b_blocks) - 1
         }
-    }
+    };
+    record_partition_leaf_snapshot(
+        ctx,
+        2,
+        lm,
+        b,
+        b_blocks,
+        fill,
+        remaining_bits_on_entry,
+        tell_on_entry,
+        curr_bits,
+        q,
+        k,
+        ctx.remaining_bits,
+        has_lowband,
+        zero_pulse_mode,
+        fill_masked,
+        None,
+        &input_vector,
+        &quantized_reference,
+        x,
+    );
+    cm
 }
 
 #[inline(always)]
@@ -869,6 +2079,9 @@ fn quant_partition_n4_encode(
     gain: f32,
     fill: u32,
 ) -> u32 {
+    let remaining_bits_on_entry = ctx.remaining_bits;
+    let tell_on_entry = tell_frac_inline!(ctx.rc);
+    let input_vector = x.to_vec();
     let mut q = bits2pulses(ctx.m, ctx.i, lm, b);
     let mut curr_bits = pulses2bits(ctx.m, ctx.i, lm, q);
     ctx.remaining_bits -= curr_bits;
@@ -880,17 +2093,57 @@ fn quant_partition_n4_encode(
         ctx.remaining_bits -= curr_bits;
     }
 
-    if q != 0 {
-        let k = get_pulses(q);
-        alg_quant(x, 4, k, ctx.spread, b_blocks as usize, ctx.rc, gain, false)
+    let k = if q != 0 { get_pulses(q) } else { 0 };
+    let quantized_reference = leaf_quantized_reference_vector(
+        &input_vector,
+        4,
+        k,
+        ctx.spread,
+        b_blocks,
+        gain,
+    );
+    let has_lowband = lowband.is_some();
+    let fill_masked = fill & ((1u32 << b_blocks) - 1);
+    let zero_pulse_mode = if q == 0 {
+        if has_lowband {
+            2
+        } else {
+            3
+        }
     } else {
-        let has_lowband = lowband.is_some();
+        0
+    };
+    let cm = if q != 0 {
+        alg_quant(x, 4, k, ctx.spread, b_blocks as usize, ctx.rc, gain, true)
+    } else {
         if has_lowband {
             fill
         } else {
             (1u32 << b_blocks) - 1
         }
-    }
+    };
+    record_partition_leaf_snapshot(
+        ctx,
+        4,
+        lm,
+        b,
+        b_blocks,
+        fill,
+        remaining_bits_on_entry,
+        tell_on_entry,
+        curr_bits,
+        q,
+        k,
+        ctx.remaining_bits,
+        has_lowband,
+        zero_pulse_mode,
+        fill_masked,
+        None,
+        &input_vector,
+        &quantized_reference,
+        x,
+    );
+    cm
 }
 
 #[inline(always)]
@@ -904,6 +2157,9 @@ fn quant_partition_n8_encode(
     gain: f32,
     fill: u32,
 ) -> u32 {
+    let remaining_bits_on_entry = ctx.remaining_bits;
+    let tell_on_entry = tell_frac_inline!(ctx.rc);
+    let input_vector = x.to_vec();
     let mut q = bits2pulses(ctx.m, ctx.i, lm, b);
     let mut curr_bits = pulses2bits(ctx.m, ctx.i, lm, q);
     ctx.remaining_bits -= curr_bits;
@@ -915,17 +2171,57 @@ fn quant_partition_n8_encode(
         ctx.remaining_bits -= curr_bits;
     }
 
-    if q != 0 {
-        let k = get_pulses(q);
-        alg_quant(x, 8, k, ctx.spread, b_blocks as usize, ctx.rc, gain, false)
+    let k = if q != 0 { get_pulses(q) } else { 0 };
+    let quantized_reference = leaf_quantized_reference_vector(
+        &input_vector,
+        8,
+        k,
+        ctx.spread,
+        b_blocks,
+        gain,
+    );
+    let has_lowband = lowband.is_some();
+    let fill_masked = fill & ((1u32 << b_blocks) - 1);
+    let zero_pulse_mode = if q == 0 {
+        if has_lowband {
+            2
+        } else {
+            3
+        }
     } else {
-        let has_lowband = lowband.is_some();
+        0
+    };
+    let cm = if q != 0 {
+        alg_quant(x, 8, k, ctx.spread, b_blocks as usize, ctx.rc, gain, true)
+    } else {
         if has_lowband {
             fill
         } else {
             (1u32 << b_blocks) - 1
         }
-    }
+    };
+    record_partition_leaf_snapshot(
+        ctx,
+        8,
+        lm,
+        b,
+        b_blocks,
+        fill,
+        remaining_bits_on_entry,
+        tell_on_entry,
+        curr_bits,
+        q,
+        k,
+        ctx.remaining_bits,
+        has_lowband,
+        zero_pulse_mode,
+        fill_masked,
+        None,
+        &input_vector,
+        &quantized_reference,
+        x,
+    );
+    cm
 }
 
 #[inline(always)]
@@ -941,6 +2237,9 @@ fn quant_partition_direct_encode(
     gain: f32,
     fill: u32,
 ) -> u32 {
+    let remaining_bits_on_entry = ctx.remaining_bits;
+    let tell_on_entry = tell_frac_inline!(ctx.rc);
+    let input_vector = x.to_vec();
     let mut q = bits2pulses(ctx.m, ctx.i, lm, b);
     let mut curr_bits = pulses2bits(ctx.m, ctx.i, lm, q);
     ctx.remaining_bits -= curr_bits;
@@ -952,17 +2251,57 @@ fn quant_partition_direct_encode(
         ctx.remaining_bits -= curr_bits;
     }
 
-    if q != 0 {
-        let k = get_pulses(q);
-        alg_quant(x, n, k, ctx.spread, b_blocks as usize, ctx.rc, gain, false)
+    let k = if q != 0 { get_pulses(q) } else { 0 };
+    let quantized_reference = leaf_quantized_reference_vector(
+        &input_vector,
+        n,
+        k,
+        ctx.spread,
+        b_blocks,
+        gain,
+    );
+    let has_lowband = lowband.is_some();
+    let fill_masked = fill & ((1u32 << b_blocks) - 1);
+    let zero_pulse_mode = if q == 0 {
+        if has_lowband {
+            2
+        } else {
+            3
+        }
     } else {
-        let has_lowband = lowband.is_some();
+        0
+    };
+    let cm = if q != 0 {
+        alg_quant(x, n, k, ctx.spread, b_blocks as usize, ctx.rc, gain, true)
+    } else {
         if has_lowband {
             fill
         } else {
             (1u32 << b_blocks) - 1
         }
-    }
+    };
+    record_partition_leaf_snapshot(
+        ctx,
+        n,
+        lm,
+        b,
+        b_blocks,
+        fill,
+        remaining_bits_on_entry,
+        tell_on_entry,
+        curr_bits,
+        q,
+        k,
+        ctx.remaining_bits,
+        has_lowband,
+        zero_pulse_mode,
+        fill_masked,
+        None,
+        &input_vector,
+        &quantized_reference,
+        x,
+    );
+    cm
 }
 
 #[inline(always)]
@@ -1000,6 +2339,9 @@ fn quant_partition_encode(
     };
 
     if should_split {
+        let child_remaining_bits_on_entry = ctx.remaining_bits;
+        let child_tell_on_entry = tell_frac_inline!(ctx.rc);
+        let child_fill_on_entry = fill;
         let mut sctx = SplitCtx {
             inv: false,
             imid: 0,
@@ -1007,6 +2349,7 @@ fn quant_partition_encode(
             delta: 0,
             itheta: 0,
             qalloc: 0,
+            qn: 0,
         };
         let mut b_mut = b;
         let mut fill_mut = fill;
@@ -1047,14 +2390,60 @@ fn quant_partition_encode(
         let mut sbits = b_mut - mbits;
         let mut mbits = mbits;
 
+        let remaining_bits_before_qalloc = ctx.remaining_bits + sctx.qalloc;
+        let remaining_bits_after_qalloc = ctx.remaining_bits;
+        let tell_before_qalloc = tell_frac_inline!(ctx.rc) - sctx.qalloc;
+        let tell_after_qalloc = tell_frac_inline!(ctx.rc);
         let mut rebalance = ctx.remaining_bits;
         let mut cm;
         let mid_gain = gain * (sctx.imid as f32 / 32768.0);
         let side_gain = gain * (sctx.iside as f32 / 32768.0);
+        let recurse_mid_first = mbits >= sbits;
+        let left_child_budget_before_call = if recurse_mid_first { mbits } else { 0 };
+        let left_child_fill_before_call = if recurse_mid_first { fill_mut } else { 0 };
+        let left_child_gain_before_call = if recurse_mid_first { mid_gain } else { 0.0 };
+        let node_visit_index = record_partition_node_snapshot(
+            ctx,
+            n,
+            lm,
+            b,
+            b_blocks,
+            fill,
+            fill_mut,
+            sctx.qn,
+            b_mut,
+            remaining_bits_before_qalloc,
+            remaining_bits_after_qalloc,
+            tell_before_qalloc,
+            tell_after_qalloc,
+            child_remaining_bits_on_entry,
+            child_tell_on_entry,
+            child_fill_on_entry,
+            &sctx,
+            mbits,
+            sbits,
+            recurse_mid_first,
+            left_child_budget_before_call,
+            left_child_fill_before_call,
+            left_child_gain_before_call,
+        );
+        let parent_path_bits = ctx.trace_path_bits;
+        let parent_depth = ctx.trace_depth;
 
         if mbits >= sbits {
             if let Some(lb) = lowband {
                 let (lb_mid, lb_side) = lb.split_at_mut(mid);
+                ctx.trace_path_bits = parent_path_bits << 1;
+                ctx.trace_depth = parent_depth + 1;
+                if let Some(node_visit_index) = node_visit_index {
+                    record_partition_node_left_call_inputs(
+                        ctx,
+                        node_visit_index,
+                        mbits,
+                        fill_mut,
+                        mid_gain,
+                    );
+                }
                 cm = quant_partition_encode(
                     ctx,
                     x_mid,
@@ -1070,6 +2459,8 @@ fn quant_partition_encode(
                 if rebalance > (3 << 3) && sctx.itheta != 0 {
                     sbits += rebalance - (3 << 3);
                 }
+                ctx.trace_path_bits = (parent_path_bits << 1) | 1;
+                ctx.trace_depth = parent_depth + 1;
                 cm |= quant_partition_encode(
                     ctx,
                     x_side,
@@ -1082,6 +2473,17 @@ fn quant_partition_encode(
                     fill_mut >> b_blocks,
                 ) << (b0 >> 1);
             } else {
+                ctx.trace_path_bits = parent_path_bits << 1;
+                ctx.trace_depth = parent_depth + 1;
+                if let Some(node_visit_index) = node_visit_index {
+                    record_partition_node_left_call_inputs(
+                        ctx,
+                        node_visit_index,
+                        mbits,
+                        fill_mut,
+                        mid_gain,
+                    );
+                }
                 cm = quant_partition_encode(
                     ctx, x_mid, mid, mbits, b_blocks, None, lm, mid_gain, fill_mut,
                 );
@@ -1089,6 +2491,8 @@ fn quant_partition_encode(
                 if rebalance > (3 << 3) && sctx.itheta != 0 {
                     sbits += rebalance - (3 << 3);
                 }
+                ctx.trace_path_bits = (parent_path_bits << 1) | 1;
+                ctx.trace_depth = parent_depth + 1;
                 cm |= quant_partition_encode(
                     ctx,
                     x_side,
@@ -1103,6 +2507,8 @@ fn quant_partition_encode(
             }
         } else if let Some(lb) = lowband {
             let (lb_mid, lb_side) = lb.split_at_mut(mid);
+            ctx.trace_path_bits = (parent_path_bits << 1) | 1;
+            ctx.trace_depth = parent_depth + 1;
             cm = quant_partition_encode(
                 ctx,
                 x_side,
@@ -1118,6 +2524,17 @@ fn quant_partition_encode(
             if rebalance > (3 << 3) && sctx.itheta != 16384 {
                 mbits += rebalance - (3 << 3);
             }
+            ctx.trace_path_bits = parent_path_bits << 1;
+            ctx.trace_depth = parent_depth + 1;
+            if let Some(node_visit_index) = node_visit_index {
+                record_partition_node_left_call_inputs(
+                    ctx,
+                    node_visit_index,
+                    mbits,
+                    fill_mut,
+                    mid_gain,
+                );
+            }
             cm |= quant_partition_encode(
                 ctx,
                 x_mid,
@@ -1130,6 +2547,8 @@ fn quant_partition_encode(
                 fill_mut,
             );
         } else {
+            ctx.trace_path_bits = (parent_path_bits << 1) | 1;
+            ctx.trace_depth = parent_depth + 1;
             cm = quant_partition_encode(
                 ctx,
                 x_side,
@@ -1145,13 +2564,38 @@ fn quant_partition_encode(
             if rebalance > (3 << 3) && sctx.itheta != 16384 {
                 mbits += rebalance - (3 << 3);
             }
+            ctx.trace_path_bits = parent_path_bits << 1;
+            ctx.trace_depth = parent_depth + 1;
+            if let Some(node_visit_index) = node_visit_index {
+                record_partition_node_left_call_inputs(
+                    ctx,
+                    node_visit_index,
+                    mbits,
+                    fill_mut,
+                    mid_gain,
+                );
+            }
             cm |= quant_partition_encode(
                 ctx, x_mid, mid, mbits, b_blocks, None, lm, mid_gain, fill_mut,
             );
         }
+        let left_child_vector = x_mid.to_vec();
+        let right_child_vector = x_side.to_vec();
+        let parent_after_children = x.to_vec();
+        ctx.trace_path_bits = parent_path_bits;
+        ctx.trace_depth = parent_depth;
+        if let Some(node_visit_index) = node_visit_index {
+            record_partition_node_post_children(
+                ctx,
+                node_visit_index,
+                &left_child_vector,
+                &right_child_vector,
+                &parent_after_children,
+            );
+        }
         cm
     } else {
-        // No split — dispatch to small-N specialized encoders or direct path
+        // No split - keep the same small-N encode paths as the upstream C implementation.
         if n == 4 {
             return quant_partition_n4_encode(ctx, x, b, b_blocks, lowband, lm, gain, fill);
         }
@@ -1161,6 +2605,9 @@ fn quant_partition_encode(
         if n == 16 {
             return quant_partition_direct_encode(ctx, x, n, b, b_blocks, lowband, lm, gain, fill);
         }
+        let remaining_bits_on_entry = ctx.remaining_bits;
+        let tell_on_entry = tell_frac_inline!(ctx.rc);
+        let input_vector = x.to_vec();
         let mut q = bits2pulses(ctx.m, ctx.i, lm, b);
         let mut curr_bits = pulses2bits(ctx.m, ctx.i, lm, q);
         ctx.remaining_bits -= curr_bits;
@@ -1172,14 +2619,55 @@ fn quant_partition_encode(
             ctx.remaining_bits -= curr_bits;
         }
 
-        if q != 0 {
-            let k = get_pulses(q);
-            alg_quant(x, n, k, ctx.spread, b_blocks as usize, ctx.rc, gain, false)
-        } else if lowband.is_some() {
+        let k = if q != 0 { get_pulses(q) } else { 0 };
+        let quantized_reference = leaf_quantized_reference_vector(
+            &input_vector,
+            n,
+            k,
+            ctx.spread,
+            b_blocks,
+            gain,
+        );
+        let has_lowband = lowband.is_some();
+        let fill_masked = fill & ((1u32 << b_blocks) - 1);
+        let zero_pulse_mode = if q == 0 {
+            if has_lowband {
+                2
+            } else {
+                3
+            }
+        } else {
+            0
+        };
+        let cm = if q != 0 {
+            alg_quant(x, n, k, ctx.spread, b_blocks as usize, ctx.rc, gain, true)
+        } else if has_lowband {
             fill
         } else {
             (1 << b_blocks) - 1
-        }
+        };
+        record_partition_leaf_snapshot(
+            ctx,
+            n,
+            lm,
+            b,
+            b_blocks,
+            fill,
+            remaining_bits_on_entry,
+            tell_on_entry,
+            curr_bits,
+            q,
+            k,
+            ctx.remaining_bits,
+            has_lowband,
+            zero_pulse_mode,
+            fill_masked,
+            None,
+            &input_vector,
+            &quantized_reference,
+            x,
+        );
+        cm
     }
 }
 
@@ -1213,6 +2701,9 @@ pub fn quant_partition(
         false
     };
     if should_split {
+        let child_remaining_bits_on_entry = ctx.remaining_bits;
+        let child_tell_on_entry = tell_frac_inline!(ctx.rc);
+        let child_fill_on_entry = fill;
         let mut sctx = SplitCtx {
             inv: false,
             imid: 0,
@@ -1220,6 +2711,7 @@ pub fn quant_partition(
             delta: 0,
             itheta: 0,
             qalloc: 0,
+            qn: 0,
         };
         let mut b_mut = b;
         let mut fill_mut = fill;
@@ -1261,12 +2753,64 @@ pub fn quant_partition(
         let mut sbits = b_mut - mbits;
         let mut mbits = mbits;
 
+        let remaining_bits_before_qalloc = ctx.remaining_bits + sctx.qalloc;
+        let remaining_bits_after_qalloc = ctx.remaining_bits;
+        let tell_before_qalloc = tell_frac_inline!(ctx.rc) - sctx.qalloc;
+        let tell_after_qalloc = tell_frac_inline!(ctx.rc);
         let mut rebalance = ctx.remaining_bits;
         let mut cm;
+        let recurse_mid_first = mbits >= sbits;
+        let left_gain_before_call = gain * (sctx.imid as f32 / 32768.0);
+        let left_child_budget_before_call = if recurse_mid_first { mbits } else { 0 };
+        let left_child_fill_before_call = if recurse_mid_first { fill_mut } else { 0 };
+        let left_child_gain_before_call = if recurse_mid_first {
+            left_gain_before_call
+        } else {
+            0.0
+        };
+        let node_visit_index = record_partition_node_snapshot(
+            ctx,
+            n,
+            lm,
+            b,
+            b_blocks,
+            fill,
+            fill_mut,
+            sctx.qn,
+            b_mut,
+            remaining_bits_before_qalloc,
+            remaining_bits_after_qalloc,
+            tell_before_qalloc,
+            tell_after_qalloc,
+            child_remaining_bits_on_entry,
+            child_tell_on_entry,
+            child_fill_on_entry,
+            &sctx,
+            mbits,
+            sbits,
+            recurse_mid_first,
+            left_child_budget_before_call,
+            left_child_fill_before_call,
+            left_child_gain_before_call,
+        );
+        let parent_path_bits = ctx.trace_path_bits;
+        let parent_depth = ctx.trace_depth;
 
         if mbits >= sbits {
             if let Some(lb) = lowband {
                 let (lb_mid, lb_side) = lb.split_at_mut(mid);
+                ctx.trace_path_bits = parent_path_bits << 1;
+                ctx.trace_depth = parent_depth + 1;
+                let left_gain = gain * (sctx.imid as f32 / 32768.0);
+                if let Some(node_visit_index) = node_visit_index {
+                    record_partition_node_left_call_inputs(
+                        ctx,
+                        node_visit_index,
+                        mbits,
+                        fill_mut,
+                        left_gain,
+                    );
+                }
                 cm = quant_partition(
                     ctx,
                     x_mid,
@@ -1275,13 +2819,25 @@ pub fn quant_partition(
                     b_blocks,
                     Some(lb_mid),
                     lm,
-                    gain * (sctx.imid as f32 / 32768.0),
+                    left_gain,
                     fill_mut,
                 );
+                if let Some(node_visit_index) = node_visit_index {
+                    let left_child_after_return = x_mid.to_vec();
+                    let parent_left_slice_after_left_return = left_child_after_return.clone();
+                    record_partition_node_left_return(
+                        ctx,
+                        node_visit_index,
+                        &left_child_after_return,
+                        &parent_left_slice_after_left_return,
+                    );
+                }
                 rebalance = mbits - (rebalance - ctx.remaining_bits);
                 if rebalance > (3 << 3) && sctx.itheta != 0 {
                     sbits += rebalance - (3 << 3);
                 }
+                ctx.trace_path_bits = (parent_path_bits << 1) | 1;
+                ctx.trace_depth = parent_depth + 1;
                 cm |= quant_partition(
                     ctx,
                     x_side,
@@ -1294,6 +2850,18 @@ pub fn quant_partition(
                     fill_mut >> b_blocks,
                 ) << (b0 >> 1);
             } else {
+                ctx.trace_path_bits = parent_path_bits << 1;
+                ctx.trace_depth = parent_depth + 1;
+                let left_gain = gain * (sctx.imid as f32 / 32768.0);
+                if let Some(node_visit_index) = node_visit_index {
+                    record_partition_node_left_call_inputs(
+                        ctx,
+                        node_visit_index,
+                        mbits,
+                        fill_mut,
+                        left_gain,
+                    );
+                }
                 cm = quant_partition(
                     ctx,
                     x_mid,
@@ -1302,13 +2870,25 @@ pub fn quant_partition(
                     b_blocks,
                     None,
                     lm,
-                    gain * (sctx.imid as f32 / 32768.0),
+                    left_gain,
                     fill_mut,
                 );
+                if let Some(node_visit_index) = node_visit_index {
+                    let left_child_after_return = x_mid.to_vec();
+                    let parent_left_slice_after_left_return = left_child_after_return.clone();
+                    record_partition_node_left_return(
+                        ctx,
+                        node_visit_index,
+                        &left_child_after_return,
+                        &parent_left_slice_after_left_return,
+                    );
+                }
                 rebalance = mbits - (rebalance - ctx.remaining_bits);
                 if rebalance > (3 << 3) && sctx.itheta != 0 {
                     sbits += rebalance - (3 << 3);
                 }
+                ctx.trace_path_bits = (parent_path_bits << 1) | 1;
+                ctx.trace_depth = parent_depth + 1;
                 cm |= quant_partition(
                     ctx,
                     x_side,
@@ -1323,6 +2903,8 @@ pub fn quant_partition(
             }
         } else if let Some(lb) = lowband {
             let (lb_mid, lb_side) = lb.split_at_mut(mid);
+            ctx.trace_path_bits = (parent_path_bits << 1) | 1;
+            ctx.trace_depth = parent_depth + 1;
             cm = quant_partition(
                 ctx,
                 x_side,
@@ -1338,6 +2920,18 @@ pub fn quant_partition(
             if rebalance > (3 << 3) && sctx.itheta != 16384 {
                 mbits += rebalance - (3 << 3);
             }
+            ctx.trace_path_bits = parent_path_bits << 1;
+            ctx.trace_depth = parent_depth + 1;
+            let left_gain = gain * (sctx.imid as f32 / 32768.0);
+            if let Some(node_visit_index) = node_visit_index {
+                record_partition_node_left_call_inputs(
+                    ctx,
+                    node_visit_index,
+                    mbits,
+                    fill_mut,
+                    left_gain,
+                );
+            }
             cm |= quant_partition(
                 ctx,
                 x_mid,
@@ -1346,10 +2940,22 @@ pub fn quant_partition(
                 b_blocks,
                 Some(lb_mid),
                 lm,
-                gain * (sctx.imid as f32 / 32768.0),
+                left_gain,
                 fill_mut,
             );
+            if let Some(node_visit_index) = node_visit_index {
+                let left_child_after_return = x_mid.to_vec();
+                let parent_left_slice_after_left_return = left_child_after_return.clone();
+                record_partition_node_left_return(
+                    ctx,
+                    node_visit_index,
+                    &left_child_after_return,
+                    &parent_left_slice_after_left_return,
+                );
+            }
         } else {
+            ctx.trace_path_bits = (parent_path_bits << 1) | 1;
+            ctx.trace_depth = parent_depth + 1;
             cm = quant_partition(
                 ctx,
                 x_side,
@@ -1365,6 +2971,18 @@ pub fn quant_partition(
             if rebalance > (3 << 3) && sctx.itheta != 16384 {
                 mbits += rebalance - (3 << 3);
             }
+            ctx.trace_path_bits = parent_path_bits << 1;
+            ctx.trace_depth = parent_depth + 1;
+            let left_gain = gain * (sctx.imid as f32 / 32768.0);
+            if let Some(node_visit_index) = node_visit_index {
+                record_partition_node_left_call_inputs(
+                    ctx,
+                    node_visit_index,
+                    mbits,
+                    fill_mut,
+                    left_gain,
+                );
+            }
             cm |= quant_partition(
                 ctx,
                 x_mid,
@@ -1373,12 +2991,39 @@ pub fn quant_partition(
                 b_blocks,
                 None,
                 lm,
-                gain * (sctx.imid as f32 / 32768.0),
+                left_gain,
                 fill_mut,
+            );
+            if let Some(node_visit_index) = node_visit_index {
+                let left_child_after_return = x_mid.to_vec();
+                let parent_left_slice_after_left_return = left_child_after_return.clone();
+                record_partition_node_left_return(
+                    ctx,
+                    node_visit_index,
+                    &left_child_after_return,
+                    &parent_left_slice_after_left_return,
+                );
+            }
+        }
+        let left_child_vector = x_mid.to_vec();
+        let right_child_vector = x_side.to_vec();
+        let parent_after_children = x.to_vec();
+        ctx.trace_path_bits = parent_path_bits;
+        ctx.trace_depth = parent_depth;
+        if let Some(node_visit_index) = node_visit_index {
+            record_partition_node_post_children(
+                ctx,
+                node_visit_index,
+                &left_child_vector,
+                &right_child_vector,
+                &parent_after_children,
             );
         }
         cm
     } else {
+        let remaining_bits_on_entry = ctx.remaining_bits;
+        let tell_on_entry = tell_frac_inline!(ctx.rc);
+        let input_vector = x.to_vec();
         let mut q = bits2pulses(ctx.m, ctx.i, lm, b);
         let mut curr_bits = pulses2bits(ctx.m, ctx.i, lm, q);
         ctx.remaining_bits -= curr_bits;
@@ -1390,8 +3035,20 @@ pub fn quant_partition(
             ctx.remaining_bits -= curr_bits;
         }
 
-        if q != 0 {
-            let k = get_pulses(q);
+        let k = if q != 0 { get_pulses(q) } else { 0 };
+        let quantized_reference = leaf_quantized_reference_vector(
+            &input_vector,
+            n,
+            k,
+            ctx.spread,
+            b_blocks,
+            gain,
+        );
+        let has_lowband = lowband.is_some();
+        let mut fill_masked = 0u32;
+        let mut zero_pulse_mode = 0u8;
+        let mut decode_zero_pulse_snapshot = None;
+        let cm = if q != 0 {
             if ctx.encode {
                 alg_quant(
                     x,
@@ -1409,71 +3066,43 @@ pub fn quant_partition(
         } else {
             let mut cm = 0u32;
             if ctx.resynth {
-                let cm_mask = (1u32 << b_blocks) - 1;
-                let fill_masked = fill & cm_mask;
-                if fill_masked == 0 {
-                    x[..n].fill(0.0);
-                } else if let Some(lb) = lowband {
-                    #[cfg(target_arch = "aarch64")]
-                    unsafe {
-                        use std::arch::aarch64::*;
-                        let n8 = n & !7;
-                        let mut i = 0;
-                        while i < n8 {
-                            let mut vals = [0.0f32; 8];
-                            for j in 0..8 {
-                                ctx.seed = celt_lcg_rand(ctx.seed);
-                                vals[j] = if ctx.seed & 0x8000 != 0 {
-                                    1.0 / 256.0
-                                } else {
-                                    -1.0 / 256.0
-                                };
-                            }
-                            let vnoise = vld1q_f32(vals.as_ptr());
-                            let vnoise1 = vld1q_f32(vals.as_ptr().add(4));
-                            let vlb = vld1q_f32(lb.as_ptr().add(i));
-                            let vlb1 = vld1q_f32(lb.as_ptr().add(i + 4));
-                            let vres = vaddq_f32(vlb, vnoise);
-                            let vres1 = vaddq_f32(vlb1, vnoise1);
-                            vst1q_f32(x.as_mut_ptr().add(i), vres);
-                            vst1q_f32(x.as_mut_ptr().add(i + 4), vres1);
-                            i += 8;
-                        }
-                        for j in i..n {
-                            ctx.seed = celt_lcg_rand(ctx.seed);
-                            x[j] = lb[j]
-                                + if ctx.seed & 0x8000 != 0 {
-                                    1.0 / 256.0
-                                } else {
-                                    -1.0 / 256.0
-                                };
-                        }
-                    }
-                    #[cfg(not(target_arch = "aarch64"))]
-                    {
-                        for j in 0..n {
-                            ctx.seed = celt_lcg_rand(ctx.seed);
-                            x[j] = lb[j]
-                                + if ctx.seed & 0x8000 != 0 {
-                                    1.0 / 256.0
-                                } else {
-                                    -1.0 / 256.0
-                                };
-                        }
-                    }
-                    renormalise_vector(x, n, gain);
-                    cm = fill_masked;
-                } else {
-                    for xv in x[..n].iter_mut() {
-                        ctx.seed = celt_lcg_rand(ctx.seed);
-                        *xv = ((ctx.seed as i32 >> 20) as f32) / 16384.0;
-                    }
-                    renormalise_vector(x, n, gain);
-                    cm = cm_mask;
-                }
+                let seed_on_entry = ctx.seed;
+                let (cm_value, mode, masked_fill, pre_renorm_vector) =
+                    apply_zero_pulse_reconstruction(x, lowband.as_deref(), b_blocks, fill, gain, &mut ctx.seed);
+                fill_masked = masked_fill;
+                zero_pulse_mode = mode;
+                cm = cm_value;
+                decode_zero_pulse_snapshot = Some(DecodeZeroPulseSnapshot {
+                    seed_on_entry,
+                    lowband: lowband.as_deref().map(|lb| lb.to_vec()),
+                    pre_renorm_vector,
+                    post_renorm_vector: x.to_vec(),
+                });
             }
             cm
-        }
+        };
+        record_partition_leaf_snapshot(
+            ctx,
+            n,
+            lm,
+            b,
+            b_blocks,
+            fill,
+            remaining_bits_on_entry,
+            tell_on_entry,
+            curr_bits,
+            q,
+            k,
+            ctx.remaining_bits,
+            has_lowband,
+            zero_pulse_mode,
+            fill_masked,
+            decode_zero_pulse_snapshot,
+            &input_vector,
+            &quantized_reference,
+            x,
+        );
+        cm
     }
 }
 
@@ -1720,6 +3349,8 @@ pub fn quant_band(
     } else {
         quant_partition(ctx, x, n, b, b_blocks, lowband_buf, lm, gain, fill)
     };
+    let post_partition_snapshot = x[..n].to_vec();
+    ctx.trace_post_partition_norm = post_partition_snapshot;
 
     if ctx.resynth {
         let mut cm = cm;
@@ -1763,7 +3394,30 @@ pub fn quant_band(
         return cm;
     }
 
-    cm
+    // Encoder path (resynth=false): compute the correct final cm mask so that
+    // collapse_masks stay in sync with the decoder. The cm adjustments (time_divide
+    // accumulation and bit-deinterleave remapping) must mirror the resynth path exactly,
+    // but we skip the inverse x-buffer transforms (interleave_hadamard, haar1 undo)
+    // since the encoder does not need x restored to its original time domain.
+    {
+        let mut cm = cm;
+        let mut b_undo = b0_after;
+        for _ in 0..time_divide {
+            b_undo >>= 1;
+            cm |= cm >> b_undo;
+        }
+        static BIT_DEINTERLEAVE_TABLE_ENC: [u8; 16] = [
+            0x00, 0x03, 0x0C, 0x0F, 0x30, 0x33, 0x3C, 0x3F, 0xC0, 0xC3, 0xCC, 0xCF, 0xF0, 0xF3,
+            0xFC, 0xFF,
+        ];
+        for _ in 0..recombine {
+            cm = BIT_DEINTERLEAVE_TABLE_ENC[cm as usize & 0xF] as u32;
+        }
+        let mut b_final = b_undo;
+        b_final <<= recombine;
+        cm &= (1u32 << b_final) - 1;
+        cm
+    }
 }
 
 pub fn stereo_merge(x: &mut [f32], y: &mut [f32], mid: f32, _side: f32, n: usize) {
@@ -2069,6 +3723,7 @@ pub fn quant_band_stereo(
         delta: 0,
         itheta: 0,
         qalloc: 0,
+        qn: 0,
     };
     let mut b_mut = b;
     let mut fill_mut = fill;
@@ -2307,6 +3962,12 @@ pub fn quant_all_bands(
         if encode {
             pvq_encode_snapshots_slot().lock().unwrap().clear();
             *pvq_roundtrip_trace_slot().lock().unwrap() = Some(PvqShapeTrace { bands: Vec::new() });
+            partition_encode_node_snapshots_slot().lock().unwrap().clear();
+            partition_encode_leaf_snapshots_slot().lock().unwrap().clear();
+            *partition_roundtrip_trace_slot().lock().unwrap() =
+                Some(PartitionRoundtripTrace { nodes: Vec::new(), leaves: Vec::new() });
+            root_band_budget_encode_snapshots_slot().lock().unwrap().clear();
+            root_band_budget_trace_slot().lock().unwrap().clear();
         }
     }
 
@@ -2318,20 +3979,39 @@ pub fn quant_all_bands(
         let last = i == end - 1;
 
         let tell = tell_frac_inline!(rc);
+        let balance_before_tell_adjust = balance_val;
         if i != start {
             balance_val -= tell;
         }
+        let balance_after_tell_adjust = balance_val;
         let remaining_bits = total_bits - tell - 1;
 
         let mut b = 0i32;
+        let mut curr_balance = 0i32;
         if i < coded_bands as usize {
-            let curr_balance = celt_sudiv(balance_val, 3i32.min(coded_bands - i as i32));
+            curr_balance = celt_sudiv(balance_val, 3i32.min(coded_bands - i as i32));
             b = 0i32.max(16383i32.min((remaining_bits + 1).min(pulses[i] + curr_balance)));
         }
 
         let norm_pos = m_val * e_band_i - norm_offset;
         let tf_change = tf_res[i];
         let pvq_k_hint = get_pulses(bits2pulses(m, i, lm, b));
+        if c_channels == 1 {
+            record_root_band_budget_snapshot(
+                encode,
+                i,
+                tell,
+                balance_before_tell_adjust,
+                balance_after_tell_adjust,
+                remaining_bits,
+                curr_balance,
+                pulses[i],
+                b,
+                b_blocks,
+                tf_change,
+                n,
+            );
+        }
 
         let mut effective_lowband: i32 = -1;
         let mut x_cm: u32;
@@ -2407,6 +4087,9 @@ pub fn quant_all_bands(
             arch: 0,
             disable_inv,
             seed: ctx_seed,
+            trace_path_bits: 0,
+            trace_depth: 0,
+            trace_post_partition_norm: Vec::new(),
         };
 
         let x_slice = &mut x[offset..offset + n];
@@ -2532,6 +4215,8 @@ pub fn quant_all_bands(
                             pulses_hint: pulses[i],
                             pvq_k: pvq_k_hint,
                             encode_input_norm: encode_norm,
+                            encode_post_partition_norm: ctx.trace_post_partition_norm.clone(),
+                            encode_post_recombine_norm: x_slice.to_vec(),
                             encode_quantized_norm: x_slice.to_vec(),
                         });
                 }
@@ -2543,11 +4228,14 @@ pub fn quant_all_bands(
                     .find(|snapshot| snapshot.band == i)
                     .cloned();
                 if let Some(snapshot) = maybe_snapshot {
+                    let decode_post_partition_norm = ctx.trace_post_partition_norm.clone();
                     let decode_norm = x_slice.to_vec();
                     let mut max_abs_error_vs_input = 0.0f32;
                     let mut sq_error_vs_input = 0.0f32;
                     let mut max_abs_error_vs_quantized = 0.0f32;
                     let mut sq_error_vs_quantized = 0.0f32;
+                    let mut post_partition_max_abs_error = 0.0f32;
+                    let mut post_recombine_max_abs_error = 0.0f32;
                     let mut count = 0usize;
                     for ((expected_input, expected_quantized), actual) in snapshot
                         .encode_input_norm
@@ -2563,6 +4251,22 @@ pub fn quant_all_bands(
                         sq_error_vs_input += err_vs_input * err_vs_input;
                         sq_error_vs_quantized += err_vs_quantized * err_vs_quantized;
                         count += 1;
+                    }
+                    for (expected, actual) in snapshot
+                        .encode_post_partition_norm
+                        .iter()
+                        .zip(decode_post_partition_norm.iter())
+                    {
+                        post_partition_max_abs_error =
+                            post_partition_max_abs_error.max((expected - actual).abs());
+                    }
+                    for (expected, actual) in snapshot
+                        .encode_post_recombine_norm
+                        .iter()
+                        .zip(decode_norm.iter())
+                    {
+                        post_recombine_max_abs_error =
+                            post_recombine_max_abs_error.max((expected - actual).abs());
                     }
                     let (rms_error_vs_input, rms_error_vs_quantized) = if count == 0 {
                         (0.0, 0.0)
@@ -2586,6 +4290,12 @@ pub fn quant_all_bands(
                             collapse_mask,
                             encode_input_norm: snapshot.encode_input_norm,
                             encode_quantized_norm: snapshot.encode_quantized_norm,
+                            encode_post_partition_norm: snapshot.encode_post_partition_norm,
+                            decode_post_partition_norm,
+                            encode_post_recombine_norm: snapshot.encode_post_recombine_norm,
+                            decode_post_recombine_norm: decode_norm.clone(),
+                            post_partition_max_abs_error,
+                            post_recombine_max_abs_error,
                             decode_norm,
                             max_abs_error_vs_input,
                             rms_error_vs_input,
@@ -3239,6 +4949,129 @@ pub fn anti_collapse(
         }
     }
     seed
+}
+
+#[derive(Debug, Clone)]
+pub struct SingleBandRoundtripResult {
+    pub encode_output: Vec<f32>,
+    pub decode_output: Vec<f32>,
+    pub max_abs_error: f32,
+    pub packet: Vec<u8>,
+}
+
+pub fn quant_band_synthetic_roundtrip_for_test(
+    band_index: usize,
+    n: usize,         // coefficient count (e.g. 32 for band 17 at lm=3)
+    b: i32,           // bit budget in 1/8th bits
+    b_blocks: i32,    // time blocks
+    lm: i32,          // log2 of blocks
+    spread: i32,      // SPREAD_NORMAL = 2
+    n_bytes: usize,   // packet buffer size
+) -> SingleBandRoundtripResult {
+    use crate::modes::default_mode;
+    use crate::range_coder::RangeCoder;
+
+    let mode = default_mode();
+    let dummy_band_e = vec![0.0f32; 100];
+
+    // Synthetic normalized input: unit sine wave in the band's coefficient window
+    let mut x_enc = vec![0.0f32; n];
+    for (i, v) in x_enc.iter_mut().enumerate() {
+        let t = i as f32 / n as f32;
+        *v = (2.0 * std::f32::consts::PI * t).sin();
+    }
+    // Normalize to unit norm (CELT convention for normalised bands)
+    let norm = x_enc.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-10);
+    for v in x_enc.iter_mut() { *v /= norm; }
+
+    let mut x_enc_work = x_enc.clone();
+    let mut rc_enc = RangeCoder::new_encoder(n_bytes as u32);
+
+    let mut enc_ctx = BandCtx {
+        encode: true,
+        m: mode,
+        i: band_index,
+        band_e: &dummy_band_e,
+        rc: &mut rc_enc,
+        spread,
+        remaining_bits: b,
+        resynth: true,
+        tf_change: 0,
+        intensity: 0,
+        theta_round: 0,
+        avoid_split_noise: false,
+        arch: 0,
+        disable_inv: false,
+        seed: 12345,
+        trace_path_bits: 0,
+        trace_depth: 0,
+        trace_post_partition_norm: Vec::new(),
+    };
+
+    quant_partition_encode(
+        &mut enc_ctx,
+        &mut x_enc_work,
+        n,
+        b,
+        b_blocks,
+        None,
+        lm,
+        1.0,
+        (1u32 << b_blocks) - 1,
+    );
+
+    rc_enc.done();
+    let packet = rc_enc.buf[..n_bytes].to_vec();
+
+    // Now decode from the packet
+    let mut x_dec = vec![0.0f32; n];
+    let mut rc_dec = RangeCoder::new_decoder(&packet);
+
+    let mut dec_ctx = BandCtx {
+        encode: false,
+        m: mode,
+        i: band_index,
+        band_e: &dummy_band_e,
+        rc: &mut rc_dec,
+        spread,
+        remaining_bits: b,
+        resynth: true,
+        tf_change: 0,
+        intensity: 0,
+        theta_round: 0,
+        avoid_split_noise: false,
+        arch: 0,
+        disable_inv: false,
+        seed: 12345,
+        trace_path_bits: 0,
+        trace_depth: 0,
+        trace_post_partition_norm: Vec::new(),
+    };
+
+    quant_partition(
+        &mut dec_ctx,
+        &mut x_dec,
+        n,
+        b,
+        b_blocks,
+        None,
+        lm,
+        1.0,
+        (1u32 << b_blocks) - 1,
+    );
+
+    let max_abs_error = x_enc_work
+        .iter()
+        .zip(x_dec.iter())
+        .map(|(e, d)| (e - d).abs())
+        .fold(0.0f32, f32::max);
+
+    SingleBandRoundtripResult {
+        encode_output: x_enc_work,
+        decode_output: x_dec,
+        max_abs_error,
+        packet,
+    }
 }
 
 #[cfg(test)]
