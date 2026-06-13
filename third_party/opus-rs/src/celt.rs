@@ -2025,7 +2025,7 @@ impl CeltEncoder {
                 let qg = (gain1 / 0.09375 - 1.0 + 0.5).floor() as i32;
                 let qg = qg.clamp(0, 7);
                 let pi = (pitch_index + 1) as u32;
-                let octave = 31 - pi.leading_zeros();
+                let octave = 32 - pi.leading_zeros();
                 let octave = (octave as i32 - 5).max(0) as u32;
                 rc.enc_uint(octave, 6);
                 rc.enc_bits(pi - (16 << octave), 4 + octave);
