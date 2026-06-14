@@ -85,6 +85,7 @@ export function createJamAudioBridge({
   let onSeekCallback = null;
   /** @type {(() => void) | null} */
   let onStopCallback = null;
+  let onBufferingCallback = null;
 
   let diagnosticsState = createDiagnosticsState();
   let lastKnownBufferedDurationMs = 0;
@@ -958,6 +959,12 @@ export function createJamAudioBridge({
         return;
       case 'preload-pending':
         if (typeof onPreloadPendingCallback === 'function') onPreloadPendingCallback();
+        return;
+      case 'buffering-started':
+        if (typeof onBufferingCallback === 'function') onBufferingCallback(true);
+        return;
+      case 'buffering-ended':
+        if (typeof onBufferingCallback === 'function') onBufferingCallback(false);
         return;
       default:
         return;
@@ -2088,6 +2095,7 @@ export function createJamAudioBridge({
     setOnPreloadPending: (cb) => { onPreloadPendingCallback = cb; },
     setOnSeek: (cb) => { onSeekCallback = cb; },
     setOnStop: (cb) => { onStopCallback = cb; },
+    setOnBuffering: (cb) => { onBufferingCallback = cb; },
     updatePlaybackState,
     updatePositionState,
     updateMediaSession,
