@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-06-13
+
+### Refactored
+- Extracted `createWorkletPortState`, `currentPlayerFrom`, `playerHasEnded`, and `playerPositionMs` into `playback_worker_controller_runtime.js` with direct helper test coverage.
+- Extracted `startPortLoop` and `nudgeWaitAsyncState` into `playback_worker_controller_refill.js` to isolate ring-buffer refill machinery.
+- Extracted `createBridgeSessionState` (session / localStorage persistence) into `audio_bridge_session.js` with direct helper test coverage.
+- Extracted `clampVolume` and `sendPreloadCommand` into `audio_bridge_transport.js`; wired both bridge preload paths through the shared helper.
+
+### Performance
+- Reduced decoder per-sample push overhead in the native audio hot path.
+- Removed modulo from the `AudioWorkletProcessor` hot loop.
+
+### Fixed
+- Gated `console_error_panic_hook` registration to `wasm32` targets only so it cannot interfere with native builds.
+- Widened `scheduleGaplessFallback` guard to cover no-signal EOS edge cases (Fix B log77).
+
+### Added
+- Regression tests for the widened `scheduleGaplessFallback` guard.
+- Direct coverage for artwork and position wrapper helpers.
+- Direct coverage for range-fetch first-byte timeout path.
+
+### Sync
+- Worklet seam-only handoff trigger and arithmetic watchdog fallback ported from jamdisc single-handoff fix.
+
+### Docs
+- Annotated Opus decoder unsafe invariants in source comments.
+
+### Verified
+- Worklet syntax check (`audio_bridge.js`, `audio_processor.js`)
+- Worklet npm test
+- Engine cargo check
+- Flutter bridge cargo check
+
 ## [0.4.0] — 2026-06-11
 
 ### Added
