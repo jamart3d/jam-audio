@@ -1383,6 +1383,7 @@ function createPlaybackWorkerController({
           if (isStalled) {
             diagnostics.resumeAfterStallLatencyMs = Number(lag.toFixed(2));
             isStalled = false;
+            emitMessage({ type: 'buffering-ended' });
           }
           lastChunkReceivedAt = 0;
         }
@@ -1468,6 +1469,9 @@ function createPlaybackWorkerController({
       if (result === null) {
         if (isStreaming) {
           if (!streamingFinalized) {
+            if (!isStalled) {
+              emitMessage({ type: 'buffering-started' });
+            }
             isStalled = true;
             emitDiagnosticsEvent({
               type: 'decode-waiting',
@@ -1829,6 +1833,8 @@ function createPlaybackWorkerController({
           sessionEnded: true,
         };
       }
+
+      lastChunkReceivedAt = performanceNow();
 
       const wasReady = streamingPlayer.isReady();
       const ready = streamingPlayer.appendChunk(chunk);

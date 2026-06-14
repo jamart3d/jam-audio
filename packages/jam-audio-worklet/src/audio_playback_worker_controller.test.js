@@ -5066,6 +5066,275 @@ test('setWorkletPort still allows port-driven refill startup after helper extrac
   assert.equal(readyPort, 'port-2');
 });
 
+// ─── Regression: single-handoff boundary authority (logs 75/76/78) ──────────
+
+test('single-handoff guarantee: seam + arithmetic both armed → exactly one track-changed per boundary, delta=1', async () => {
+  // Reproduces the log78 double-fire: position arithmetic crosses first, then seam fires
+  // ~6ms later. After the fix, only the seam emission must reach Dart — exactly one
+  // track-changed per physical boundary, trackIndex advances by exactly 1.
+  const messages = [];
+  let seamGen = 0;
+  let seamMs = 0;
+  let position = 0;
+  let playerInstance = null;
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(10000 * 2 * 4);
+
+  // Two separate mock factories so the second playTrack call gets its own player.
+  let callCount = 0;
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => {
+      callCount++;
+      // After handoff, return a second player for the next track (durationMs = 200000)
+      if (callCount > 1) {
+        return {
+          decodeFrames: () => new Float32Array(2 * 128),
+          durationMs: () => 200000,
+          positionMs: () => 0,
+          hasEnded: () => false,
+          loadNext: () => null,
+          seekToMs: () => {},
+          seamGeneration: () => 0,
+          lastSeamPositionMs: () => 0,
+          free: () => {},
+        };
+      }
+      // Track 1 player: seam API present; arithmetic boundary at 60000ms.
+      seamGen = 0;
+      seamMs = 0;
+      position = 0;
+      playerInstance = {
+        decodeFrames: () => {
+          position += 500;
+          return new Float32Array(2 * 128);
+        },
+        durationMs: () => 60000,
+        positionMs: () => position,
+        hasEnded: () => false,
+        loadNext: (bytes) => {
+          // Simulate gapless next loaded
+          return null;
+        },
+        seekToMs: () => {},
+        seamGeneration: () => seamGen,
+        lastSeamPositionMs: () => seamMs,
+        free: () => {},
+      };
+      return playerInstance;
+    },
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    setTimeoutFn: (cb) => { setTimeout(cb, 0); return 1; },
+    clearTimeoutFn: (id) => clearTimeout(id),
+    waitTimeoutMs: 10,
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 10000,
+    sampleRate: 48000,
+  });
+
+  // Load the gapless next track
+  controller.preloadNext(new Uint8Array([2]), 200000);
+
+  // Step 1: advance position to arithmetic boundary (position >= 60000 - 50 = 59950)
+  // Simulate arithmetic crossing WITHOUT seam yet.
+  position = 59960;
+  Atomics.store(sharedState, 2, 5000); // FRAMES_AVAILABLE = 50% fill (above 25% threshold)
+
+  // Trigger a refill tick — arithmetic boundary should fire first in broken code.
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
+  await new Promise((r) => setTimeout(r, 50));
+
+  // Step 2: Now fire the seam (simulates the Wasm seam arriving 6ms later)
+  seamGen = 1;
+  seamMs = 59960;
+  Atomics.store(sharedState, 2, 5000); // still have frames available
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
+  await new Promise((r) => setTimeout(r, 50));
+
+  // Collect track-changed emissions
+  const trackChangedEvents = messages.filter((m) => m.type === 'track-changed');
+
+  assert.equal(
+    trackChangedEvents.length,
+    1,
+    `Expected exactly 1 track-changed per physical boundary, got ${trackChangedEvents.length}. ` +
+    `Events: ${JSON.stringify(trackChangedEvents)}`,
+  );
+  assert.equal(
+    trackChangedEvents[0].trackDelta,
+    1,
+    `track-changed must carry trackDelta=1, got ${trackChangedEvents[0].trackDelta}`,
+  );
+
+  controller.stop();
+});
+
+test('arithmetic-fallback-handoff fires when seam absent >2000ms past arithmetic boundary', async () => {
+  // When hasSeamAPI is true but the seam never fires within 2000ms past the arithmetic
+  // boundary, the watchdog must emit track-changed with a diagnostic 'arithmetic-fallback-handoff'.
+  const messages = [];
+  let position = 0;
+
+  const stateBuffer = new SharedArrayBuffer(9 * 4);
+  const sharedState = new Int32Array(stateBuffer);
+  const pcmBuffer = new SharedArrayBuffer(10000 * 2 * 4);
+
+  // nowMs advances so we can simulate the 2000ms window expiring.
+  let fakeNowMs = 100;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames: () => { position += 500; return new Float32Array(2 * 128); },
+      durationMs: () => 60000,
+      positionMs: () => position,
+      hasEnded: () => false,
+      loadNext: () => null,
+      seekToMs: () => {},
+      seamGeneration: () => 0,           // seam never fires
+      lastSeamPositionMs: () => 0,
+      free: () => {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => fakeNowMs,
+    setTimeoutFn: (cb) => { setTimeout(cb, 0); return 1; },
+    clearTimeoutFn: (id) => clearTimeout(id),
+    waitTimeoutMs: 10,
+  });
+
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 10000,
+    sampleRate: 48000,
+  });
+
+  controller.preloadNext(new Uint8Array([2]), 200000);
+
+  // Step 1: Advance to boundary at fakeNowMs = 100 to arm the watchdog
+  position = 59960;
+  Atomics.store(sharedState, 2, 5000);
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
+  await new Promise((r) => setTimeout(r, 50));
+
+  // Step 2: Now advance past the watchdog threshold and run another tick
+  position = 62000; // 2000ms past 60000ms boundary
+  fakeNowMs = 2200; // 2100ms after boundary (> ARITHMETIC_FALLBACK_WATCHDOG_MS = 2000)
+  Atomics.add(sharedState, 7, 1);
+  Atomics.notify(sharedState, 7, 1);
+  await new Promise((r) => setTimeout(r, 100));
+
+  const trackChangedEvents = messages.filter((m) => m.type === 'track-changed');
+  assert.equal(
+    trackChangedEvents.length,
+    1,
+    `Watchdog must emit exactly 1 track-changed when seam is absent >2000ms past boundary, got ${trackChangedEvents.length}`,
+  );
+
+  const fallbackDiag = messages
+    .filter((m) => m.type === 'diagnostics-event')
+    .map((m) => m.event)
+    .find((e) => e.type === 'arithmetic-fallback-handoff');
+  assert.ok(
+    fallbackDiag !== undefined,
+    'arithmetic-fallback-handoff diagnostic must be emitted when watchdog fires',
+  );
+
+  controller.stop();
+});
+
+test('streaming player emits buffering-started and buffering-ended appropriately', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let decodeCalls = 0;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => null,
+    createStreamingPlayer: () => ({
+      appendChunk() { return true; },
+      durationMs() { return 120; },
+      positionMs() { return 1000; },
+      isReady() { return true; },
+      isFinalized() { return false; },
+      finalize() {},
+      free() {},
+      decodeFrames(n) {
+        decodeCalls += 1;
+        if (decodeCalls === 1) {
+          return new Float32Array(16); // 8 frames (Stereo)
+        }
+        if (decodeCalls === 2 || decodeCalls === 3) {
+          return null;
+        }
+        return new Float32Array(16); // 8 frames (Stereo)
+      },
+    }),
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return 1;
+    },
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  const pcmBuffer = new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrackStreaming({
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 8,
+  });
+
+  controller.appendChunk(new Uint8Array([1]));
+  assert.equal(messages.filter(m => m.type === 'buffering-started').length, 0);
+
+  // Consume the frames by setting FRAMES_AVAILABLE_INDEX to 0
+  Atomics.store(sharedState, 2, 0);
+  intervalCallback();
+  assert.equal(messages.filter(m => m.type === 'buffering-started').length, 1);
+
+  // Repeat stall tick
+  Atomics.store(sharedState, 2, 0);
+  intervalCallback();
+  assert.equal(messages.filter(m => m.type === 'buffering-started').length, 1);
+
+  // Recovery chunk arrives
+  Atomics.store(sharedState, 2, 0);
+  controller.appendChunk(new Uint8Array([1]));
+  assert.equal(messages.filter(m => m.type === 'buffering-ended').length, 1);
+  assert.equal(messages.filter(m => m.type === 'buffering-started').length, 1);
+
+  controller.stop();
+});
+
+
+
 
 
 
