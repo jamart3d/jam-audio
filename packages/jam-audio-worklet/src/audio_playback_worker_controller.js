@@ -53,6 +53,7 @@ const REFILL_MAX_TICK_DURATION_MS = 20;
 const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
 const TRACK_HANDOFF_TOLERANCE_MS = 50;
+const ARITHMETIC_FALLBACK_WATCHDOG_MS = 2000;
 const HANDOFF_RETRY_WINDOW_MS = 200;
 const HANDOFF_FILL_THRESHOLD_PERCENT = 25;
 
@@ -127,6 +128,7 @@ function createPlaybackWorkerController({
   let diagnostics = createWorkerDiagnostics();
 
   let lastSeamGeneration = 0;
+  let arithmeticBoundaryArmedAtMs = 0;
   let pendingGaplessBytes = null;
   let gaplessPlayerNextLoaded = false;
   let gaplessEndedFallbackTimer = null;
@@ -325,6 +327,7 @@ function createPlaybackWorkerController({
     gaplessPlayerNextLoaded = false;
     pendingGaplessFallbackRecoveryConfirmation = false;
     lastSeamGeneration = 0;
+    arithmeticBoundaryArmedAtMs = 0;
     currentSessionId++;
   }
 
@@ -477,10 +480,37 @@ function createPlaybackWorkerController({
       if (isSeam) {
         crossedTrackBoundary = true;
         positionMs = activePlayer.lastSeamPositionMs();
+        arithmeticBoundaryArmedAtMs = 0; // seam took authority; clear watchdog
       } else if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
-        crossedTrackBoundary =
-          positionMs >=
-          currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+        const arithmeticCrossed =
+          positionMs >= currentTrackEndPositionMs - TRACK_HANDOFF_TOLERANCE_MS;
+        if (arithmeticCrossed) {
+          if (playerHasEnded(activePlayer)) {
+            crossedTrackBoundary = true;
+          } else {
+            // Seam API present but seam has not arrived yet — arm watchdog, suppress emission.
+            if (arithmeticBoundaryArmedAtMs === 0) {
+              arithmeticBoundaryArmedAtMs = nowMs();
+            }
+            const watchdogExpired =
+              nowMs() - arithmeticBoundaryArmedAtMs >= ARITHMETIC_FALLBACK_WATCHDOG_MS;
+            if (watchdogExpired) {
+              // Seam absent too long — fire arithmetic fallback and log diagnostic.
+              crossedTrackBoundary = true;
+              arithmeticBoundaryArmedAtMs = 0;
+              emitDiagnosticsEvent({
+                type: 'arithmetic-fallback-handoff',
+                label: 'Arithmetic fallback handoff: seam absent past watchdog window',
+                timestampMs: nowMs(),
+                severity: 'warning',
+                positionMs: Math.floor(positionMs),
+                boundaryMs: Math.floor(currentTrackEndPositionMs),
+                watchdogMs: ARITHMETIC_FALLBACK_WATCHDOG_MS,
+              });
+            }
+            // If watchdog not expired: suppress (seam is expected, not yet arrived).
+          }
+        }
       }
     } else {
       if (currentTrackEndPositionKnown && !currentTrackEndPositionHandled) {
@@ -1143,7 +1173,14 @@ function createPlaybackWorkerController({
         }
         stopRefillLoop();
         emitEnded();
-        if (!endedEmitted && gaplessPlayerNextLoaded && pendingGaplessBytes === null) {
+        // Fix B (log77): schedule a fallback window whenever ended has not yet
+        // been emitted, regardless of whether a gapless signal has arrived yet.
+        // Previously the guard required gaplessPlayerNextLoaded===true, so a
+        // truncated stream with no signal present never scheduled the fallback —
+        // the 500 ms emitEnded hold fired late and health_recovery restarted the
+        // track. The interior check inside scheduleGaplessFallback still guards
+        // what actually happens when the timer fires.
+        if (!endedEmitted) {
           scheduleGaplessFallback();
         }
       }

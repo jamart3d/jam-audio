@@ -2143,6 +2143,79 @@ test('emitEnded is suppressed when gaplessPlayerNextLoaded is set via loadNext',
   );
 });
 
+test('scheduleGaplessFallback is called at EOS when no gapless signal is present (Fix B)', () => {
+  // Regression guard for log77: when the buffer drains to 0 at EOS and
+  // neither gaplessPlayerNextLoaded nor pendingGaplessBytes is set,
+  // scheduleGaplessFallback must still be scheduled so bytes have a second
+  // chance to arrive before 'ended' propagates to Dart.
+  const messages = [];
+  let intervalCallback = null;
+  let capturedFallback = null;
+  let position = 0;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (position >= 1000) return null; // EOS
+        position += 100;
+        return new Float32Array(2);
+      },
+      durationMs() { return 1000; },
+      positionMs() { return position; },
+      hasEnded() { return position >= 1000; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    // Capture the fallback timer — this is what we assert was scheduled.
+    setTimeoutFn: (fn, ms) => {
+      if (ms === 750) capturedFallback = fn;
+      return 1;
+    },
+    clearTimeoutFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+  });
+
+  controller.setDiagnosticsMode('extended');
+
+  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100 });
+
+  // NO preloadNext call — gaplessPlayerNextLoaded=false, pendingGaplessBytes=null.
+
+  // Drive position to EOS.
+  position = 1000;
+
+  // Drain buffer to 0 — triggers handleEndOfStream.
+  sharedState[2] = 0;
+  intervalCallback();
+
+  // The hold window must have started (no next-track signal present).
+  assert.ok(
+    messages.some((m) => m.type === 'diagnostics-event' &&
+      m.event?.type === 'ended-emission-state' &&
+      m.event?.action === 'hold-started'),
+    'hold-started must fire when no gapless signal is present at EOS',
+  );
+
+  // Fix B: scheduleGaplessFallback must have been called even with no signal.
+  // Before the fix, capturedFallback would be null here.
+  assert.ok(
+    capturedFallback !== null,
+    'scheduleGaplessFallback must be called at EOS even when gaplessPlayerNextLoaded=false and pendingGaplessBytes=null',
+  );
+});
+
 test('clears gaplessPlayerNextLoaded flag after 750ms fallback when gapless suppression fires with no transition', () => {
   const messages = [];
   let intervalCallback = null;
@@ -2731,7 +2804,7 @@ test('recoverFromStaleGaplessSuppression - emits ended when flag-cleared-only be
     setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
     clearIntervalFn: () => {},
     setTimeoutFn: (fn, ms) => {
-      capturedFallback = { fn, ms };
+      if (ms === 500) capturedFallback = { fn, ms };
       return 99;
     },
     clearTimeoutFn: () => {},
@@ -3016,7 +3089,11 @@ test('schedulePreloadHoldExpiry fires emitEnded via injected setTimeoutFn when h
   );
 
   // The timeout delay must be ≤ PRELOAD_HOLD_MS (500ms)
-  const holdTimeout = scheduledTimeouts[scheduledTimeouts.length - 1];
+  const holdTimeout = scheduledTimeouts.find(t => t.delayMs <= 500);
+  assert.ok(
+    holdTimeout !== undefined,
+    'Must find a hold timeout with delay ≤ 500ms',
+  );
   assert.ok(
     holdTimeout.delayMs >= 0 && holdTimeout.delayMs <= 500,
     `Hold timeout delay must be in [0, 500]ms, got ${holdTimeout.delayMs}`,
@@ -3121,9 +3198,11 @@ test('seek() clears the preload-hold timer so a stale hold cannot fire mid-seek'
       return 1;
     },
     clearIntervalFn: () => {},
-    setTimeoutFn: (_callback, _delayMs) => {
+    setTimeoutFn: (_callback, delayMs) => {
       timerIdCounter += 1;
-      capturedHoldTimerId = timerIdCounter;
+      if (delayMs === 500) {
+        capturedHoldTimerId = timerIdCounter;
+      }
       return timerIdCounter;
     },
     clearTimeoutFn: (id) => { clearedIds.push(id); },
