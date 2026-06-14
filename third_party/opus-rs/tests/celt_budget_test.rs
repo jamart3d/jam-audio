@@ -820,8 +820,8 @@ fn celt_loopback_160bytes() {
     }
 
     assert!(
-        best_snr > 1.0,
-        "CELT at 160 bytes should achieve positive SNR: got {:.2} dB",
+        best_snr >= 1.3,
+        "CELT at 160 bytes should achieve at least 1.3 dB SNR: got {:.2} dB",
         best_snr
     );
 }

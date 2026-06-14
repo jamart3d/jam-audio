@@ -2341,7 +2341,7 @@ impl CeltEncoder {
         let mut dual_stereo = dual_stereo_val != 0;
 
         let theta_rdo = channels == 2 && !dual_stereo && self.complexity >= 8;
-        let resynth = theta_rdo;
+        let resynth = true;
 
         quant_all_bands(
             true,

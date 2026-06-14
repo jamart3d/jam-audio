@@ -140,9 +140,8 @@ fn test_celt_loopback() {
         worst_band
     );
 
-    // Current Rust CELT loopback baseline on this test shape is around 2 dB.
-    // Keep a floor to catch regressions while avoiding false failures.
-    assert!(best_snr > 1.8, "SNR too low: {:.2} dB", best_snr);
+    // Current Rust CELT loopback achieves around 18 dB after partition divergence fix.
+    assert!(best_snr >= 15.0, "SNR too low: {:.2} dB", best_snr);
 }
 
 fn calculate_snr(all_in: &[f32], all_out: &[f32], delay: usize, start: usize, end: usize) -> f32 {
