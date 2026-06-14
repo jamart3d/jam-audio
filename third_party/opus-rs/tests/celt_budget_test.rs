@@ -104,6 +104,7 @@ fn celt_loopback_160bytes() {
             best_snr = snr;
         }
     }
+    eprintln!("Loopback Global Best SNR: {:.2} dB", best_snr);
 
     for f in 3..8 {
         let start = f * frame_size;
