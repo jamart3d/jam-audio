@@ -2131,7 +2131,7 @@ export function createJamAudioBridge({
     setOnEnded: (cb) => { onEndedCallback = cb; },
     setOnPlaybackStarted: (cb) => { onPlaybackStartedCallback = cb; },
     setOnPlaybackSuspended: (cb) => { onPlaybackSuspendedCallback = cb; },
-    getAudioContextState: () => audioContext?.state ?? 'running',
+    getAudioContextState: () => audioContext?.state ?? 'none',
     setOnPlay: (cb) => { onPlayCallback = cb; },
     setOnPause: (cb) => { onPauseCallback = cb; },
     setOnPosition: (cb) => { onPositionCallback = cb; },
