@@ -243,8 +243,10 @@ export function createJamAudioBridge({
     });
 
     if (!skipInitialRamp) {
-      await waitForWorkerTransportQuiet();
-      await rampGainToValue(0, DECLICK_DURATION_S);
+      await Promise.all([
+        rampGainToValue(0, DECLICK_DURATION_S),
+        waitForWorkerTransportQuiet(),
+      ]);
       emitDiagnosticsEvent({
         type: 'transport-gain-zero',
         label: `Transport gain reached zero: ${transitionKind}`,
@@ -1549,6 +1551,18 @@ export function createJamAudioBridge({
 
   async function resume() {
     if (!audioContext) return;
+
+    // === ROOT-CAUSE DIAGNOSTIC: Log resume entry ===
+    emitDiagnosticsEvent({
+      type: 'resume-called',
+      label: 'resume() called',
+      timestampMs: nowMs(),
+      severity: 'info',
+      audioContextState: audioContext?.state ?? 'none',
+      gainValue: gainNode?.gain?.value ?? -1,
+      transportMuted: transportMuted,
+      isAndroidTransport: isAndroidTransport,
+    });
 
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
     isAppOwnedResumeInFlight = true;
