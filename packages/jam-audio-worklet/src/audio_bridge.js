@@ -277,12 +277,12 @@ export function createJamAudioBridge({
     // Only swap src and reload if NOT already on silentWavUrl.
     // Setting src to the same value and calling .load() still triggers a media
     // reload interrupt which causes the OS to dismiss the notification.
-    // Normalize to absolute URL for comparison (browser resolves relative → absolute).
-    const silentWavAbsolute = new URL(silentWavUrl, window.location.origin).href;
-    const currentSrcAbsolute = silentAudioEl.src || '';
-    if (currentSrcAbsolute !== silentWavAbsolute) {
-      console.log('[Diag] silentAudioEl.src swap: ' + (silentAudioEl.src ?? 'none') + ' -> ' + silentWavUrl);
-      silentAudioEl.src = silentWavUrl;
+    // Assign absolute URL directly so readback matches comparison exactly
+    // (works around Flutter <base> tag interference with window.location.href).
+    const _resolvedSilentWavUrl = new URL(silentWavUrl, window.location.origin).href;
+    if (silentAudioEl.src !== _resolvedSilentWavUrl) {
+      console.log('[Diag] silentAudioEl.src swap: ' + (silentAudioEl.src ?? 'none') + ' -> ' + _resolvedSilentWavUrl);
+      silentAudioEl.src = _resolvedSilentWavUrl;
       silentAudioEl.load();
       // Re-sync metadata after src change (safety net for lock-screen title)
       if (navigator.mediaSession && navigator.mediaSession.metadata) {
