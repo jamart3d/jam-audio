@@ -1223,17 +1223,33 @@ export function createJamAudioBridge({
     return enqueueLatestPlaybackSession(async (sessionGeneration) => {
       if (!isCurrentPlaybackSession(sessionGeneration)) return;
       currentTrackDurationMs = durationMs;
-      if (silentAudioEl && silentAudioEl.src && silentAudioEl.src.startsWith('blob:')) {
-        URL.revokeObjectURL(silentAudioEl.src);
-      }
-      setTrackAudioOnSilentElement(audioBytes);
-      if (silentAudioEl) {
-        silentAudioEl.volume = 0;
-        silentAudioEl.currentTime = 0;
-      }
       try {
+        // initAudio() MUST run first on a cold start: it creates silentAudioEl
+        // via ensureSilentAudio() and starts the silent anchor playing so the
+        // browser grants autoplay trust. Moving silentAudioEl manipulation
+        // before this call (when silentAudioEl is still null on cold start)
+        // causes the blob URL to be skipped and the element to be paused by the
+        // position-sync block before the anchor play resolves — producing a
+        // ~15-second stall waiting for the declick ramp to complete.
         await initAudio();
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
+
+        // Safe to touch silentAudioEl now — initAudio() guarantees it exists.
+        // Revoke the previous blob URL before overwriting src to prevent leaks.
+        if (silentAudioEl && silentAudioEl.src && silentAudioEl.src.startsWith('blob:')) {
+          URL.revokeObjectURL(silentAudioEl.src);
+        }
+        // Assign track audio (muted) so the MediaSession API sees real media.
+        setTrackAudioOnSilentElement(audioBytes);
+        // Reset volume and position so the element starts from the beginning.
+        // Do NOT call .pause() here — initAudio() already started the element
+        // playing its silent anchor; pausing it would break the MediaSession
+        // play/pause state and race the autoplay trust established above.
+        if (silentAudioEl) {
+          silentAudioEl.volume = 0;
+          silentAudioEl.currentTime = 0;
+        }
+
         if (isAndroidTransport) {
           // Android: defer declick to playback-started (when buffer is actually ready).
           // Scheduling the ramp here causes it to complete before the first PCM frame
@@ -1278,6 +1294,7 @@ export function createJamAudioBridge({
       }
     });
   }
+
 
   async function playTrackStreaming() {
     await beginPlaybackSession();
