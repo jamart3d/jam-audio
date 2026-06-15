@@ -1568,6 +1568,14 @@ export function createJamAudioBridge({
     isAppOwnedResumeInFlight = true;
     try {
       if (isAndroidTransport) {
+        // === DIAGNOSTIC: Android resume path ===
+        emitDiagnosticsEvent({
+          type: 'resume-android-branch',
+          label: 'Android transport resume path entered',
+          timestampMs: nowMs(),
+          severity: 'info',
+          audioContextState: audioContext?.state ?? 'none',
+        });
         await runMutedAndroidTransportTransition({
           transitionKind: 'resume',
           preserveMediaSession: true,
@@ -1577,7 +1585,31 @@ export function createJamAudioBridge({
             // Keep-warm: audioContext is never suspended after pause(), so no
             // audioContext resume call is needed. Gain is unfrozen by the fadeIn
             // path in runMutedAndroidTransportTransition (transportUnmute + ramp).
-            if (silentAudioEl) await silentAudioEl.play().catch(() => {});
+            emitDiagnosticsEvent({
+              type: 'resume-android-perform-action',
+              label: 'Android performAction: silentAudioEl.play() calling',
+              timestampMs: nowMs(),
+              severity: 'debug',
+              elementPaused: silentAudioEl?.paused,
+            });
+            if (silentAudioEl) {
+              await silentAudioEl.play().then(() => {
+                emitDiagnosticsEvent({
+                  type: 'resume-android-element-play-success',
+                  label: 'Android element play succeeded in performAction',
+                  timestampMs: nowMs(),
+                  severity: 'debug',
+                });
+              }).catch((err) => {
+                emitDiagnosticsEvent({
+                  type: 'resume-android-element-play-failed',
+                  label: 'Android element play failed in performAction',
+                  error: String(err),
+                  timestampMs: nowMs(),
+                  severity: 'warn',
+                });
+              });
+            }
           },
         });
       } else {
@@ -1587,17 +1619,86 @@ export function createJamAudioBridge({
         // can flow before the gain ramp reaches currentVolume.
         transportMuted = false;
         resumeUnmuteSent = true;
+
+        // === DIAGNOSTIC: Non-Android resume path ===
+        emitDiagnosticsEvent({
+          type: 'resume-non-android-branch',
+          label: 'Non-Android transport resume path entered',
+          timestampMs: nowMs(),
+          severity: 'info',
+          audioContextState: audioContext?.state ?? 'none',
+        });
+
         if (playbackWorker) {
-          await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
+          emitDiagnosticsEvent({
+            type: 'resume-transport-unmute-before',
+            label: 'Sending transportUnmute to worker',
+            timestampMs: nowMs(),
+            severity: 'debug',
+          });
+          await sendPlaybackWorkerCommand('transportUnmute').then(() => {
+            emitDiagnosticsEvent({
+              type: 'resume-transport-unmute-success',
+              label: 'transportUnmute succeeded',
+              timestampMs: nowMs(),
+              severity: 'debug',
+            });
+          }).catch((err) => {
+            emitDiagnosticsEvent({
+              type: 'resume-transport-unmute-failed',
+              label: 'transportUnmute failed',
+              error: String(err),
+              timestampMs: nowMs(),
+              severity: 'warn',
+            });
+          });
         }
+
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.cancelScheduledValues(now);
           gainNode.gain.setValueAtTime(0, now);
         }
-        if (silentAudioEl) await silentAudioEl.play().catch(() => {});
+
+        if (silentAudioEl) {
+          emitDiagnosticsEvent({
+            type: 'resume-element-play-before',
+            label: 'silentAudioEl.play() about to be called',
+            timestampMs: nowMs(),
+            severity: 'debug',
+            elementPaused: silentAudioEl?.paused,
+            elementSrcObject: !!silentAudioEl?.srcObject,
+          });
+          await silentAudioEl.play().then(() => {
+            emitDiagnosticsEvent({
+              type: 'resume-element-play-success',
+              label: 'silentAudioEl.play() succeeded',
+              timestampMs: nowMs(),
+              severity: 'debug',
+              elementPaused: silentAudioEl?.paused,
+            });
+          }).catch((err) => {
+            emitDiagnosticsEvent({
+              type: 'resume-element-play-failed',
+              label: 'silentAudioEl.play() failed',
+              error: String(err),
+              timestampMs: nowMs(),
+              severity: 'warn',
+            });
+          });
+        }
+
         if (gainNode) {
           const now = audioContext.currentTime;
+          emitDiagnosticsEvent({
+            type: 'resume-gain-ramp-start',
+            label: 'Starting gain ramp to currentVolume',
+            timestampMs: nowMs(),
+            severity: 'debug',
+            currentTime: now,
+            targetVolume: currentVolume,
+            rampDurationS: DECLICK_DURATION_S,
+          });
           gainNode.gain.linearRampToValueAtTime(currentVolume, now + DECLICK_DURATION_S);
         }
       }
