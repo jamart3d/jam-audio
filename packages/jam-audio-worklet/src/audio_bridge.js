@@ -89,6 +89,8 @@ export function createJamAudioBridge({
 
   let diagnosticsState = createDiagnosticsState();
   let lastKnownBufferedDurationMs = 0;
+  let currentPlaybackFramePosition = 0;
+  let currentTrackDurationMs = 0;
   let silentAudioEl = null;
   let currentTrackBlobUrl = null;
   let boundedAnchorEndedHandler = null;
@@ -286,7 +288,14 @@ export function createJamAudioBridge({
 
   function ensureSilentAudio() {
     if (silentAudioEl) return;
-    silentAudioEl = new Audio(silentWavUrl);
+    if (typeof window !== 'undefined' && window.silentAudioEl) {
+      silentAudioEl = window.silentAudioEl;
+    } else {
+      silentAudioEl = new Audio(silentWavUrl);
+      if (typeof window !== 'undefined') {
+        window.silentAudioEl = silentAudioEl;
+      }
+    }
     silentAudioEl.id = `${namespace}-silent-audio`;
     silentAudioEl.loop = true;
     silentAudioEl.volume = 0.001;
@@ -327,6 +336,11 @@ export function createJamAudioBridge({
       URL.revokeObjectURL(currentTrackBlobUrl);
     }
     currentTrackBlobUrl = newBlobUrl;
+
+    if (silentAudioEl) {
+      silentAudioEl.src = newBlobUrl;
+      silentAudioEl.load();
+    }
 
     emitDiagnosticsEvent({
       type: 'hidden-media-asset-ready',
@@ -396,6 +410,9 @@ export function createJamAudioBridge({
       try { silentAudioEl.pause(); } catch {}
       try { document.body.removeChild(silentAudioEl); } catch {}
       silentAudioEl = null;
+      if (typeof window !== 'undefined' && window.silentAudioEl) {
+        window.silentAudioEl = null;
+      }
       ensureSilentAudio();
     }
 
@@ -719,6 +736,7 @@ export function createJamAudioBridge({
           });
         } else if (event.data.type === 'position') {
           lastPositionEventTs = nowMs();
+          updatePlaybackPosition(event.data.framesRendered);
           const positionMs = (event.data.framesRendered / audioContext.sampleRate) * 1000;
           diagnosticsState.positionMs = Math.round(positionMs);
           if (typeof onPositionCallback === 'function') {
@@ -1200,11 +1218,19 @@ export function createJamAudioBridge({
     });
   }
 
-  async function playTrack(audioBytes) {
+  async function playTrack(audioBytes, durationMs, metadata) {
     await beginPlaybackSession();
     return enqueueLatestPlaybackSession(async (sessionGeneration) => {
       if (!isCurrentPlaybackSession(sessionGeneration)) return;
+      currentTrackDurationMs = durationMs;
+      if (silentAudioEl && silentAudioEl.src && silentAudioEl.src.startsWith('blob:')) {
+        URL.revokeObjectURL(silentAudioEl.src);
+      }
       setTrackAudioOnSilentElement(audioBytes);
+      if (silentAudioEl) {
+        silentAudioEl.volume = 0;
+        silentAudioEl.currentTime = 0;
+      }
       try {
         await initAudio();
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
@@ -1480,6 +1506,28 @@ export function createJamAudioBridge({
       audioContextState: audioContext?.state ?? 'none',
       gainNodeValue: gainNode?.gain?.value ?? null,
     });
+
+    if (!silentAudioEl && typeof window !== 'undefined' && window.silentAudioEl) {
+      silentAudioEl = window.silentAudioEl;
+    }
+
+    const timeMs = getPlaybackTimeMs();
+    if (silentAudioEl && currentTrackDurationMs > 0) {
+      const timeSec = timeMs / 1000;
+      const durationSec = currentTrackDurationMs / 1000;
+      const clampedSec = Math.max(0, Math.min(timeSec, durationSec));
+      silentAudioEl.currentTime = clampedSec;
+      silentAudioEl.pause();
+    }
+
+    emitDiagnosticsEvent({
+      type: 'element-position-synced',
+      label: 'Hidden element synced to worklet position during pause',
+      timestampMs: nowMs(),
+      severity: 'info',
+      elementTimeS: silentAudioEl?.currentTime ?? null,
+      workletTimeMs: timeMs,
+    });
   }
 
   async function resume() {
@@ -1565,6 +1613,12 @@ export function createJamAudioBridge({
   }
 
   async function stop(options = {}) {
+    if (silentAudioEl && silentAudioEl.src && silentAudioEl.src.startsWith('blob:')) {
+      URL.revokeObjectURL(silentAudioEl.src);
+    }
+    currentTrackDurationMs = 0;
+    currentPlaybackFramePosition = 0;
+
     playbackSessionGeneration += 1;
     const { preserveMediaSession = false } = options;
 
@@ -1696,6 +1750,15 @@ export function createJamAudioBridge({
     void sendPlaybackWorkerCommand('setBufferedDurationMs', { value });
   }
 
+  function updatePlaybackPosition(framePosition) {
+    currentPlaybackFramePosition = framePosition;
+  }
+
+  function getPlaybackTimeMs() {
+    const sampleRate = audioContext?.sampleRate ?? 44100;
+    return (currentPlaybackFramePosition / sampleRate) * 1000;
+  }
+
   function updatePlaybackState(state, options = {}) {
     const { preserveMediaSession = false } = options;
     if ('mediaSession' in navigator) {
@@ -1778,8 +1841,15 @@ export function createJamAudioBridge({
       runMediaAction('play', () => {
         mediaSessionResumeRequested = true;
         if (silentAudioEl) {
+          if (currentTrackDurationMs > 0) {
+            const timeMs = getPlaybackTimeMs();
+            const timeSec = timeMs / 1000;
+            silentAudioEl.currentTime = Math.min(timeSec, currentTrackDurationMs / 1000);
+          }
           silentAudioEl.pause();
-          silentAudioEl.play().catch(() => {});
+          silentAudioEl.play().catch((err) => {
+            console.warn('[AudioBridge] silentAudioEl.play() failed from Media Session handler:', err);
+          });
         }
         if (typeof onPlayCallback === 'function') onPlayCallback();
         else {
@@ -2157,6 +2227,12 @@ export function createJamAudioBridge({
     getPlaybackSessionSnapshot,
     initAudio,
     initEngine: async () => { await ensureWasm(); },
+    updatePlaybackPosition,
+    getPlaybackTimeMs,
+    get currentPlaybackFramePosition() { return currentPlaybackFramePosition; },
+    set currentPlaybackFramePosition(v) { currentPlaybackFramePosition = v; },
+    get currentTrackDurationMs() { return currentTrackDurationMs; },
+    set currentTrackDurationMs(v) { currentTrackDurationMs = v; },
     __test__: {
       setBoundedTrackAudioOnSilentElement,
       setTrackAudioOnSilentElement,
