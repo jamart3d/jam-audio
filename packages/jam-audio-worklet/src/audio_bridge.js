@@ -1848,13 +1848,30 @@ export function createJamAudioBridge({
     });
 
     navigator.mediaSession.setActionHandler('play', () => {
+      // === ROOT-CAUSE DIAGNOSTIC: Log three critical values ===
+      const beforeState = audioContext?.state ?? 'none';
+      const beforeGain = gainNode?.gain?.value ?? -1;
+      const beforeFramePos = currentPlaybackFramePosition;
+
       emitDiagnosticsEvent({
         type: 'media-session-play-handler-entered',
         label: 'Media Session play action handler entered',
         timestampMs: nowMs(),
         severity: 'info',
-        audioContextState: audioContext?.state ?? 'none',
+        audioContextStateBefore: beforeState,
+        gainBefore: beforeGain,
+        framePositionBefore: beforeFramePos,
       });
+
+      // Log to localStorage for persistence (survives backgrounding)
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        event: 'media-session-play-handler',
+        audioContextStateBefore: beforeState,
+        gainBefore: beforeGain,
+        framePositionBefore: beforeFramePos,
+      };
+
       runMediaAction('play', () => {
         mediaSessionResumeRequested = true;
         if (silentAudioEl) {
@@ -1873,6 +1890,57 @@ export function createJamAudioBridge({
           console.warn(`[${namespace}] onPlayCallback not registered, falling back to low-level resume()`);
           resume();
         }
+
+        // === ROOT-CAUSE DIAGNOSTIC: Check state after resume ===
+        setTimeout(() => {
+          const afterState = audioContext?.state ?? 'none';
+          const afterGain = gainNode?.gain?.value ?? -1;
+          const afterFramePos = currentPlaybackFramePosition;
+          const framesWritten = afterFramePos - beforeFramePos;
+
+          logEntry.audioContextStateAfter = afterState;
+          logEntry.gainAfter = afterGain;
+          logEntry.framePositionAfter = afterFramePos;
+          logEntry.framesWrittenDuringHandler = framesWritten;
+          logEntry.resumeSucceeded = afterState === 'running';
+
+          // Log to console
+          console.group('[AudioBridge] Media Session Play Diagnostics');
+          console.log('Before resume:', {
+            audioContextState: beforeState,
+            gain: beforeGain,
+            framePosition: beforeFramePos,
+          });
+          console.log('After resume:', {
+            audioContextState: afterState,
+            gain: afterGain,
+            framePosition: afterFramePos,
+            framesWritten: framesWritten,
+          });
+          console.log('Result: audioContext.state =', afterState === 'running' ? '✅ RUNNING' : '❌ SUSPENDED');
+          console.groupEnd();
+
+          // Log to localStorage for soak test retrieval
+          try {
+            const diagnosticLog = JSON.parse(localStorage.getItem('jamdisc_media_session_diagnostics') || '[]');
+            diagnosticLog.push(logEntry);
+            localStorage.setItem('jamdisc_media_session_diagnostics', JSON.stringify(diagnosticLog.slice(-100))); // Keep last 100
+          } catch (e) {
+            console.warn('[AudioBridge] Failed to write diagnostic log to localStorage:', e);
+          }
+
+          // Emit diagnostic event
+          emitDiagnosticsEvent({
+            type: 'media-session-play-handler-complete',
+            label: 'Media Session play handler completed',
+            timestampMs: nowMs(),
+            severity: 'info',
+            audioContextStateAfter: afterState,
+            gainAfter: afterGain,
+            framesWritten: framesWritten,
+            success: afterState === 'running',
+          });
+        }, 0); // Async check after handler returns
       });
     });
     navigator.mediaSession.setActionHandler('pause', () => {
