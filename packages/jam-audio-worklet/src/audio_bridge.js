@@ -1563,11 +1563,7 @@ export function createJamAudioBridge({
   }
 
   async function resume() {
-    console.log('[Diag] resume() called, audioContext state=' + (audioContext?.state ?? 'none'));
-    if (!audioContext) {
-      console.warn('[Diag] resume() returning early: audioContext is null');
-      return;
-    }
+    if (!audioContext) return;
 
     if ('mediaSession' in navigator) {
       console.log('[Diag] playbackState: ' + navigator.mediaSession.playbackState + ' -> playing');
@@ -1886,7 +1882,6 @@ export function createJamAudioBridge({
         audioContextState: audioContext?.state ?? 'none',
       });
       runMediaAction('play', () => {
-        console.log('[Diag] play handler: onPlayCallback=' + (typeof onPlayCallback));
         mediaSessionResumeRequested = true;
         if (silentAudioEl) {
           if (currentTrackDurationMs > 0) {
@@ -1899,10 +1894,8 @@ export function createJamAudioBridge({
             console.warn('[AudioBridge] silentAudioEl.play() failed from Media Session handler:', err);
           });
         }
-        if (typeof onPlayCallback === 'function') {
-          console.log('[Diag] calling onPlayCallback');
-          onPlayCallback();
-        } else {
+        if (typeof onPlayCallback === 'function') onPlayCallback();
+        else {
           console.warn(`[${namespace}] onPlayCallback not registered, falling back to low-level resume()`);
           resume();
         }
