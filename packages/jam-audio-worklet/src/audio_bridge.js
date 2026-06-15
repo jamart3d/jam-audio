@@ -241,10 +241,8 @@ export function createJamAudioBridge({
     });
 
     if (!skipInitialRamp) {
-      await Promise.all([
-        rampGainToValue(0, DECLICK_DURATION_S),
-        waitForWorkerTransportQuiet(),
-      ]);
+      await waitForWorkerTransportQuiet();
+      await rampGainToValue(0, DECLICK_DURATION_S);
       emitDiagnosticsEvent({
         type: 'transport-gain-zero',
         label: `Transport gain reached zero: ${transitionKind}`,
@@ -1188,6 +1186,7 @@ export function createJamAudioBridge({
 
     pendingPlaybackStartedOnResume = false;
     needsPlaybackStartedDeclick = false;
+    transportMuted = true;
     resumeUnmuteSent = false;
     diagnosticsState = createDiagnosticsState();
     markPlaybackState('loading', { preserveMediaSession: true });
@@ -1507,11 +1506,11 @@ export function createJamAudioBridge({
         // transportMute was called during pause (STOP_INDEX=1 froze the worklet).
         // transportUnmute clears STOP_INDEX=0 and restarts the refill loop so audio
         // can flow before the gain ramp reaches currentVolume.
+        transportMuted = false;
+        resumeUnmuteSent = true;
         if (playbackWorker) {
           await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
         }
-        transportMuted = false;
-        resumeUnmuteSent = true;
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.cancelScheduledValues(now);
@@ -1623,6 +1622,59 @@ export function createJamAudioBridge({
     emitDiagnosticsSnapshot();
     stopDiagnosticsLoop();
     if (!preserveMediaSession) stopHeartbeat();
+  }
+
+  async function forceAudioContextReset() {
+    emitDiagnosticsEvent({
+      type: 'force-audio-context-reset-start',
+      label: 'Forcing AudioContext hard reset',
+      timestampMs: nowMs(),
+      severity: 'warn',
+    });
+
+    // Pop suppression: ramp gain to zero before tearing down the context
+    forceGainToZero('hard-reset');
+
+    // Stop worklet processing immediately
+    processorNode?.port.postMessage({ type: 'stop' });
+
+    // Close the AudioContext — this terminates the render thread and worklet
+    try {
+      await audioContext?.close();
+    } catch (e) {
+      emitDiagnosticsEvent({
+        type: 'force-audio-context-reset-failed',
+        label: 'AudioContext close failed during hard reset',
+        timestampMs: nowMs(),
+        severity: 'error',
+        stage: 'close',
+        error: String(e),
+      });
+      throw e;
+    }
+
+    // Null all context-dependent state. ensureAudioGraph() recreates them on
+    // the next beginPlaybackSession() call (triggered by Dart's playTrack()).
+    // workletReadyPromise must be nulled so addModule() runs on the new context.
+    // workletPortWired must be false so wireWorkletPortOnce() re-wires the port.
+    audioContext = null;
+    processorNode = null;
+    gainNode = null;
+    workletReadyPromise = null;
+    workletPortWired = false;
+
+    // Explicit known mute state. The subsequent playTrack() → createSharedBuffers()
+    // allocates a fresh SAB with sharedState.fill(0), clearing STOP_INDEX.
+    // Do NOT call wireWorkletPortOnce() here — beginPlaybackSession() does it.
+    transportMuted = true;
+    resumeUnmuteSent = false;
+
+    emitDiagnosticsEvent({
+      type: 'force-audio-context-reset-complete',
+      label: 'AudioContext hard reset complete — awaiting Dart playTrack',
+      timestampMs: nowMs(),
+      severity: 'info',
+    });
   }
 
   function setVolume(value) {
@@ -2071,6 +2123,7 @@ export function createJamAudioBridge({
     pause,
     resume,
     stop,
+    forceAudioContextReset,
     prepareForReload,
     setVolume,
     setBufferedDurationMs,
