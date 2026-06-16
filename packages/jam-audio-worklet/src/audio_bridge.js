@@ -243,8 +243,10 @@ export function createJamAudioBridge({
     });
 
     if (!skipInitialRamp) {
-      await waitForWorkerTransportQuiet();
-      await rampGainToValue(0, DECLICK_DURATION_S);
+      await Promise.all([
+        rampGainToValue(0, DECLICK_DURATION_S),
+        waitForWorkerTransportQuiet(),
+      ]);
       emitDiagnosticsEvent({
         type: 'transport-gain-zero',
         label: `Transport gain reached zero: ${transitionKind}`,
@@ -345,6 +347,15 @@ export function createJamAudioBridge({
       }
     };
     silentAudioEl.addEventListener('play', silentPlayHandler);
+    silentAudioEl.addEventListener('ended', () => {
+      console.warn('[Diag] silentAudioEl ended event (anchor lost)');
+    });
+    silentAudioEl.addEventListener('error', (e) => {
+      console.error('[Diag] silentAudioEl error:', e.target.error?.code, e.target.error?.message);
+    });
+    silentAudioEl.addEventListener('stalled', () => {
+      console.warn('[Diag] silentAudioEl stalled (network issue?)');
+    });
   }
 
   function setTrackAudioOnSilentElement(bytes) {
@@ -1565,6 +1576,18 @@ export function createJamAudioBridge({
   async function resume() {
     if (!audioContext) return;
 
+    // === ROOT-CAUSE DIAGNOSTIC: Log resume entry ===
+    emitDiagnosticsEvent({
+      type: 'resume-called',
+      label: 'resume() called',
+      timestampMs: nowMs(),
+      severity: 'info',
+      audioContextState: audioContext?.state ?? 'none',
+      gainValue: gainNode?.gain?.value ?? -1,
+      transportMuted: transportMuted,
+      isAndroidTransport: isAndroidTransport,
+    });
+
     if ('mediaSession' in navigator) {
       console.log('[Diag] playbackState: ' + navigator.mediaSession.playbackState + ' -> playing');
       navigator.mediaSession.playbackState = 'playing';
@@ -1581,7 +1604,11 @@ export function createJamAudioBridge({
             // Keep-warm: audioContext is never suspended after pause(), so no
             // audioContext resume call is needed. Gain is unfrozen by the fadeIn
             // path in runMutedAndroidTransportTransition (transportUnmute + ramp).
-            if (silentAudioEl) await silentAudioEl.play().catch(() => {});
+            if (silentAudioEl) await silentAudioEl.play().catch(e => {
+              console.warn('[Diag] silentAudioEl.play() rejected:', e.name, e.message);
+              console.log('[Diag] silentAudioEl state: paused=' + (silentAudioEl ? silentAudioEl.paused : 'null') +
+                          ' src=' + (silentAudioEl && silentAudioEl.src ? silentAudioEl.src.slice(-40) : 'none'));
+            });
           },
         });
       } else {
@@ -1599,7 +1626,11 @@ export function createJamAudioBridge({
           gainNode.gain.cancelScheduledValues(now);
           gainNode.gain.setValueAtTime(0, now);
         }
-        if (silentAudioEl) await silentAudioEl.play().catch(() => {});
+        if (silentAudioEl) await silentAudioEl.play().catch(e => {
+          console.warn('[Diag] silentAudioEl.play() rejected:', e.name, e.message);
+          console.log('[Diag] silentAudioEl state: paused=' + (silentAudioEl ? silentAudioEl.paused : 'null') +
+                      ' src=' + (silentAudioEl && silentAudioEl.src ? silentAudioEl.src.slice(-40) : 'none'));
+        });
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.linearRampToValueAtTime(currentVolume, now + DECLICK_DURATION_S);
@@ -1813,12 +1844,20 @@ export function createJamAudioBridge({
       }
       if (mapped === 'playing') {
         ensureSilentAudio();
-        if (silentAudioEl.paused) silentAudioEl.play().catch(() => {});
+        if (silentAudioEl.paused) silentAudioEl.play().catch(e => {
+          console.warn('[Diag] silentAudioEl.play() rejected:', e.name, e.message);
+          console.log('[Diag] silentAudioEl state: paused=' + (silentAudioEl ? silentAudioEl.paused : 'null') +
+                      ' src=' + (silentAudioEl && silentAudioEl.src ? silentAudioEl.src.slice(-40) : 'none'));
+        });
       } else if (mapped === 'paused') {
         // [MODIFIED] Retain the hidden media anchor while paused.
         // Browsers like Android Chrome dismiss the media session if the anchor is paused.
         ensureSilentAudio();
-        if (silentAudioEl.paused) silentAudioEl.play().catch(() => {});
+        if (silentAudioEl.paused) silentAudioEl.play().catch(e => {
+          console.warn('[Diag] silentAudioEl.play() rejected:', e.name, e.message);
+          console.log('[Diag] silentAudioEl state: paused=' + (silentAudioEl ? silentAudioEl.paused : 'null') +
+                      ' src=' + (silentAudioEl && silentAudioEl.src ? silentAudioEl.src.slice(-40) : 'none'));
+        });
       } else if (mapped === 'none') {
         if (!preserveMediaSession && silentAudioEl && !silentAudioEl.paused) {
           silentAudioEl.pause();
@@ -1874,13 +1913,30 @@ export function createJamAudioBridge({
     });
 
     navigator.mediaSession.setActionHandler('play', () => {
+      // === ROOT-CAUSE DIAGNOSTIC: Log three critical values ===
+      const beforeState = audioContext?.state ?? 'none';
+      const beforeGain = gainNode?.gain?.value ?? -1;
+      const beforeFramePos = currentPlaybackFramePosition;
+
       emitDiagnosticsEvent({
         type: 'media-session-play-handler-entered',
         label: 'Media Session play action handler entered',
         timestampMs: nowMs(),
         severity: 'info',
-        audioContextState: audioContext?.state ?? 'none',
+        audioContextStateBefore: beforeState,
+        gainBefore: beforeGain,
+        framePositionBefore: beforeFramePos,
       });
+
+      // Log to localStorage for persistence (survives backgrounding)
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        event: 'media-session-play-handler',
+        audioContextStateBefore: beforeState,
+        gainBefore: beforeGain,
+        framePositionBefore: beforeFramePos,
+      };
+
       runMediaAction('play', () => {
         mediaSessionResumeRequested = true;
         if (silentAudioEl) {
@@ -1899,6 +1955,57 @@ export function createJamAudioBridge({
           console.warn(`[${namespace}] onPlayCallback not registered, falling back to low-level resume()`);
           resume();
         }
+
+        // === ROOT-CAUSE DIAGNOSTIC: Check state after resume ===
+        setTimeout(() => {
+          const afterState = audioContext?.state ?? 'none';
+          const afterGain = gainNode?.gain?.value ?? -1;
+          const afterFramePos = currentPlaybackFramePosition;
+          const framesWritten = afterFramePos - beforeFramePos;
+
+          logEntry.audioContextStateAfter = afterState;
+          logEntry.gainAfter = afterGain;
+          logEntry.framePositionAfter = afterFramePos;
+          logEntry.framesWrittenDuringHandler = framesWritten;
+          logEntry.resumeSucceeded = afterState === 'running';
+
+          // Log to console
+          console.group('[AudioBridge] Media Session Play Diagnostics');
+          console.log('Before resume:', {
+            audioContextState: beforeState,
+            gain: beforeGain,
+            framePosition: beforeFramePos,
+          });
+          console.log('After resume:', {
+            audioContextState: afterState,
+            gain: afterGain,
+            framePosition: afterFramePos,
+            framesWritten: framesWritten,
+          });
+          console.log('Result: audioContext.state =', afterState === 'running' ? '✅ RUNNING' : '❌ SUSPENDED');
+          console.groupEnd();
+
+          // Log to localStorage for soak test retrieval
+          try {
+            const diagnosticLog = JSON.parse(localStorage.getItem('jamdisc_media_session_diagnostics') || '[]');
+            diagnosticLog.push(logEntry);
+            localStorage.setItem('jamdisc_media_session_diagnostics', JSON.stringify(diagnosticLog.slice(-100))); // Keep last 100
+          } catch (e) {
+            console.warn('[AudioBridge] Failed to write diagnostic log to localStorage:', e);
+          }
+
+          // Emit diagnostic event
+          emitDiagnosticsEvent({
+            type: 'media-session-play-handler-complete',
+            label: 'Media Session play handler completed',
+            timestampMs: nowMs(),
+            severity: 'info',
+            audioContextStateAfter: afterState,
+            gainAfter: afterGain,
+            framesWritten: framesWritten,
+            success: afterState === 'running',
+          });
+        }, 0); // Async check after handler returns
       });
     });
     navigator.mediaSession.setActionHandler('pause', () => {
