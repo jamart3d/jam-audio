@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-18
+
+### Added
+- Added worklet buffering callback support and rising/falling-edge buffering events.
+- Added playback worker controller coverage for buffering transitions.
+
+### Changed
+- Synced the worklet bridge from Jamdisc, including hidden Media Session anchor lifecycle handling, resume diagnostics, and Android parallel gain ramp behavior.
+- Realigned the packaged bridge with Jamdisc's current visibility-resume behavior and paused-notification toggle.
+
+### Fixed
+- Recovered browser-suspended `AudioContext` state when the page becomes visible again.
+- Fixed cold-start hidden media behavior that could stall playback startup.
+- Normalized silent-anchor URL comparisons so readback matches the guarded URL.
+- Restored `getAudioContextState` fallback behavior for the running-to-none transition.
+
+### Verified
+- Worklet syntax check (`audio_bridge.js`, `audio_processor.js`)
+- Worklet playback worker controller test
+- Engine cargo check
+- Flutter bridge cargo check
+
 ## [0.4.1] — 2026-06-13
 
 ### Refactored
