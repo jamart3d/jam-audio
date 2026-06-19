@@ -9,6 +9,15 @@ import {
   clampVolume,
   sendPreloadCommand,
 } from './audio_bridge_transport.js';
+import {
+  PRESETS as EQ_PRESETS,
+  createEqChain,
+  wireEqChain,
+  connectProcessorToChain,
+  applyBand,
+  applyBands,
+  clampGain,
+} from './audio_bridge_eq.js';
 
 
 export function createJamAudioBridge({
@@ -28,6 +37,8 @@ export function createJamAudioBridge({
   let audioContext;
   let workletReadyPromise;
   let gainNode;
+  let eqFilterNodes = null;
+  let pendingEqGains = [0, 0, 0, 0, 0];
   let processorNode;
   let currentVolume = 1.0;
   let sharedPcmBuffer;
@@ -851,6 +862,9 @@ export function createJamAudioBridge({
       gainNode = audioContext.createGain();
       gainNode.gain.value = 0; // Initialize to silent to avoid startup pops/clicks during eager context creation
       gainNode.connect(audioContext.destination);
+      eqFilterNodes = createEqChain(audioContext);
+      wireEqChain(eqFilterNodes, gainNode);
+      applyBands(eqFilterNodes, pendingEqGains);
       emitDiagnosticsEvent({
         type: 'gain-node-connected',
         label: 'gainNode connected to AudioContext destination',
@@ -867,7 +881,7 @@ export function createJamAudioBridge({
         numberOfOutputs: 1,
         outputChannelCount: [CHANNELS],
       });
-      processorNode.connect(gainNode);
+      connectProcessorToChain(processorNode, eqFilterNodes, gainNode);
       processorNode.port.onmessage = (event) => {
         if (event.data.type === 'underrun') {
           diagnosticsState.underrunCount =
@@ -1269,7 +1283,9 @@ export function createJamAudioBridge({
         severity: 'info',
         durationMs,
       });
-      scheduleDeclickRampToCurrentVolume('initAudio-startup');
+      if (!needsPlaybackStartedDeclick) {
+        scheduleDeclickRampToCurrentVolume('initAudio-startup');
+      }
     }).catch(() => {});
 
     // Fallback for when the AudioContext is still suspended after initAudio().
@@ -1353,6 +1369,15 @@ export function createJamAudioBridge({
       });
     } else {
       if (playbackWorker) {
+        // Zero the gain atomically before stopping the worklet so the gain
+        // node is already at zero in the same render quantum the worklet
+        // processes its stop message. A linearRamp is fire-and-forget and
+        // the worklet zeros its output within ~2.67ms (one render quantum),
+        // well before the 15ms ramp completes — ramp × 0 = 0, so the ramp
+        // was a no-op and the pop happened at the stop quantum. Using
+        // setValueAtTime(0, now) is atomic: output = worklet_output × 0 = 0
+        // starting at the very next quantum, preventing the pop.
+        forceGainToZero('beginPlaybackSession-desktop-declick');
         processorNode?.port.postMessage({ type: 'stop' }); // see Android branch above
         await sendPlaybackWorkerCommand('stop').catch(() => {});
       } else {
@@ -1384,14 +1409,13 @@ export function createJamAudioBridge({
       try {
         await initAudio();
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
-        if (isAndroidTransport) {
-          // Android: defer declick to playback-started (when buffer is actually ready).
-          // Scheduling the ramp here causes it to complete before the first PCM frame
-          // arrives, leaving gain=1.0 at the hard start → audible pop on gapless tracks.
-          needsPlaybackStartedDeclick = true;
-        } else {
-          if (gainNode) scheduleDeclickRampToCurrentVolume('playTrack-startup');
-        }
+        // Always defer the startup declick to the playback-started event (when
+        // the ring buffer is actually populated). Scheduling the ramp here on
+        // desktop caused it to complete before the first PCM frame arrived —
+        // the gain node reached currentVolume during the decode gap and the
+        // first frame hit at full gain → audible pop. Android already used this
+        // deferred path; now desktop matches.
+        needsPlaybackStartedDeclick = true;
         createSharedBuffers();
         setStartupPhase('creating decoder');
         await sendPlaybackWorkerCommand('playTrack', {
@@ -1449,7 +1473,7 @@ export function createJamAudioBridge({
             new Promise((r) => setTimeout(r, 300)),
           ]).catch(() => {});
         }
-        scheduleDeclickRampToCurrentVolume('playTrackStreaming-startup');
+        needsPlaybackStartedDeclick = true;
         createSharedBuffers();
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
         setStartupPhase('creating streaming decoder');
@@ -1514,7 +1538,7 @@ export function createJamAudioBridge({
             new Promise((r) => setTimeout(r, 300)),
           ]).catch(() => {});
         }
-        scheduleDeclickRampToCurrentVolume('playTrackBounded-startup');
+        needsPlaybackStartedDeclick = true;
         createSharedBuffers();
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
         setStartupPhase('creating streaming decoder');
@@ -2118,7 +2142,7 @@ export function createJamAudioBridge({
     const oldNode = processorNode;
     if (oldNode) {
       try {
-        oldNode.disconnect(gainNode);
+        oldNode.disconnect(eqFilterNodes ? eqFilterNodes[0] : gainNode);
       } catch (e) {
         console.warn('rebindWorkletNode: disconnect failed', e);
       }
@@ -2128,7 +2152,7 @@ export function createJamAudioBridge({
       numberOfOutputs: 1,
       outputChannelCount: [CHANNELS],
     });
-    processorNode.connect(gainNode);
+    connectProcessorToChain(processorNode, eqFilterNodes, gainNode);
     if (oldNode) {
       processorNode.port.onmessage = oldNode.port.onmessage;
     }
@@ -2176,7 +2200,6 @@ export function createJamAudioBridge({
       if (audioContext && gainNode && audioContext.state !== 'closed') {
         const now = audioContext.currentTime;
         gainNode.gain.cancelScheduledValues(now);
-        gainNode.gain.setValueAtTime(gainNode.gain.value, now);
         gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
       }
 
@@ -2321,6 +2344,18 @@ export function createJamAudioBridge({
 
   registerLifecycleListeners();
 
+  function setEqBand(bandIndex, gainDb) {
+    const clamped = clampGain(gainDb);
+    pendingEqGains[bandIndex] = clamped;
+    applyBand(eqFilterNodes, bandIndex, clamped);
+  }
+
+  function setEqPreset(presetName) {
+    const gains = EQ_PRESETS[presetName] ?? EQ_PRESETS['flat'];
+    pendingEqGains = [...gains];
+    applyBands(eqFilterNodes, pendingEqGains);
+  }
+
   const bridgeApi = {
     playTrack,
     playTrackStreaming,
@@ -2344,6 +2379,8 @@ export function createJamAudioBridge({
     forceAudioContextReset,
     prepareForReload,
     setVolume,
+    setEqBand,
+    setEqPreset,
     setBufferedDurationMs,
     bufferedDurationMs: () => lastKnownBufferedDurationMs,
     setOnEnded: (cb) => { onEndedCallback = cb; },
@@ -2386,6 +2423,7 @@ export function createJamAudioBridge({
 
   if (typeof window !== 'undefined' && namespace) {
     window[namespace] = bridgeApi;
+    window.jamdiscAudioBridgeController = bridgeApi;
   }
 
   return bridgeApi;

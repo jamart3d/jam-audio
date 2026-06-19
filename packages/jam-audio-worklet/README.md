@@ -25,6 +25,18 @@ const bridge = createJamAudioBridge({
 });
 ```
 
+## Large Files
+
+For large FLAC files, prefer URL-backed bounded playback via `playTrackBounded(url, totalSize)`.
+The full-byte `playTrack(audioBytes)` path transfers and retains the complete compressed file in
+memory before playback starts, so its practical ceiling is browser and Wasm memory rather than a
+package-defined FLAC size limit.
+
+Bounded playback keeps a sliding decode window instead of retaining the entire file. The current
+worker policy uses a 64 MB window, pauses fetch after roughly 8 MB of read-ahead, and resumes below
+roughly 2 MB. These values limit retained/fetched-ahead bytes, not the total playable file size.
+See [LARGE_FLAC_LIMITS.md](LARGE_FLAC_LIMITS.md) for the investigation notes.
+
 ## Diagnostics
 
 The bridge exposes diagnostics callbacks for applications that need runtime playback visibility:
