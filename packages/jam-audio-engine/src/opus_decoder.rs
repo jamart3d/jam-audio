@@ -221,6 +221,7 @@ mod pure_rust {
             FinalizeResult::default()
         }
 
+        // Required by the symphonia_core::codecs::Decoder trait.
         fn last_decoded(&self) -> AudioBufferRef<'_> {
             self.buf.as_audio_buffer_ref()
         }
@@ -266,7 +267,10 @@ mod pure_rust {
         #[test]
         fn make_decoder_rejects_invalid_channel_count() {
             let err = make_decoder(48_000, 3).unwrap_err();
-            assert!(matches!(err, Error::DecodeError("opus: invalid channel count")));
+            assert!(matches!(
+                err,
+                Error::DecodeError("opus: invalid channel count")
+            ));
         }
 
         #[test]
@@ -278,7 +282,10 @@ mod pure_rust {
                 decoder.reset();
             }
 
-            assert_ne!(decoder.decoder as usize, 0, "decoder pointer must remain non-null");
+            assert_ne!(
+                decoder.decoder as usize, 0,
+                "decoder pointer must remain non-null"
+            );
         }
     }
 }

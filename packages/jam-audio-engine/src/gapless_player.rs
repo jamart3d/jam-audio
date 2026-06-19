@@ -122,7 +122,8 @@ impl GaplessPlayer {
                         self.active = next;
                         self.seam_generation = self.seam_generation.wrapping_add(1);
                         let seam_frames = self.total_frames_decoded + (out.len() / 2) as u64;
-                        self.last_seam_position_ms = seam_frames as f64 * 1000.0 / self.target_sample_rate as f64;
+                        self.last_seam_position_ms =
+                            seam_frames as f64 * 1000.0 / self.target_sample_rate as f64;
                     } else {
                         self.ended = true;
                         break;
