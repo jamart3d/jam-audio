@@ -61,8 +61,17 @@ export function createJamAudioBridge({
   let needsPlaybackStartedDeclick = false;
   /** @type {(() => void) | null} */
   let onPlaybackSuspendedCallback = null;
+  /** @type {((source: string) => void) | null} */
+  let onAudioInterruptedCallback = null;
+  let audioInterruptionLatched = false;
+  let audioInterruptionStuckTimerId = null;
+  let appOwnedPauseInFlight = false;
+  let appOwnedStopInFlight = false;
+  let appOwnedResetInFlight = false;
+  let appOwnedReloadInFlight = false;
   /** @type {(() => void) | null} */
   let onEndedCallback = null;
+  let onHandoffFallbackCallback = null;
   /** @type {((position: number) => void) | null} */
   let onPositionCallback = null;
   /** @type {((duration: number) => void) | null} */
@@ -106,7 +115,7 @@ export function createJamAudioBridge({
   // true (Option B): silentAudioEl stays playing → notification survives but shows wrong ⏸ icon.
   // Toggle from console: localStorage.setItem('jamdisc_notif_keep_paused', 'true') then reload.
   let NOTIFICATION_KEEP_WHILE_PAUSED =
-    localStorage.getItem('jamdisc_notif_keep_paused') === 'true';
+    (typeof localStorage !== 'undefined') && localStorage.getItem('jamdisc_notif_keep_paused') === 'true';
 
   let queueTrackIds = [];
   let activeTrackIndex = 0;
@@ -326,6 +335,28 @@ export function createJamAudioBridge({
       }
     };
     silentAudioEl.addEventListener('play', silentPlayHandler);
+    silentAudioEl.addEventListener('pause', () => {
+      if (!isLogicalPlaybackActive()) return;
+      if (isAppOwnedAudioTransitionInFlight()) {
+        emitDiagnosticsEvent({
+          type: 'audio-interruption-suppressed',
+          label: 'Hidden anchor pause suppressed',
+          timestampMs: nowMs(),
+          severity: 'info',
+          source: 'hidden_anchor_pause',
+          reason: 'app_owned_transition',
+        });
+        return;
+      }
+      emitDiagnosticsEvent({
+        type: 'hidden-anchor-interruption-detected',
+        label: 'Hidden anchor pause interruption detected',
+        timestampMs: nowMs(),
+        severity: 'warn',
+        audioContextState: audioContext?.state ?? 'none',
+      });
+      notifyAudioInterrupted('hidden_anchor_pause');
+    });
   }
 
   function setTrackAudioOnSilentElement(bytes) {
@@ -640,21 +671,145 @@ export function createJamAudioBridge({
     return wasmReadyPromise;
   }
 
+  function isLogicalPlaybackActive() {
+    return diagnosticsState.playbackState === 'playing' ||
+      navigator?.mediaSession?.playbackState === 'playing';
+  }
+
+  function isAppOwnedAudioTransitionInFlight() {
+    return appOwnedPauseInFlight ||
+      appOwnedStopInFlight ||
+      appOwnedResetInFlight ||
+      appOwnedReloadInFlight ||
+      isAppOwnedResumeInFlight;
+  }
+
+  function clearAudioInterruptionLatch(reason) {
+    const wasLatched = audioInterruptionLatched;
+    audioInterruptionLatched = false;
+    if (audioInterruptionStuckTimerId != null) {
+      clearTimeout(audioInterruptionStuckTimerId);
+      audioInterruptionStuckTimerId = null;
+    }
+    if (wasLatched) {
+      emitDiagnosticsEvent({
+        type: 'audio-interruption-latch-cleared',
+        label: 'Audio interruption latch cleared',
+        timestampMs: nowMs(),
+        severity: 'info',
+        reason,
+        audioContextState: audioContext?.state ?? 'none',
+      });
+    }
+  }
+
+  function armAudioInterruptionStuckTimer(source) {
+    if (audioInterruptionStuckTimerId != null) clearTimeout(audioInterruptionStuckTimerId);
+    audioInterruptionStuckTimerId = setTimeout(() => {
+      audioInterruptionStuckTimerId = null;
+      if (!audioInterruptionLatched || audioContext?.state !== 'interrupted') return;
+      emitDiagnosticsEvent({
+        type: 'audio-interruption-stuck',
+        label: 'Audio interruption remained stuck',
+        timestampMs: nowMs(),
+        severity: 'warn',
+        source,
+        audioContextState: audioContext?.state ?? 'none',
+      });
+    }, 10000);
+  }
+
+  function notifyAudioInterrupted(source, details = {}) {
+    if (!isLogicalPlaybackActive()) {
+      emitDiagnosticsEvent({
+        type: 'audio-interruption-suppressed',
+        label: 'Audio interruption suppressed',
+        timestampMs: nowMs(),
+        severity: 'info',
+        source,
+        reason: 'inactive_playback',
+        ...details,
+      });
+      return;
+    }
+    if (isAppOwnedAudioTransitionInFlight()) {
+      emitDiagnosticsEvent({
+        type: 'audio-interruption-suppressed',
+        label: 'Audio interruption suppressed',
+        timestampMs: nowMs(),
+        severity: 'info',
+        source,
+        reason: 'app_owned_transition',
+        ...details,
+      });
+      return;
+    }
+    if (audioInterruptionLatched) {
+      emitDiagnosticsEvent({
+        type: 'audio-interruption-suppressed',
+        label: 'Audio interruption suppressed',
+        timestampMs: nowMs(),
+        severity: 'info',
+        source,
+        reason: 'already_latched',
+        ...details,
+      });
+      return;
+    }
+
+    audioInterruptionLatched = true;
+    emitDiagnosticsEvent({
+      type: 'audio-interruption-detected',
+      label: 'Audio interruption detected',
+      timestampMs: nowMs(),
+      severity: 'warn',
+      source,
+      audioContextState: audioContext?.state ?? 'none',
+      hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
+      ...details,
+    });
+    if (source === 'audio_context_interrupted') {
+      armAudioInterruptionStuckTimer(source);
+    }
+    if (typeof onAudioInterruptedCallback === 'function') {
+      onAudioInterruptedCallback(source);
+    }
+  }
+
   async function ensureAudioGraph() {
     if (!audioContext) {
       setStartupPhase('initializing audio graph');
       audioContext = new AudioContext();
       if (typeof audioContext.addEventListener === 'function') {
         audioContext.addEventListener('statechange', () => {
+          const state = audioContext.state;
           emitDiagnosticsEvent({
             type: 'audiocontext-state-changed',
-            label: `AudioContext state: ${audioContext.state}`,
+            label: `AudioContext state: ${state}`,
             timestampMs: nowMs(),
             severity: 'info',
-            state: audioContext.state,
+            state,
             currentTime: audioContext.currentTime,
             gainNodeValue: gainNode?.gain?.value ?? null,
           });
+
+          if (state === 'running') {
+            clearAudioInterruptionLatch('audio_context_running');
+            return;
+          }
+          if (state === 'interrupted') {
+            notifyAudioInterrupted('audio_context_interrupted', { state });
+            return;
+          }
+          if (state === 'suspended') {
+            if (pendingPlaybackStartedOnResume) {
+              if (typeof onPlaybackSuspendedCallback === 'function') {
+                onPlaybackSuspendedCallback();
+              }
+              return;
+            }
+            notifyAudioInterrupted('audio_context_suspended', { state });
+          }
         });
       }
       emitDiagnosticsEvent({
@@ -950,6 +1105,18 @@ export function createJamAudioBridge({
           activeTrackId,
         });
         if (typeof onEndedCallback === 'function') onEndedCallback();
+        return;
+      case 'handoff-fallback-streaming':
+        emitDiagnosticsEvent({
+          type: 'bridge-handoff-fallback-streaming',
+          label: 'Bridge handoff-fallback-streaming received',
+          timestampMs: nowMs(),
+          severity: 'info',
+          audioContextState: audioContext?.state ?? 'unknown',
+          activeTrackIndex,
+          activeTrackId,
+        });
+        if (typeof onHandoffFallbackCallback === 'function') onHandoffFallbackCallback();
         return;
       case 'playback-error':
         diagnosticsState.transitionGapMs = null;
@@ -1454,46 +1621,52 @@ export function createJamAudioBridge({
   async function pause() {
     if (!audioContext) return;
 
-    if (isAndroidTransport) {
-      await runMutedAndroidTransportTransition({
-        transitionKind: 'pause',
-        preserveMediaSession: true,
-        // Keep-warm: context stays running at gain=0. No DAC power-cycle = no pop.
-        // runMutedAndroidTransportTransition ramps gain to zero and calls
-        // waitForWorkerTransportQuiet() → transportMute (STOP_INDEX=1) before
-        // performAction runs. The worklet outputs silence without advancing
-        // READ_INDEX when STOP_INDEX=1. On resume, transportUnmute clears
-        // STOP_INDEX=0 and the worklet resumes from the exact frame it left off.
-        performAction: async () => {},
-      });
-    } else {
-      await rampGainToValue(0, DECLICK_DURATION_S);
-      // Keep-warm: no audioContext suspend call — context stays running at gain=0.
-      // transportMute sets STOP_INDEX=1 so the worklet outputs silence without
-      // advancing READ_INDEX (ring-buffer position frozen). This subsumes
-      // pauseRefill (also stops the refill loop). transportUnmute on resume
-      // clears STOP_INDEX=0 and restarts the refill loop.
-      if (playbackWorker) {
-        await sendPlaybackWorkerCommand('transportMute').catch(() => {});
+    appOwnedPauseInFlight = true;
+    try {
+      if (isAndroidTransport) {
+        await runMutedAndroidTransportTransition({
+          transitionKind: 'pause',
+          preserveMediaSession: true,
+          // Keep-warm: context stays running at gain=0. No DAC power-cycle = no pop.
+          // runMutedAndroidTransportTransition ramps gain to zero and calls
+          // waitForWorkerTransportQuiet() → transportMute (STOP_INDEX=1) before
+          // performAction runs. The worklet outputs silence without advancing
+          // READ_INDEX when STOP_INDEX=1. On resume, transportUnmute clears
+          // STOP_INDEX=0 and the worklet resumes from the exact frame it left off.
+          performAction: async () => {},
+        });
+      } else {
+        await rampGainToValue(0, DECLICK_DURATION_S);
+        // Keep-warm: no audioContext suspend call — context stays running at gain=0.
+        // transportMute sets STOP_INDEX=1 so the worklet outputs silence without
+        // advancing READ_INDEX (ring-buffer position frozen). This subsumes
+        // pauseRefill (also stops the refill loop). transportUnmute on resume
+        // clears STOP_INDEX=0 and restarts the refill loop.
+        if (playbackWorker) {
+          await sendPlaybackWorkerCommand('transportMute').catch(() => {});
+        }
+        transportMuted = true;
       }
-      transportMuted = true;
-    }
 
-    markPlaybackState('paused');
-    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
-    emitDiagnosticsEvent({
-      type: 'pause',
-      label: 'Paused (keep-warm: context running, gain=0)',
-      timestampMs: nowMs(),
-      severity: 'info',
-      audioContextState: audioContext?.state ?? 'none',
-      gainNodeValue: gainNode?.gain?.value ?? null,
-    });
+      markPlaybackState('paused');
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+      emitDiagnosticsEvent({
+        type: 'pause',
+        label: 'Paused (keep-warm: context running, gain=0)',
+        timestampMs: nowMs(),
+        severity: 'info',
+        audioContextState: audioContext?.state ?? 'none',
+        gainNodeValue: gainNode?.gain?.value ?? null,
+      });
+    } finally {
+      appOwnedPauseInFlight = false;
+    }
   }
 
   async function resume() {
     if (!audioContext) return;
 
+    clearAudioInterruptionLatch('resume');
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
     isAppOwnedResumeInFlight = true;
     try {
@@ -1574,116 +1747,127 @@ export function createJamAudioBridge({
   }
 
   async function stop(options = {}) {
-    playbackSessionGeneration += 1;
-    const { preserveMediaSession = false } = options;
+    appOwnedStopInFlight = true;
+    try {
+      playbackSessionGeneration += 1;
+      const { preserveMediaSession = false } = options;
 
-    // Declick: ramp gain to zero before cutting audio to avoid a pop.
-    // Mirrors pause() pattern. rampGainToValue() returns early if gain is
-    // already at/near zero (e.g. stop()-after-pause()), so no double-ramp occurs.
-    if (gainNode && audioContext) {
-      if (isAndroidTransport) {
-        await runMutedAndroidTransportTransition({
-          transitionKind: 'stop',
-          preserveMediaSession,
-          performAction: async () => {
-            if (processorNode) processorNode.port.postMessage({ type: 'stop' });
-            if (playbackWorker) await sendPlaybackWorkerCommand('stop').catch(() => {});
-          },
-        });
+      // Declick: ramp gain to zero before cutting audio to avoid a pop.
+      // Mirrors pause() pattern. rampGainToValue() returns early if gain is
+      // already at/near zero (e.g. stop()-after-pause()), so no double-ramp occurs.
+      if (gainNode && audioContext) {
+        if (isAndroidTransport) {
+          await runMutedAndroidTransportTransition({
+            transitionKind: 'stop',
+            preserveMediaSession,
+            performAction: async () => {
+              if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+              if (playbackWorker) await sendPlaybackWorkerCommand('stop').catch(() => {});
+            },
+          });
+        } else {
+          await rampGainToValue(0, DECLICK_DURATION_S);
+          if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+          if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
+        }
       } else {
-        await rampGainToValue(0, DECLICK_DURATION_S);
         if (processorNode) processorNode.port.postMessage({ type: 'stop' });
         if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
       }
-    } else {
-      if (processorNode) processorNode.port.postMessage({ type: 'stop' });
-      if (playbackWorker) void sendPlaybackWorkerCommand('stop').catch(() => {});
-    }
 
-    transportMuted = true;
-    resumeUnmuteSent = false;
+      transportMuted = true;
+      resumeUnmuteSent = false;
 
-    clearBoundedAnchorEndedHandler();
-    restoreSilentAnchor();
+      clearBoundedAnchorEndedHandler();
+      restoreSilentAnchor();
 
-    if (currentTrackBlobUrl && !preserveMediaSession) {
-      URL.revokeObjectURL(currentTrackBlobUrl);
-      currentTrackBlobUrl = null;
-    }
-    if (silentAudioEl) {
-      if (!preserveMediaSession) {
-        silentAudioEl.pause();
-        silentAudioEl.currentTime = 0;
-      } else if (silentAudioEl.paused) {
-        silentAudioEl.play().catch(() => {});
+      if (currentTrackBlobUrl && !preserveMediaSession) {
+        URL.revokeObjectURL(currentTrackBlobUrl);
+        currentTrackBlobUrl = null;
       }
+      if (silentAudioEl) {
+        if (!preserveMediaSession) {
+          silentAudioEl.pause();
+          silentAudioEl.currentTime = 0;
+        } else if (silentAudioEl.paused) {
+          silentAudioEl.play().catch(() => {});
+        }
+      }
+      if ('mediaSession' in navigator && !preserveMediaSession) {
+        navigator.mediaSession.playbackState = 'none';
+      }
+      sharedPcmBuffer = null;
+      sharedStateBuffer = null;
+      frameCapacity = 8192;
+      lastKnownBufferedDurationMs = 0;
+      diagnosticsState.transitionGapMs = null;
+      markPlaybackState('idle', { preserveMediaSession });
+      setStartupPhase('idle');
+      emitDiagnosticsSnapshot();
+      stopDiagnosticsLoop();
+      if (!preserveMediaSession) stopHeartbeat();
+    } finally {
+      appOwnedStopInFlight = false;
+      clearAudioInterruptionLatch('stop');
     }
-    if ('mediaSession' in navigator && !preserveMediaSession) {
-      navigator.mediaSession.playbackState = 'none';
-    }
-    sharedPcmBuffer = null;
-    sharedStateBuffer = null;
-    frameCapacity = 8192;
-    lastKnownBufferedDurationMs = 0;
-    diagnosticsState.transitionGapMs = null;
-    markPlaybackState('idle', { preserveMediaSession });
-    setStartupPhase('idle');
-    emitDiagnosticsSnapshot();
-    stopDiagnosticsLoop();
-    if (!preserveMediaSession) stopHeartbeat();
   }
 
   async function forceAudioContextReset() {
-    emitDiagnosticsEvent({
-      type: 'force-audio-context-reset-start',
-      label: 'Forcing AudioContext hard reset',
-      timestampMs: nowMs(),
-      severity: 'warn',
-    });
-
-    // Pop suppression: ramp gain to zero before tearing down the context
-    forceGainToZero('hard-reset');
-
-    // Stop worklet processing immediately
-    processorNode?.port.postMessage({ type: 'stop' });
-
-    // Close the AudioContext — this terminates the render thread and worklet
+    appOwnedResetInFlight = true;
     try {
-      await audioContext?.close();
-    } catch (e) {
       emitDiagnosticsEvent({
-        type: 'force-audio-context-reset-failed',
-        label: 'AudioContext close failed during hard reset',
+        type: 'force-audio-context-reset-start',
+        label: 'Forcing AudioContext hard reset',
         timestampMs: nowMs(),
-        severity: 'error',
-        stage: 'close',
-        error: String(e),
+        severity: 'warn',
       });
-      throw e;
+
+      // Pop suppression: ramp gain to zero before tearing down the context
+      forceGainToZero('hard-reset');
+
+      // Stop worklet processing immediately
+      processorNode?.port.postMessage({ type: 'stop' });
+
+      // Close the AudioContext — this terminates the render thread and worklet
+      try {
+        await audioContext?.close();
+      } catch (e) {
+        emitDiagnosticsEvent({
+          type: 'force-audio-context-reset-failed',
+          label: 'AudioContext close failed during hard reset',
+          timestampMs: nowMs(),
+          severity: 'error',
+          stage: 'close',
+          error: String(e),
+        });
+        throw e;
+      }
+
+      // Null all context-dependent state. ensureAudioGraph() recreates them on
+      // the next beginPlaybackSession() call (triggered by Dart's playTrack()).
+      // workletReadyPromise must be nulled so addModule() runs on the new context.
+      // workletPortWired must be false so wireWorkletPortOnce() re-wires the port.
+      audioContext = null;
+      processorNode = null;
+      gainNode = null;
+      workletReadyPromise = null;
+      workletPortWired = false;
+
+      // Explicit known mute state. The subsequent playTrack() → createSharedBuffers()
+      // allocates a fresh SAB with sharedState.fill(0), clearing STOP_INDEX.
+      // Do NOT call wireWorkletPortOnce() here — beginPlaybackSession() does it.
+      transportMuted = true;
+      resumeUnmuteSent = false;
+
+      emitDiagnosticsEvent({
+        type: 'force-audio-context-reset-complete',
+        label: 'AudioContext hard reset complete — awaiting Dart playTrack',
+        timestampMs: nowMs(),
+        severity: 'info',
+      });
+    } finally {
+      appOwnedResetInFlight = false;
     }
-
-    // Null all context-dependent state. ensureAudioGraph() recreates them on
-    // the next beginPlaybackSession() call (triggered by Dart's playTrack()).
-    // workletReadyPromise must be nulled so addModule() runs on the new context.
-    // workletPortWired must be false so wireWorkletPortOnce() re-wires the port.
-    audioContext = null;
-    processorNode = null;
-    gainNode = null;
-    workletReadyPromise = null;
-    workletPortWired = false;
-
-    // Explicit known mute state. The subsequent playTrack() → createSharedBuffers()
-    // allocates a fresh SAB with sharedState.fill(0), clearing STOP_INDEX.
-    // Do NOT call wireWorkletPortOnce() here — beginPlaybackSession() does it.
-    transportMuted = true;
-    resumeUnmuteSent = false;
-
-    emitDiagnosticsEvent({
-      type: 'force-audio-context-reset-complete',
-      label: 'AudioContext hard reset complete — awaiting Dart playTrack',
-      timestampMs: nowMs(),
-      severity: 'info',
-    });
   }
 
   function setVolume(value) {
@@ -1960,101 +2144,111 @@ export function createJamAudioBridge({
   }
 
   function scheduleSynchronousDeclickToZero() {
-    // Synchronous gain schedule for unload paths (beforeunload/pagehide).
-    // setTimeout-based ramps are unreliable during unload, but AudioNode
-    // scheduling is honored by the audio thread.
+    appOwnedReloadInFlight = true;
+    try {
+      // Synchronous gain schedule for unload paths (beforeunload/pagehide).
+      // setTimeout-based ramps are unreliable during unload, but AudioNode
+      // scheduling is honored by the audio thread.
 
-    // Skip entirely if the AudioContext is already closed — this happens on a
-    // double page-reload within 4 seconds where prepareForReload() already
-    // closed the context and cleaned up the element and processor.
-    if (audioContext && audioContext.state === 'closed') return;
+      // Skip entirely if the AudioContext is already closed — this happens on a
+      // double page-reload within 4 seconds where prepareForReload() already
+      // closed the context and cleaned up the element and processor.
+      if (audioContext && audioContext.state === 'closed') return;
 
-    emitDiagnosticsEvent({
-      type: 'teardown-declick-started',
-      label: 'Teardown declick started',
-      timestampMs: nowMs(),
-      severity: 'info',
-      details: {
-        audioContextState: audioContext ? audioContext.state : 'none',
-        gainNodeValue: gainNode?.gain?.value ?? null,
-        hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
-      },
-    });
+      emitDiagnosticsEvent({
+        type: 'teardown-declick-started',
+        label: 'Teardown declick started',
+        timestampMs: nowMs(),
+        severity: 'info',
+        details: {
+          audioContextState: audioContext ? audioContext.state : 'none',
+          gainNodeValue: gainNode?.gain?.value ?? null,
+          hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
+        },
+      });
 
-    if (silentAudioEl) {
-      silentAudioEl.volume = 0;
-      try { silentAudioEl.pause(); } catch {}
-      try { silentAudioEl.currentTime = 0; } catch {}
-    }
-
-    if (audioContext && gainNode && audioContext.state !== 'closed') {
-      const now = audioContext.currentTime;
-      gainNode.gain.cancelScheduledValues(now);
-      gainNode.gain.setValueAtTime(gainNode.gain.value, now);
-      gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
-    }
-
-    if (processorNode) processorNode.port.postMessage({ type: 'stop' });
-  }
-
-  async function prepareForReload() {
-    emitDiagnosticsEvent({
-      type: 'prepare-for-reload-started',
-      label: 'Prepare for reload started',
-      timestampMs: nowMs(),
-      severity: 'info',
-      details: {
-        audioContextState: audioContext ? audioContext.state : 'none',
-        gainNodeValue: gainNode?.gain?.value ?? null,
-        hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
-      },
-    });
-
-    // 1. Kill the silent audio element immediately.
-    //    The looping silent <audio> element (volume 0.001) is the primary source
-    //    of the pop on Android PWA when audio is paused — it plays even at rest.
-    if (silentAudioEl) {
-      silentAudioEl.volume = 0;
-      silentAudioEl.pause();
-      if (silentPlayHandler) {
-        silentAudioEl.removeEventListener('play', silentPlayHandler);
-        silentPlayHandler = null;
+      if (silentAudioEl) {
+        silentAudioEl.volume = 0;
+        try { silentAudioEl.pause(); } catch {}
+        try { silentAudioEl.currentTime = 0; } catch {}
       }
-      silentAudioEl.onplay = null; // Prevent auto-resume race
-    }
 
-    // 2. Stop the worklet processor first — it zeroes its output buffer.
-    if (processorNode) processorNode.port.postMessage({ type: 'stop' });
-
-    // 3. Ramp + wait regardless of suspended/running state.
-    if (gainNode && audioContext && audioContext.state !== 'closed') {
-      if (audioContext.state === 'running') {
+      if (audioContext && gainNode && audioContext.state !== 'closed') {
         const now = audioContext.currentTime;
         gainNode.gain.cancelScheduledValues(now);
         gainNode.gain.setValueAtTime(gainNode.gain.value, now);
         gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
       }
-      await new Promise((r) => setTimeout(r, DECLICK_DURATION_S * 1000));
-      try { processorNode?.disconnect(); } catch {} // AFTER ramp
-    }
 
-    // 4. Close the AudioContext — releases OS audio hardware cleanly before
-    //    the browser would forcibly do so during navigation.
-    if (audioContext) {
-      try { await audioContext.close(); } catch {}
+      if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+    } finally {
+      appOwnedReloadInFlight = false;
     }
+  }
 
-    emitDiagnosticsEvent({
-      type: 'prepare-for-reload-completed',
-      label: 'Prepare for reload completed',
-      timestampMs: nowMs(),
-      severity: 'info',
-      details: {
-        audioContextState: audioContext ? audioContext.state : 'none',
-        gainNodeValue: gainNode?.gain?.value ?? null,
-        hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
-      },
-    });
+  async function prepareForReload() {
+    appOwnedReloadInFlight = true;
+    try {
+      emitDiagnosticsEvent({
+        type: 'prepare-for-reload-started',
+        label: 'Prepare for reload started',
+        timestampMs: nowMs(),
+        severity: 'info',
+        details: {
+          audioContextState: audioContext ? audioContext.state : 'none',
+          gainNodeValue: gainNode?.gain?.value ?? null,
+          hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
+        },
+      });
+
+      // 1. Kill the silent audio element immediately.
+      //    The looping silent <audio> element (volume 0.001) is the primary source
+      //    of the pop on Android PWA when audio is paused — it plays even at rest.
+      if (silentAudioEl) {
+        silentAudioEl.volume = 0;
+        silentAudioEl.pause();
+        if (silentPlayHandler) {
+          silentAudioEl.removeEventListener('play', silentPlayHandler);
+          silentPlayHandler = null;
+        }
+        silentAudioEl.onplay = null; // Prevent auto-resume race
+      }
+
+      // 2. Stop the worklet processor first — it zeroes its output buffer.
+      if (processorNode) processorNode.port.postMessage({ type: 'stop' });
+
+      // 3. Ramp + wait regardless of suspended/running state.
+      if (gainNode && audioContext && audioContext.state !== 'closed') {
+        if (audioContext.state === 'running') {
+          const now = audioContext.currentTime;
+          gainNode.gain.cancelScheduledValues(now);
+          gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+          gainNode.gain.linearRampToValueAtTime(0, now + DECLICK_DURATION_S);
+        }
+        await new Promise((r) => setTimeout(r, DECLICK_DURATION_S * 1000));
+        try { processorNode?.disconnect(); } catch {} // AFTER ramp
+      }
+
+      // 4. Close the AudioContext — releases OS audio hardware cleanly before
+      //    the browser would forcibly do so during navigation.
+      if (audioContext) {
+        try { await audioContext.close(); } catch {}
+      }
+
+      emitDiagnosticsEvent({
+        type: 'prepare-for-reload-completed',
+        label: 'Prepare for reload completed',
+        timestampMs: nowMs(),
+        severity: 'info',
+        details: {
+          audioContextState: audioContext ? audioContext.state : 'none',
+          gainNodeValue: gainNode?.gain?.value ?? null,
+          hiddenMediaPlaying: silentAudioEl ? !silentAudioEl.paused : false,
+        },
+      });
+    } finally {
+      appOwnedReloadInFlight = false;
+    }
   }
 
   function registerTeardownListeners() {
@@ -2153,8 +2347,10 @@ export function createJamAudioBridge({
     setBufferedDurationMs,
     bufferedDurationMs: () => lastKnownBufferedDurationMs,
     setOnEnded: (cb) => { onEndedCallback = cb; },
+    setOnHandoffFallback: (cb) => { onHandoffFallbackCallback = cb; },
     setOnPlaybackStarted: (cb) => { onPlaybackStartedCallback = cb; },
     setOnPlaybackSuspended: (cb) => { onPlaybackSuspendedCallback = cb; },
+    setOnAudioInterrupted: (cb) => { onAudioInterruptedCallback = cb; },
     getAudioContextState: () => audioContext?.state ?? 'none',
     setOnPlay: (cb) => { onPlayCallback = cb; },
     setOnPause: (cb) => { onPauseCallback = cb; },

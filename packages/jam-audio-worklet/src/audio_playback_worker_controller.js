@@ -977,8 +977,16 @@ function createPlaybackWorkerController({
         schedulePreloadHoldExpiry();
         return;
       }
-      // Hold window expired — fall through to streaming reinit
+      // Hold window expired with no gapless bytes — emit the streaming-fallback
+      // signal so Dart can restart the current track cleanly rather than going
+      // through health_recovery (which resets the bridge position to 0 while
+      // the provider still holds the pre-restart position).
       preloadHoldActive = false;
+      endedEmitted = true;
+      clearPreloadHoldTimer();
+      emitEndedEmissionState('handoff-fallback-streaming');
+      emitMessage({ type: 'handoff-fallback-streaming' });
+      return;
     }
     // nextTrackPending: the gapless player (or streaming→gapless bridge) will
     // handle the handoff on the next refill tick. Do not emit ended.
@@ -988,6 +996,8 @@ function createPlaybackWorkerController({
       emitEndedEmissionState('suppressed-pending-gapless');
       return;
     }
+    // Safety net: genuine ended not preceded by a hold (should not be reached
+    // in normal flow since emitEnded always starts the hold on first call).
     endedEmitted = true;
     clearPreloadHoldTimer();
     emitEndedEmissionState('emitted');

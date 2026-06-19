@@ -1158,8 +1158,12 @@ test('hold window falls through to ended after 500ms if preload never arrives', 
   intervalCallback();
 
   assert.ok(
-    messages.some((m) => m.type === 'ended'),
-    'ended must be emitted after hold window expires (500ms ceiling)',
+    messages.some((m) => m.type === 'handoff-fallback-streaming'),
+    'handoff-fallback-streaming must be emitted after hold window expires (500ms ceiling)',
+  );
+  assert.ok(
+    !messages.some((m) => m.type === 'ended'),
+    'ended must NOT be emitted when hold expires',
   );
 });
 
@@ -1230,10 +1234,10 @@ test('ended emission diagnostics explain hold and final emit path', () => {
     'first terminal tick should report hold-started',
   );
   assert.ok(
-    endedDiagnostics.some((event) => event.action === 'emitted'),
-    'hold expiry should report final ended emission',
+    endedDiagnostics.some((event) => event.action === 'handoff-fallback-streaming'),
+    'hold expiry should report handoff-fallback-streaming action in diagnostics',
   );
-  assert.ok(messages.some((message) => message.type === 'ended'));
+  assert.ok(messages.some((message) => message.type === 'handoff-fallback-streaming'));
 });
 
 test('playTrackStreaming as transition emits track-handoff with isStreamingReinit=true', () => {
@@ -2647,11 +2651,15 @@ test('ended fires after gapless boundary clears gaplessPlayerNextLoaded when no 
   // Advance time past the 500ms hold window (nowValue = 700)
   nowValue = 700;
   sharedState[2] = 0;
-  intervalCallback(); // hold window expires and ended is emitted
+  intervalCallback(); // hold window expires and handoff-fallback-streaming is emitted
 
   assert.ok(
-    messages.some((m) => m.type === 'ended'),
-    'ended must be emitted after boundary clears flag and no further preload arrives',
+    messages.some((m) => m.type === 'handoff-fallback-streaming'),
+    'handoff-fallback-streaming must be emitted after boundary clears flag and no further preload arrives',
+  );
+  assert.ok(
+    !messages.some((m) => m.type === 'ended'),
+    'ended must NOT be emitted when hold expires',
   );
 });
 
@@ -2830,9 +2838,10 @@ test('recoverFromStaleGaplessSuppression - emits ended when flag-cleared-only be
   assert.ok(capturedFallback !== null, 'fallback should be scheduled');
   capturedFallback.fn();
 
-  // We expect { type: 'ended' } to be emitted!
-  const endedMsg = messages.find((m) => m.type === 'ended');
-  assert.ok(endedMsg !== undefined, 'Should have emitted ended event');
+  // We expect { type: 'handoff-fallback-streaming' } to be emitted!
+  const fallbackMsg = messages.find((m) => m.type === 'handoff-fallback-streaming');
+  assert.ok(fallbackMsg !== undefined, 'Should have emitted handoff-fallback-streaming event');
+  assert.ok(!messages.some((m) => m.type === 'ended'), 'ended must NOT be emitted');
 });
 
 test('recoverFromStaleGaplessSuppression - does NOT emit ended when recovery succeeded (refill-restarted)', () => {
@@ -3099,11 +3108,15 @@ test('schedulePreloadHoldExpiry fires emitEnded via injected setTimeoutFn when h
     `Hold timeout delay must be in [0, 500]ms, got ${holdTimeout.delayMs}`,
   );
 
-  // Firing the timeout must emit 'ended' (hold window expired, no next track loaded)
+  // Firing the timeout must emit 'handoff-fallback-streaming' (hold window expired, no next track loaded)
   holdTimeout.callback();
   assert.ok(
-    messages.some((m) => m.type === 'ended'),
-    'Firing the hold-expiry timer must emit { type: "ended" }',
+    messages.some((m) => m.type === 'handoff-fallback-streaming'),
+    'Firing the hold-expiry timer must emit { type: "handoff-fallback-streaming" }',
+  );
+  assert.ok(
+    !messages.some((m) => m.type === 'ended'),
+    'ended must NOT be emitted',
   );
 });
 
@@ -4460,8 +4473,9 @@ test('P1.8: premature EOS with loaded gapless next performs handoff, not streami
     'Premature EOS with loaded gapless next must emit track-changed (handoff), not ended');
 
   // Assert: no cold streaming restart (no 'ended' before 'track-changed')
-  const endedBeforeHandoff = messages.findIndex((m) => m.type === 'ended') <
-    messages.findIndex((m) => m.type === 'track-changed');
+  const endedIdx = messages.findIndex((m) => m.type === 'ended');
+  const trackChangedIdx = messages.findIndex((m) => m.type === 'track-changed');
+  const endedBeforeHandoff = endedIdx !== -1 && endedIdx < trackChangedIdx;
   assert.ok(!endedBeforeHandoff,
     'ended must not be emitted before track-changed when gapless next is loaded');
 
@@ -5332,6 +5346,71 @@ test('streaming player emits buffering-started and buffering-ended appropriately
 
   controller.stop();
 });
+
+test('handoff-fallback-streaming is emitted when hold window expires with no gapless bytes', () => {
+  const messages = [];
+  let intervalCallback = null;
+  let position = 0;
+  let nowValue = 0;
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() {
+        if (position >= 1000) return null;
+        position += 50;
+        return new Float32Array(2);
+      },
+      durationMs() { return 1000; },
+      positionMs() { return position; },
+      hasEnded() { return position >= 1000; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (message) => messages.push(message),
+    setIntervalFn: (callback) => { intervalCallback = callback; return 1; },
+    clearIntervalFn: () => {},
+    setTimeoutFn: (fn, delay) => { setTimeout(fn, delay); return 1; },
+    clearTimeoutFn: (id) => { clearTimeout(id); },
+    performanceNow: () => nowValue,
+    nowMs: () => nowValue,
+  });
+
+  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT);
+  const sharedState = new Int32Array(stateBuffer);
+
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100 });
+
+  // Drain track to end
+  for (let i = 0; i < 30; i++) { sharedState[2] = 50; intervalCallback(); }
+
+  // Buffer drains to 0 — hold starts
+  sharedState[2] = 0;
+  intervalCallback();
+
+  // Hold window is active — nothing emitted yet
+  assert.ok(!messages.some((m) => m.type === 'ended'), 'ended must not fire during hold window');
+  assert.ok(!messages.some((m) => m.type === 'handoff-fallback-streaming'), 'fallback must not fire during hold window');
+
+  // Advance past 500ms ceiling and trigger refill tick
+  nowValue = 600;
+  sharedState[2] = 0;
+  intervalCallback();
+
+  assert.ok(
+    messages.some((m) => m.type === 'handoff-fallback-streaming'),
+    'handoff-fallback-streaming must be emitted after hold window expires with no gapless bytes',
+  );
+  assert.ok(
+    !messages.some((m) => m.type === 'ended'),
+    'ended must NOT be emitted when hold expires — handoff-fallback-streaming replaces it',
+  );
+});
+
 
 
 
