@@ -449,6 +449,8 @@ function createPlaybackWorkerController({
   //   'fired'  — handoff was executed and track-changed emitted
   //   null     — end-position unknown or boundary not yet crossed; no action needed
   function runGaplessBoundaryHandoff(activePlayer, framesAvailable, isFullBufferTick) {
+    const isStreamingReinit = !!diagnostics._isStreamingReinit;
+    const gaplessHandoffMissingHint = true;
     probePendingHandoffDuration(activePlayer);
     const newDuration = activePlayer.durationMs();
     // Resolve end position if it was unknown at the previous handoff boundary
@@ -628,6 +630,8 @@ function createPlaybackWorkerController({
           currentTrackEndPositionMs: Math.floor(currentTrackEndPositionMs),
           currentTrackEndPositionKnown,
           gaplessHandoffMissingHint: true,
+          transitionKind: isStreamingReinit ? 'streaming-reinit' : 'gapless-handoff',
+          durationHintSource: gaplessHandoffMissingHint ? 'provisional-current-duration' : 'handoff-hint',
         });
       }
     } else if (tinyPreviousDuration && useHint) {
@@ -672,6 +676,8 @@ function createPlaybackWorkerController({
         currentTrackEndPositionKnown,
         gaplessHandoffMissingHint: true,
         tinyWindowNoHint: true,
+        transitionKind: isStreamingReinit ? 'streaming-reinit' : 'gapless-handoff',
+        durationHintSource: gaplessHandoffMissingHint ? 'provisional-current-duration' : 'handoff-hint',
       });
     }
     emitMessage({

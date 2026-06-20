@@ -5411,6 +5411,26 @@ test('handoff-fallback-streaming is emitted when hold window expires with no gap
   );
 });
 
+import fs from 'node:fs';
+
+test('gapless-duration-provisional includes transition classification fields', () => {
+  const source = fs.readFileSync(
+    new URL('./audio_playback_worker_controller.js', import.meta.url),
+    'utf8',
+  );
+  const provisionalBlocks = [
+    ...source.matchAll(/type:\s*'gapless-duration-provisional'[\s\S]*?}\);/g),
+  ];
+
+  assert.equal(provisionalBlocks.length, 2);
+  for (const [block] of provisionalBlocks) {
+    assert.match(block, /transitionKind:/);
+    assert.match(block, /durationHintSource:/);
+    assert.match(block, /gaplessHandoffMissingHint:/);
+  }
+});
+
+
 
 
 
