@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-06-23
+
+### Fixed
+- Restored `edition = "2024"` on the `jam_audio_flutter` bridge crate, which was accidentally set to `"2021"` during the 0.4.3 release bump.
+
+
+
 ## [0.4.3] - 2026-06-23
 
 ### Added
