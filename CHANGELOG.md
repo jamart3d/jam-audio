@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-23
+
+### Added
+- Added a reusable worklet EQ chain with direct test coverage.
+- Documented large-FLAC buffering and metadata limits for worklet consumers.
+
+### Changed
+- Synced the worklet bridge from Jamdisc, including EQ routing, startup declick behavior, and deferred startup handling.
+- Classified provisional-duration warnings separately so expected duration refinement does not read as an error.
+- Set the Flutter bridge crate to Rust 2021 edition for consumer compatibility.
+
+### Fixed
+- Suppressed playback resume after phone-call pause interruptions.
+- Reduced audio pops around startup and EQ path transitions.
+
+### Verified
+- Worklet syntax check (`audio_bridge.js`, `audio_processor.js`)
+- Worklet EQ and playback worker controller tests
+- Engine cargo check
+- Flutter bridge cargo check
+
 ## [0.4.2] - 2026-06-18
 
 ### Added
