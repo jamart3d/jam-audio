@@ -1,3 +1,8 @@
+const DRIVE_CHALLENGE_INPUT_REGEX = /<input[^>]*>/gi;
+const INPUT_NAME_REGEX = /name=["']([^"']+)["']/i;
+const INPUT_VALUE_REGEX = /value=["']([^"']*)["']/i;
+const DRIVE_CHALLENGE_PARAM_NAMES = new Set(['confirm', 'uuid', 'at', 'id', 'export']);
+
 export class RangeFetchController {
   constructor(url, { onChunk, onComplete, onError, firstByteTimeoutMs = 10000, midStreamTimeoutMs = 8000 }) {
     this.url = url;
@@ -315,19 +320,20 @@ export class RangeFetchController {
     if (!html || !params) {
       return;
     }
-    const inputRegex = /<input[^>]*>/gi;
-    const inputs = html.match(inputRegex) || [];
-    for (const input of inputs) {
-      const nameMatch = input.match(/name=["']([^"']+)["']/i);
-      const valueMatch = input.match(/value=["']([^"']*)["']/i);
+    DRIVE_CHALLENGE_INPUT_REGEX.lastIndex = 0;
+    let match;
+    while ((match = DRIVE_CHALLENGE_INPUT_REGEX.exec(html)) !== null) {
+      const input = match[0];
+      const nameMatch = input.match(INPUT_NAME_REGEX);
       const name = nameMatch?.[1]?.toLowerCase();
-      const value = valueMatch?.[1];
-      if (!name || value === undefined) {
+
+      if (!name || !DRIVE_CHALLENGE_PARAM_NAMES.has(name)) {
         continue;
       }
       
-      const criticalParams = ['confirm', 'uuid', 'at', 'id', 'export'];
-      if (criticalParams.includes(name)) {
+      const valueMatch = input.match(INPUT_VALUE_REGEX);
+      const value = valueMatch?.[1];
+      if (value !== undefined) {
         params.set(name, value);
       }
     }
