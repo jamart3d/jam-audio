@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-06-28
+
+### Changed
+- Applied Rust formatting across the workspace.
+- Fixed Rust clippy warnings ahead of enforcing stricter CI checks.
+
+### CI
+- Added CI enforcement for Rust formatting and clippy.
+
+### Docs
+- Added the Rust quality maintenance design and implementation plan.
+
 ## [0.4.4] - 2026-06-23
 
 ### Fixed
