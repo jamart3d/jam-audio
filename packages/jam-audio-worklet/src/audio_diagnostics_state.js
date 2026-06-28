@@ -40,6 +40,7 @@ function createDiagnosticsState() {
     hiddenMediaPlaying: null,
     audioContextState: null,
     history: [],
+    historyStartIndex: 0,
     events: [],
   };
 }
@@ -47,8 +48,14 @@ function createDiagnosticsState() {
 function pushHistoryPoint(state, point) {
   state.history.push(point);
   const cutoff = point.timeMs - HISTORY_WINDOW_MS;
-  while (state.history.length > 0 && state.history[0].timeMs < cutoff) {
-    state.history.shift();
+
+  while (state.historyStartIndex < state.history.length && state.history[state.historyStartIndex].timeMs < cutoff) {
+    state.historyStartIndex++;
+  }
+
+  if (state.historyStartIndex >= 1000) {
+    state.history = state.history.slice(state.historyStartIndex);
+    state.historyStartIndex = 0;
   }
 }
 
@@ -97,7 +104,7 @@ function buildSnapshot(state, capturedAtMs) {
     bridgePositionEventAgeMs: state.bridgePositionEventAgeMs,
     hiddenMediaPlaying: state.hiddenMediaPlaying,
     audioContextState: state.audioContextState,
-    history: [...state.history],
+    history: state.historyStartIndex > 0 ? state.history.slice(state.historyStartIndex) : [...state.history],
   };
 }
 
