@@ -22,6 +22,7 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
 
       - name: Cache
         uses: actions/cache@v4
@@ -35,6 +36,12 @@ jobs:
 
       - name: Install system deps (libopus for native)
         run: sudo apt-get install -y libopus-dev
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo check — engine (native)
         run: cargo check --manifest-path packages/jam-audio-engine/Cargo.toml
