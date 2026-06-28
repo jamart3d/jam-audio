@@ -5,10 +5,7 @@ import {
   pushHistoryPoint,
 } from './audio_diagnostics_state.js';
 import { createBridgeSessionState } from './audio_bridge_session.js';
-import {
-  clampVolume,
-  sendPreloadCommand,
-} from './audio_bridge_transport.js';
+import { clampVolume } from './audio_bridge_transport.js';
 
 
 export function createJamAudioBridge({
@@ -1416,21 +1413,21 @@ export function createJamAudioBridge({
   }
 
   function preloadNext(audioBytes, hintDurationMs = 0) {
-    void sendPreloadCommand(
-      sendPlaybackWorkerCommand,
-      onPreloadErrorCallback,
-      'preloadNext',
-      { audioBytes, hintDurationMs },
-    );
+    sendPlaybackWorkerCommand('preloadNext', { audioBytes, hintDurationMs })
+      .catch((error) => {
+        if (typeof onPreloadErrorCallback === 'function') {
+          onPreloadErrorCallback(error instanceof Error ? error.message : String(error));
+        }
+      });
   }
 
   function preloadNextBounded(url, totalSize) {
-    void sendPreloadCommand(
-      sendPlaybackWorkerCommand,
-      onPreloadErrorCallback,
-      'preloadNextBounded',
-      { url, totalSize },
-    );
+    sendPlaybackWorkerCommand('preloadNextBounded', { url, totalSize })
+      .catch((error) => {
+        if (typeof onPreloadErrorCallback === 'function') {
+          onPreloadErrorCallback(error instanceof Error ? error.message : String(error));
+        }
+      });
   }
 
   function seek(positionMs) {
