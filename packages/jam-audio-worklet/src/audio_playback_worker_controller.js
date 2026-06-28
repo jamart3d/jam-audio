@@ -1019,7 +1019,7 @@ function createPlaybackWorkerController({
       hasKnownRemainingAudio;
 
     // P1.8: Check if the loaded gapless next can be handed off directly BEFORE
-    // clearing gaplessPlayerNextLoaded. The original code cleared it first (bug:
+    // clearing gaplessPlayerNextLoaded. The original code cleared it first (regression:
     // destroyed the loaded player reference before any handoff could be attempted).
     if (gaplessPlayerNextLoaded && !currentTrackEndPositionHandled && sharedState) {
       const framesAvailable = Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX);
