@@ -257,4 +257,100 @@ test('process wraps readFrame at frameCapacity and preserves channel order', asy
   assert.equal(Atomics.load(state, 2), 0);
 });
 
+test('process properly duplicates mono input to stereo output', async () => {
+  let ProcessorClass = null;
+
+  globalThis.AudioWorkletProcessor = class {
+    constructor() {
+      this.port = { onmessage: null, postMessage() {} };
+    }
+  };
+  globalThis.sampleRate = 48_000;
+  globalThis.registerProcessor = (_name, klass) => {
+    ProcessorClass = klass;
+  };
+
+  await import(`./audio_processor.js?wrap-test=${Date.now()}`);
+
+  const pcmBuffer = new SharedArrayBuffer(4 * 1 * Float32Array.BYTES_PER_ELEMENT);
+  const samples = new Float32Array(pcmBuffer);
+  samples.set([
+    10, 20, 30, 40
+  ]);
+
+  const stateBuffer = new SharedArrayBuffer(9 * Int32Array.BYTES_PER_ELEMENT);
+  const state = new Int32Array(stateBuffer);
+  Atomics.store(state, 0, 2); // READ_INDEX
+  Atomics.store(state, 2, 3); // FRAMES_AVAILABLE_INDEX
+
+  const processor = new ProcessorClass();
+  processor.handleMessage({
+    type: 'init',
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 4,
+    channels: 1,
+  });
+
+  const left = new Float32Array(4);
+  const right = new Float32Array(4);
+
+  processor.process([], [[left, right]]);
+
+  assert.deepEqual(Array.from(left), [30, 40, 10, 0]);
+  assert.deepEqual(Array.from(right), [30, 40, 10, 0]);
+  assert.equal(Atomics.load(state, 0), 1);
+  assert.equal(Atomics.load(state, 2), 0);
+});
+
+test('process handles stereo input with mono output (left === right)', async () => {
+  let ProcessorClass = null;
+
+  globalThis.AudioWorkletProcessor = class {
+    constructor() {
+      this.port = { onmessage: null, postMessage() {} };
+    }
+  };
+  globalThis.sampleRate = 48_000;
+  globalThis.registerProcessor = (_name, klass) => {
+    ProcessorClass = klass;
+  };
+
+  await import(`./audio_processor.js?wrap-test=${Date.now()}`);
+
+  const pcmBuffer = new SharedArrayBuffer(4 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const samples = new Float32Array(pcmBuffer);
+  samples.set([
+    10, 11, // L, R
+    20, 21,
+    30, 31,
+    40, 41,
+  ]);
+
+  const stateBuffer = new SharedArrayBuffer(9 * Int32Array.BYTES_PER_ELEMENT);
+  const state = new Int32Array(stateBuffer);
+  Atomics.store(state, 0, 2); // READ_INDEX
+  Atomics.store(state, 2, 3); // FRAMES_AVAILABLE_INDEX
+
+  const processor = new ProcessorClass();
+  processor.handleMessage({
+    type: 'init',
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 4,
+    channels: 2,
+  });
+
+  const monoOutput = new Float32Array(4);
+
+  // Mono output: outputs array has only one channel array
+  // The processor uses `const right = output[1] ?? output[0];`
+  // so right === left === monoOutput
+  processor.process([], [[monoOutput]]);
+
+  // We expect ONLY the left channel to be written. The right channel should not overwrite it.
+  assert.deepEqual(Array.from(monoOutput), [30, 40, 10, 0]);
+  assert.equal(Atomics.load(state, 0), 1);
+  assert.equal(Atomics.load(state, 2), 0);
+});
 

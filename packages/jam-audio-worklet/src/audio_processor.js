@@ -92,14 +92,40 @@ class JamAudioProcessor extends AudioWorkletProcessor {
     const framesToProcess = Math.min(left.length, initialAvailableFrames);
     let readFrame = Atomics.load(this.state, READ_INDEX);
 
-    for (let frame = 0; frame < framesToProcess; frame += 1) {
-      const sampleIndex = readFrame * this.channels;
-      left[frame] = this.samples[sampleIndex] ?? 0;
-      right[frame] = this.channels > 1 ? (this.samples[sampleIndex + 1] ?? 0) : left[frame];
+    if (this.channels === 1) {
+      for (let frame = 0; frame < framesToProcess; frame += 1) {
+        const val = this.samples[readFrame] ?? 0;
+        left[frame] = val;
+        right[frame] = val;
 
-      readFrame += 1;
-      if (readFrame === this.frameCapacity) {
-        readFrame = 0;
+        readFrame += 1;
+        if (readFrame === this.frameCapacity) {
+          readFrame = 0;
+        }
+      }
+    } else {
+      const isStereoOutput = left !== right;
+      if (isStereoOutput) {
+        for (let frame = 0; frame < framesToProcess; frame += 1) {
+          const sampleIndex = readFrame * this.channels;
+          left[frame] = this.samples[sampleIndex] ?? 0;
+          right[frame] = this.samples[sampleIndex + 1] ?? 0;
+
+          readFrame += 1;
+          if (readFrame === this.frameCapacity) {
+            readFrame = 0;
+          }
+        }
+      } else {
+        for (let frame = 0; frame < framesToProcess; frame += 1) {
+          const sampleIndex = readFrame * this.channels;
+          left[frame] = this.samples[sampleIndex] ?? 0;
+
+          readFrame += 1;
+          if (readFrame === this.frameCapacity) {
+            readFrame = 0;
+          }
+        }
       }
     }
 
