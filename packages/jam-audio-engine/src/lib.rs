@@ -132,6 +132,11 @@ fn gapless_error_to_js(kind: &str, message: &str) -> JsValue {
 // single-threaded.
 // ============================================================================
 
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+compile_error!(
+    "jam-audio-engine SharedMediaSource uses Rc<RefCell> on wasm and is not safe with atomics/threaded wasm enabled"
+);
+
 struct SharedMediaSource<T: Read + Seek + MediaSource + 'static> {
     inner: SharedCell<T>,
 }
@@ -144,6 +149,8 @@ impl<T: Read + Seek + MediaSource + 'static> SharedMediaSource<T> {
 
 // SAFETY: jam_audio_engine targets single-threaded Wasm only. Rc<RefCell<>>
 // is not Send/Sync but no thread boundary is ever crossed at runtime.
+// Wasm32 + atomics is statically rejected above at compile time to guarantee
+// this single-threaded invariant.
 // Symphonia requires Send + Sync on MediaSource; this satisfies that bound.
 #[cfg(target_arch = "wasm32")]
 unsafe impl<T: Read + Seek + MediaSource + 'static> Send for SharedMediaSource<T> {}
