@@ -92,8 +92,8 @@ impl StereoResampler {
         // Pad both channels to chunk_frames with silence.
         let have = self.pending[0].len();
         let need = self.chunk_frames - have;
-        self.pending[0].extend(std::iter::repeat(0.0f32).take(need));
-        self.pending[1].extend(std::iter::repeat(0.0f32).take(need));
+        self.pending[0].extend(std::iter::repeat_n(0.0f32, need));
+        self.pending[1].extend(std::iter::repeat_n(0.0f32, need));
         self.process_one_chunk(out);
     }
 
@@ -375,20 +375,22 @@ impl StreamingDecoder {
         use symphonia::core::formats::SeekMode;
         use symphonia::core::formats::SeekTo;
 
-        if self.is_ogg_family && self.has_known_byte_len && !self.reprobed_after_finalized {
-            if let Some(format_reader) = self.format.take() {
-                let mut mss = format_reader.into_inner();
-                let _ = mss.seek(SeekFrom::Start(0));
-                let hint = Hint::new();
-                let probed = get_probe().format(
-                    &hint,
-                    mss,
-                    &FormatOptions::default(),
-                    &MetadataOptions::default(),
-                )?;
-                self.format = Some(probed.format);
-                self.reprobed_after_finalized = true;
-            }
+        if self.is_ogg_family
+            && self.has_known_byte_len
+            && !self.reprobed_after_finalized
+            && let Some(format_reader) = self.format.take()
+        {
+            let mut mss = format_reader.into_inner();
+            let _ = mss.seek(SeekFrom::Start(0));
+            let hint = Hint::new();
+            let probed = get_probe().format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )?;
+            self.format = Some(probed.format);
+            self.reprobed_after_finalized = true;
         }
 
         let playback_frame = (ms * self.target_sample_rate as f64 / 1000.0).round() as u64;
@@ -498,8 +500,8 @@ impl StreamingDecoder {
                 self.pending_skip_frames -= skip as u64;
             }
 
-            // drain retains chunk_samples' capacity for reuse on the next iteration
-            self.intermediate_samples.extend(chunk_samples.drain(..));
+            // append retains chunk_samples' capacity for reuse on the next iteration
+            self.intermediate_samples.append(&mut chunk_samples);
 
             if self.intermediate_samples.len() >= target_samples_stereo {
                 break;
@@ -508,13 +510,13 @@ impl StreamingDecoder {
 
         if self.intermediate_samples.is_empty() {
             // Stream exhausted — flush any buffered resampler frames.
-            if self.source_sample_rate != self.target_sample_rate {
-                if let Some(resampler) = self.resampler.as_mut() {
-                    let before = out.len();
-                    resampler.flush(out);
-                    if out.len() > before {
-                        return Ok(true);
-                    }
+            if self.source_sample_rate != self.target_sample_rate
+                && let Some(resampler) = self.resampler.as_mut()
+            {
+                let before = out.len();
+                resampler.flush(out);
+                if out.len() > before {
+                    return Ok(true);
                 }
             }
             return Ok(false);
@@ -1109,8 +1111,8 @@ mod tests {
     fn windowed_header_survives() {
         let mut src = WindowedMediaSource::new(200, 50, 1024 * 1024);
         let mut data = vec![0u8; 1024 * 1024 + 500];
-        for i in 0..50 {
-            data[i] = i as u8;
+        for (i, byte) in data.iter_mut().take(50).enumerate() {
+            *byte = i as u8;
         } // header
         src.append(&data);
         src.seek(SeekFrom::Start(1024 * 1024 + 200)).unwrap();

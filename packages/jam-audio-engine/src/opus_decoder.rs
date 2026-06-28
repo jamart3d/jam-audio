@@ -77,7 +77,7 @@ mod pure_rust {
         num_channels: usize,
     ) -> Result<AudioBuffer<f32>> {
         let channels = map_to_channels(num_channels)
-            .ok_or_else(|| Error::DecodeError("opus: invalid channel count"))?;
+            .ok_or(Error::DecodeError("opus: invalid channel count"))?;
         let spec = SignalSpec::new(sample_rate, channels);
         Ok(AudioBuffer::new(samples_per_channel, spec))
     }
