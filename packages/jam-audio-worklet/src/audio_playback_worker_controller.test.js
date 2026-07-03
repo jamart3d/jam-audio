@@ -4411,8 +4411,8 @@ test('P1.8: premature EOS with loaded gapless next performs handoff, not streami
   // Reproduces log72: track A hits EOS early (decoder has no more bytes),
   // gaplessPlayerNextLoaded=true (Tuning loaded), ring buffer empty.
   // Expected: gapless handoff to loaded next track (track-changed emitted, no ended).
-  // Bug: recoverFromStaleGaplessSuppression cleared gaplessPlayerNextLoaded first,
-  //      then found nothing to hand off, then emitted ended → cold restart.
+  // Regression prevention: recoverFromStaleGaplessSuppression previously cleared
+  //      gaplessPlayerNextLoaded first, then found nothing to hand off, then emitted ended → cold restart.
   const messages = [];
   let positionMs = 486914; // 83.8% of 581420ms — well short of end
   const durationMs = 581420;
