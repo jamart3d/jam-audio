@@ -145,6 +145,8 @@ mod pure_rust {
             })
         }
 
+        // Note: required by symphonia_core::codecs::Decoder trait,
+        // do not remove even if flagged by dead code analysis.
         fn supported_codecs() -> &'static [CodecDescriptor]
         where
             Self: Sized,
