@@ -455,8 +455,11 @@ function createPlaybackWorkerController({
     const newDuration = activePlayer.durationMs();
     // Resolve end position if it was unknown at the previous handoff boundary
     // (e.g. stale duration at transition; duration became known this tick).
+    const canUseStreamingHintForUnknownEnd =
+      _pendingHandoffBasePositionMs < 0 && _streamingHintDurationMs > 0;
+
     if (!currentTrackEndPositionKnown &&
-        (newDuration > 0 || _streamingHintDurationMs > 0)) {
+        (newDuration > 0 || canUseStreamingHintForUnknownEnd)) {
       const resolvedDuration = newDuration || _streamingHintDurationMs;
       const endPositionMs =
         _pendingHandoffBasePositionMs >= 0

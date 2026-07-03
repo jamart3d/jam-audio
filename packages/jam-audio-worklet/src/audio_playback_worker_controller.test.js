@@ -2677,6 +2677,7 @@ test('gapless handoff deferred correction does not bleed prior transitionStreamT
   let tickCount = 0;
   // Tick 1: Mississippi playing, far from boundary.
   // Tick 2: Mississippi crosses boundary, newDuration (Big River) = 0.
+  // Tick 2.5: Big River duration still 0.
   // Tick 3: newDuration (Big River) = 551000 — deferred correction fires.
   const MISSISSIPPI_DURATION = 703740;
   const BIG_RIVER_DURATION = 551000;
@@ -2695,13 +2696,15 @@ test('gapless handoff deferred correction does not bleed prior transitionStreamT
       durationMs() {
         if (tickCount <= 1) return MISSISSIPPI_DURATION;
         if (tickCount === 2) return 0;
-        return BIG_RIVER_DURATION;
+        if (tickCount === 3) return 0; // Tick 2.5
+        return BIG_RIVER_DURATION; // Tick 3
       },
       positionMs() {
         if (tickCount <= 0) return 0;
         if (tickCount === 1) return 50000;
         if (tickCount === 2) return MISSISSIPPI_DURATION + 5;
-        return MISSISSIPPI_DURATION + 100;
+        if (tickCount === 3) return MISSISSIPPI_DURATION + 5; // Tick 2.5
+        return MISSISSIPPI_DURATION + 100; // Tick 3
       },
       hasEnded() { return false; },
       loadNext(_bytes) {
@@ -2752,6 +2755,10 @@ test('gapless handoff deferred correction does not bleed prior transitionStreamT
   assert.equal(afterTick1.length, 0, 'no track-changed before boundary crossing');
 
   // Tick 2: boundary crossed, newDuration = 0 — non-streaming gapless handoff fires.
+  sharedState[2] = 50;
+  intervalCallback();
+
+  // Tick 2.5: Big River duration still unknown.
   sharedState[2] = 50;
   intervalCallback();
 
