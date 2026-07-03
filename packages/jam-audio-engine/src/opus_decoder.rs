@@ -223,6 +223,7 @@ mod pure_rust {
             FinalizeResult::default()
         }
 
+        // Required by the symphonia_core::codecs::Decoder trait.
         fn last_decoded(&self) -> AudioBufferRef<'_> {
             self.buf.as_audio_buffer_ref()
         }
