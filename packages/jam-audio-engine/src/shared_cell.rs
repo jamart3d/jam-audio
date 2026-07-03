@@ -55,7 +55,7 @@ mod imp {
             let guard = self
                 .0
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .expect("shared cell mutex poisoned");
             f(&guard)
         }
 
@@ -63,7 +63,7 @@ mod imp {
             let mut guard = self
                 .0
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .expect("shared cell mutex poisoned");
             f(&mut guard)
         }
     }
@@ -77,7 +77,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
-    fn with_and_with_mut_recover_after_poisoned_mutex() {
+    fn with_and_with_mut_panic_after_poisoned_mutex() {
         let cell = SharedCell::new(1usize);
         let poisoned = cell.clone();
 
@@ -89,13 +89,18 @@ mod tests {
         }));
 
         assert!(result.is_err());
-        assert_eq!(cell.with(|value| *value), 2);
 
-        cell.with_mut(|value| {
-            *value = 3;
-        });
+        let result_with = catch_unwind(AssertUnwindSafe(|| {
+            cell.with(|value| *value);
+        }));
+        assert!(result_with.is_err());
 
-        assert_eq!(cell.with(|value| *value), 3);
+        let result_with_mut = catch_unwind(AssertUnwindSafe(|| {
+            cell.with_mut(|value| {
+                *value = 3;
+            });
+        }));
+        assert!(result_with_mut.is_err());
     }
 
     #[test]
