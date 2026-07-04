@@ -11,6 +11,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+// audio_processor.js has no import/export syntax, so Node loads it as
+// CommonJS — cached by file path with query strings ignored. The module body
+// therefore evaluates exactly once per process: capture the registered class
+// on first import and reuse it for every test.
+let cachedProcessorClass = null;
+async function loadProcessorClass() {
+  if (cachedProcessorClass) return cachedProcessorClass;
+
+  globalThis.AudioWorkletProcessor = class {
+    constructor() {
+      this.port = { onmessage: null, postMessage() {} };
+    }
+  };
+  globalThis.sampleRate = 48_000;
+  globalThis.registerProcessor = (_name, klass) => {
+    cachedProcessorClass = klass;
+  };
+
+  await import('./audio_processor.js');
+  return cachedProcessorClass;
+}
+
 // Fake Atomics for deterministic simulation (no SharedArrayBuffer required)
 function makeFakeAtomics(initialValue = 0) {
   let slot7 = initialValue;
@@ -209,19 +231,7 @@ test('P1.2: process() adds to REFILL_REQUEST_INDEX when frames drop below low-wa
 });
 
 test('process wraps readFrame at frameCapacity and preserves channel order', async () => {
-  let ProcessorClass = null;
-
-  globalThis.AudioWorkletProcessor = class {
-    constructor() {
-      this.port = { onmessage: null, postMessage() {} };
-    }
-  };
-  globalThis.sampleRate = 48_000;
-  globalThis.registerProcessor = (_name, klass) => {
-    ProcessorClass = klass;
-  };
-
-  await import(`./audio_processor.js?wrap-test=${Date.now()}`);
+  const ProcessorClass = await loadProcessorClass();
 
   const pcmBuffer = new SharedArrayBuffer(4 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const samples = new Float32Array(pcmBuffer);
@@ -258,19 +268,7 @@ test('process wraps readFrame at frameCapacity and preserves channel order', asy
 });
 
 test('process properly duplicates mono input to stereo output', async () => {
-  let ProcessorClass = null;
-
-  globalThis.AudioWorkletProcessor = class {
-    constructor() {
-      this.port = { onmessage: null, postMessage() {} };
-    }
-  };
-  globalThis.sampleRate = 48_000;
-  globalThis.registerProcessor = (_name, klass) => {
-    ProcessorClass = klass;
-  };
-
-  await import(`./audio_processor.js?wrap-test=${Date.now()}`);
+  const ProcessorClass = await loadProcessorClass();
 
   const pcmBuffer = new SharedArrayBuffer(4 * 1 * Float32Array.BYTES_PER_ELEMENT);
   const samples = new Float32Array(pcmBuffer);
@@ -304,19 +302,7 @@ test('process properly duplicates mono input to stereo output', async () => {
 });
 
 test('process handles stereo input with mono output (left === right)', async () => {
-  let ProcessorClass = null;
-
-  globalThis.AudioWorkletProcessor = class {
-    constructor() {
-      this.port = { onmessage: null, postMessage() {} };
-    }
-  };
-  globalThis.sampleRate = 48_000;
-  globalThis.registerProcessor = (_name, klass) => {
-    ProcessorClass = klass;
-  };
-
-  await import(`./audio_processor.js?wrap-test=${Date.now()}`);
+  const ProcessorClass = await loadProcessorClass();
 
   const pcmBuffer = new SharedArrayBuffer(4 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const samples = new Float32Array(pcmBuffer);
