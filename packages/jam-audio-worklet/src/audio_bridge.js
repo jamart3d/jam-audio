@@ -119,6 +119,7 @@ export function createJamAudioBridge({
   let lastPositionEventTs = 0;
 
   let transportMuted = false;
+  let transportMuteReason = null;
   let resumeUnmuteSent = false;
 
   // NOTIFICATION_KEEP_WHILE_PAUSED: set via localStorage to switch notification behavior while paused.
@@ -245,6 +246,7 @@ export function createJamAudioBridge({
       await sendPlaybackWorkerCommand('transportMute').catch(() => {});
     }
     transportMuted = true;
+    transportMuteReason = 'pause';
     emitDiagnosticsEvent({
       type: 'transport-worker-muted',
       label: 'Transport worker muted',
@@ -292,6 +294,7 @@ export function createJamAudioBridge({
         await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
       }
       transportMuted = false;
+      transportMuteReason = null;
       resumeUnmuteSent = true;
       await rampGainToValue(currentVolume, DECLICK_DURATION_S);
     }
@@ -1019,6 +1022,21 @@ export function createJamAudioBridge({
     });
   }
 
+  async function unmuteTransportForPlaybackStarted(reason) {
+    if (playbackWorker) {
+      await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
+    }
+    transportMuted = false;
+    transportMuteReason = null;
+    emitDiagnosticsEvent({
+      type: 'playback-transport-unmuted',
+      label: `Playback transport unmuted (${reason})`,
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: { reason },
+    });
+  }
+
   function handlePlaybackWorkerMessage(event) {
     const data = event.data ?? {};
     switch (data.type) {
@@ -1039,6 +1057,9 @@ export function createJamAudioBridge({
         emitDiagnosticsEvent(data.event);
         return;
       case 'playback-started':
+        if (transportMuteReason !== 'pause') {
+          void unmuteTransportForPlaybackStarted('playback-started');
+        }
         if (audioContext?.state === 'suspended') {
           // Buffer is ready but the AudioContext is suspended (autoplay
           // blocked: Android Chrome without an installed PWA, or desktop
@@ -1385,13 +1406,14 @@ export function createJamAudioBridge({
         processorNode?.port.postMessage({ type: 'stop' }); // see Android branch above
         await sendPlaybackWorkerCommand('stop').catch(() => {});
       } else {
-        stop({ preserveMediaSession: true });
+        await stop({ preserveMediaSession: true });
       }
     }
 
     pendingPlaybackStartedOnResume = false;
     needsPlaybackStartedDeclick = false;
     transportMuted = true;
+    transportMuteReason = 'track-replace';
     resumeUnmuteSent = false;
     diagnosticsState = createDiagnosticsState();
     markPlaybackState('loading', { preserveMediaSession: true });
@@ -1674,6 +1696,7 @@ export function createJamAudioBridge({
           await sendPlaybackWorkerCommand('transportMute').catch(() => {});
         }
         transportMuted = true;
+        transportMuteReason = 'pause';
       }
 
       markPlaybackState('paused');
@@ -1717,6 +1740,7 @@ export function createJamAudioBridge({
         // transportUnmute clears STOP_INDEX=0 and restarts the refill loop so audio
         // can flow before the gain ramp reaches currentVolume.
         transportMuted = false;
+        transportMuteReason = null;
         resumeUnmuteSent = true;
         if (playbackWorker) {
           await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
@@ -1759,6 +1783,7 @@ export function createJamAudioBridge({
         endOfStream: false,
         pendingSeek: false,
         transportMuted,
+        transportMuteReason,
         resumeUnmuteSent,
         gainNodeValue: gainNode?.gain?.value ?? null,
         audioContextState: audioContext?.state ?? 'none',
@@ -1768,6 +1793,7 @@ export function createJamAudioBridge({
     return {
       ...health,
       transportMuted,
+      transportMuteReason,
       resumeUnmuteSent,
       gainNodeValue: gainNode?.gain?.value ?? null,
       audioContextState: audioContext?.state ?? 'none',
@@ -1804,6 +1830,7 @@ export function createJamAudioBridge({
       }
 
       transportMuted = true;
+      transportMuteReason = null;
       resumeUnmuteSent = false;
 
       clearBoundedAnchorEndedHandler();
@@ -1885,6 +1912,7 @@ export function createJamAudioBridge({
       // allocates a fresh SAB with sharedState.fill(0), clearing STOP_INDEX.
       // Do NOT call wireWorkletPortOnce() here — beginPlaybackSession() does it.
       transportMuted = true;
+      transportMuteReason = null;
       resumeUnmuteSent = false;
 
       emitDiagnosticsEvent({
@@ -2420,6 +2448,7 @@ export function createJamAudioBridge({
     initAudio,
     initEngine: async () => { await ensureWasm(); },
     __test__: {
+      beginPlaybackSession,
       setBoundedTrackAudioOnSilentElement,
       setTrackAudioOnSilentElement,
     },
