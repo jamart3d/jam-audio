@@ -125,6 +125,7 @@ function createPlaybackWorkerController({
   let isStalled = false;
   let consecutiveZeroRefills = 0;
   let currentSessionId = 0;
+  let activePlaybackSessionGeneration = null;
   let diagnostics = createWorkerDiagnostics();
 
   let lastSeamGeneration = 0;
@@ -180,6 +181,14 @@ function createPlaybackWorkerController({
     diagnosticsMode = ['off', 'minimal', 'normal', 'extended'].includes(mode)
       ? mode
       : 'minimal';
+  }
+
+  function emitPlaybackError(message) {
+    const event = { type: 'playback-error', message };
+    if (Number.isInteger(activePlaybackSessionGeneration)) {
+      event.sessionGeneration = activePlaybackSessionGeneration;
+    }
+    emitMessage(event);
   }
 
   const noisyEventTypes = new Set(['refill-complete', 'media-session-heartbeat', 'readahead-status', 'decode-waiting', 'refill-starvation-diagnostic']);
@@ -328,6 +337,7 @@ function createPlaybackWorkerController({
     pendingGaplessFallbackRecoveryConfirmation = false;
     lastSeamGeneration = 0;
     arithmeticBoundaryArmedAtMs = 0;
+    activePlaybackSessionGeneration = null;
     currentSessionId++;
   }
 
@@ -540,7 +550,7 @@ function createPlaybackWorkerController({
       handoffPendingUntilMs = 0;
       stopRefillLoop();
       diagnostics.transitionGapMs = null;
-      emitMessage({ type: 'playback-error', message: 'handoff_unsafe' });
+      emitPlaybackError('handoff_unsafe');
       return 'unsafe';
     }
     handoffPendingUntilMs = 0;
@@ -888,7 +898,10 @@ function createPlaybackWorkerController({
   }
 
   function emitPlaybackStarted() {
-    emitMessage({ type: 'playback-started' });
+    emitMessage({
+      type: 'playback-started',
+      sessionGeneration: activePlaybackSessionGeneration,
+    });
     emitDiagnosticsEvent({
       type: 'startup-buffer-ready',
       label: 'Startup buffer ready',
@@ -1233,10 +1246,9 @@ function createPlaybackWorkerController({
     } catch (bridgeError) {
       stopRefillLoop();
       diagnostics.transitionGapMs = null;
-      emitMessage({
-        type: 'playback-error',
-        message: bridgeError instanceof Error ? bridgeError.message : String(bridgeError),
-      });
+      emitPlaybackError(
+        bridgeError instanceof Error ? bridgeError.message : String(bridgeError),
+      );
       return false;
     }
 
@@ -1481,7 +1493,7 @@ function createPlaybackWorkerController({
         }
         stopRefillLoop();
         diagnostics.transitionGapMs = null;
-        emitMessage({ type: 'playback-error', message: message || 'decode error' });
+        emitPlaybackError(message || 'decode error');
         return;
       }
 
@@ -1531,10 +1543,7 @@ function createPlaybackWorkerController({
         }
         stopRefillLoop();
         diagnostics.transitionGapMs = null;
-        emitMessage({
-          type: 'playback-error',
-          message: result.message ?? 'decode error',
-        });
+        emitPlaybackError(result.message ?? 'decode error');
         return;
       }
 
@@ -1634,9 +1643,10 @@ function createPlaybackWorkerController({
 
   return {
     setDiagnosticsMode,
-    playTrack(audioBytes, buffers) {
+    playTrack(audioBytes, buffers, sessionGeneration = null) {
       stopRefillLoop();
       resetPlaybackState();
+      activePlaybackSessionGeneration = sessionGeneration;
       pendingGaplessHintDurationMs = 0;
       loadedNextGaplessHintDurationMs = 0;
       pendingHandoffHintDurationMs = 0;
@@ -1657,10 +1667,7 @@ function createPlaybackWorkerController({
         player = createGaplessPlayer(audioBytes, activeSampleRate);
       } catch (error) {
         stopRefillLoop();
-        emitMessage({
-          type: 'playback-error',
-          message: error instanceof Error ? error.message : String(error),
-        });
+        emitPlaybackError(error instanceof Error ? error.message : String(error));
         return;
       }
       const durationMs = player.durationMs();
@@ -1675,9 +1682,10 @@ function createPlaybackWorkerController({
       refillRingBuffer();
     },
 
-    playTrackBounded(url, totalSize, sampleRate, buffers) {
+    playTrackBounded(url, totalSize, sampleRate, buffers, sessionGeneration = null) {
       stopRefillLoop();
       resetPlaybackState();
+      activePlaybackSessionGeneration = sessionGeneration;
       const sessionId = currentSessionId;
       const maxWindowMb = 64;
       diagnostics = createWorkerDiagnostics({
@@ -1698,10 +1706,7 @@ function createPlaybackWorkerController({
       try {
         wasmPlayer = createWindowedStreamingPlayer(totalSize != null ? BigInt(totalSize) : undefined, maxWindowMb);
       } catch (error) {
-        emitMessage({
-          type: 'playback-error',
-          message: error instanceof Error ? error.message : String(error),
-        });
+        emitPlaybackError(error instanceof Error ? error.message : String(error));
         return;
       }
 
@@ -1796,7 +1801,7 @@ function createPlaybackWorkerController({
         onError: (err) => {
           if (sessionId !== currentSessionId) return;
           diagnostics.transitionGapMs = null;
-          emitMessage({ type: 'playback-error', message: err.message || 'fetch error' });
+          emitPlaybackError(err.message || 'fetch error');
         }
       });
 
@@ -1804,12 +1809,13 @@ function createPlaybackWorkerController({
       fetchController.fetchFrom(0);
     },
 
-    playTrackStreaming(buffers) {
+    playTrackStreaming(buffers, sessionGeneration = null) {
       const isReinit = !!(player || streamingPlayer || windowedPlayer);
       const reInitStartMs = isReinit ? performanceNow() : 0;
 
       stopRefillLoop();
       resetPlaybackState();
+      activePlaybackSessionGeneration = sessionGeneration;
       diagnostics = createWorkerDiagnostics({
         workerState: 'running',
         decoderOwner: 'worker',
@@ -1827,10 +1833,7 @@ function createPlaybackWorkerController({
         streamingPlayer = createStreamingPlayer(activeSampleRate);
       } catch (error) {
         stopRefillLoop();
-        emitMessage({
-          type: 'playback-error',
-          message: error instanceof Error ? error.message : String(error),
-        });
+        emitPlaybackError(error instanceof Error ? error.message : String(error));
         return;
       }
       emitDiagnosticsSync({

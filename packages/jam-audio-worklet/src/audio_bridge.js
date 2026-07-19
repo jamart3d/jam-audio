@@ -137,8 +137,7 @@ export function createJamAudioBridge({
   let playbackSessionGeneration = 0;
   let playbackSessionChain = Promise.resolve();
 
-  function enqueueLatestPlaybackSession(action) {
-    const sessionGeneration = ++playbackSessionGeneration;
+  function enqueuePlaybackSession(sessionGeneration, action) {
     const run = playbackSessionChain
       .catch(() => {})
       .then(async () => {
@@ -147,6 +146,11 @@ export function createJamAudioBridge({
       });
     playbackSessionChain = run.catch(() => {});
     return run;
+  }
+
+  function enqueueLatestPlaybackSession(action) {
+    const sessionGeneration = ++playbackSessionGeneration;
+    return enqueuePlaybackSession(sessionGeneration, action);
   }
 
   function isCurrentPlaybackSession(sessionGeneration) {
@@ -1022,9 +1026,34 @@ export function createJamAudioBridge({
     });
   }
 
-  async function unmuteTransportForPlaybackStarted(reason) {
+  function emitStalePlaybackStarted(sessionGeneration, phase) {
+    emitDiagnosticsEvent({
+      type: 'playback-started-stale-ignored',
+      label: 'Stale playback-started ignored',
+      timestampMs: nowMs(),
+      severity: 'info',
+      details: {
+        sessionGeneration,
+        currentSessionGeneration: playbackSessionGeneration,
+        phase,
+      },
+    });
+  }
+
+  async function unmuteTransportForPlaybackStarted(reason, sessionGeneration) {
+    if (!isCurrentPlaybackSession(sessionGeneration)) {
+      emitStalePlaybackStarted(sessionGeneration, 'before-transport-unmute');
+      return false;
+    }
     if (playbackWorker) {
       await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
+    }
+    if (!isCurrentPlaybackSession(sessionGeneration)) {
+      emitStalePlaybackStarted(sessionGeneration, 'after-transport-unmute');
+      return false;
+    }
+    if (transportMuteReason === 'pause') {
+      return false;
     }
     transportMuted = false;
     transportMuteReason = null;
@@ -1035,6 +1064,57 @@ export function createJamAudioBridge({
       severity: 'info',
       details: { reason },
     });
+    return true;
+  }
+
+  async function handlePlaybackStarted(data) {
+    const sessionGeneration = data.sessionGeneration;
+    if (!Number.isInteger(sessionGeneration) ||
+        !isCurrentPlaybackSession(sessionGeneration)) {
+      emitStalePlaybackStarted(sessionGeneration, 'message-received');
+      return;
+    }
+
+    if (transportMuteReason === 'pause') {
+      return;
+    }
+
+    const unmuted = await unmuteTransportForPlaybackStarted(
+      'playback-started',
+      sessionGeneration,
+    );
+    if (!unmuted || !isCurrentPlaybackSession(sessionGeneration)) {
+      return;
+    }
+
+    if (audioContext?.state === 'suspended') {
+      // Buffer is ready but the AudioContext is suspended (autoplay
+      // blocked: Android Chrome without an installed PWA, or desktop
+      // Chrome with a low Media Engagement Index — see
+      // reports/logs/log113.txt). Signal Dart to show the play button so
+      // the UI reflects that audio is buffered but not yet audible.
+      // gesture-resume fires onPlaybackStartedCallback on the first user
+      // interaction, transitioning the UI from play button → pause button
+      // as audio begins. A running context (installed PWA, high MEI, or
+      // gesture-initiated play) takes the else branch and starts
+      // immediately.
+      pendingPlaybackStartedOnResume = true;
+      if (typeof onPlaybackSuspendedCallback === 'function') onPlaybackSuspendedCallback();
+      markPlaybackState('paused');
+    } else {
+      if (needsPlaybackStartedDeclick && gainNode) {
+        // Deferred from playTrack(): apply declick now that the ring buffer is
+        // populated. Gain is at 0 (transport-gain-zero in beginPlaybackSession
+        // set it, and no premature ramp ran). Ramp 0→currentVolume over
+        // DECLICK_DURATION_S so the first audio frame fades in rather than
+        // hard-starting at full gain.
+        needsPlaybackStartedDeclick = false;
+        scheduleDeclickRampToCurrentVolume('playback-started-startup');
+      }
+      if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
+      markPlaybackState('playing');
+    }
+    setStartupPhase('playing');
   }
 
   function handlePlaybackWorkerMessage(event) {
@@ -1057,37 +1137,7 @@ export function createJamAudioBridge({
         emitDiagnosticsEvent(data.event);
         return;
       case 'playback-started':
-        if (transportMuteReason !== 'pause') {
-          void unmuteTransportForPlaybackStarted('playback-started');
-        }
-        if (audioContext?.state === 'suspended') {
-          // Buffer is ready but the AudioContext is suspended (autoplay
-          // blocked: Android Chrome without an installed PWA, or desktop
-          // Chrome with a low Media Engagement Index — see
-          // reports/logs/log113.txt). Signal Dart to show the play button so
-          // the UI reflects that audio is buffered but not yet audible.
-          // gesture-resume fires onPlaybackStartedCallback on the first user
-          // interaction, transitioning the UI from play button → pause button
-          // as audio begins. A running context (installed PWA, high MEI, or
-          // gesture-initiated play) takes the else branch and starts
-          // immediately.
-          pendingPlaybackStartedOnResume = true;
-          if (typeof onPlaybackSuspendedCallback === 'function') onPlaybackSuspendedCallback();
-          markPlaybackState('paused');
-        } else {
-          if (needsPlaybackStartedDeclick && gainNode) {
-            // Deferred from playTrack(): apply declick now that the ring buffer is
-            // populated. Gain is at 0 (transport-gain-zero in beginPlaybackSession
-            // set it, and no premature ramp ran). Ramp 0→currentVolume over
-            // DECLICK_DURATION_S so the first audio frame fades in rather than
-            // hard-starting at full gain.
-            needsPlaybackStartedDeclick = false;
-            scheduleDeclickRampToCurrentVolume('playback-started-startup');
-          }
-          if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
-          markPlaybackState('playing');
-        }
-        setStartupPhase('playing');
+        void handlePlaybackStarted(data);
         return;
       case 'position':
         diagnosticsState.decodedPositionMs = data.positionMs;
@@ -1158,6 +1208,21 @@ export function createJamAudioBridge({
         if (typeof onHandoffFallbackCallback === 'function') onHandoffFallbackCallback();
         return;
       case 'playback-error':
+        if (data.fatal !== true &&
+            (!Number.isInteger(data.sessionGeneration) ||
+              !isCurrentPlaybackSession(data.sessionGeneration))) {
+          emitDiagnosticsEvent({
+            type: 'playback-error-stale-ignored',
+            label: 'Stale playback error ignored',
+            timestampMs: nowMs(),
+            severity: 'info',
+            details: {
+              sessionGeneration: data.sessionGeneration,
+              currentSessionGeneration: playbackSessionGeneration,
+            },
+          });
+          return;
+        }
         diagnosticsState.transitionGapMs = null;
         markPlaybackState('error');
         setStartupPhase('error');
@@ -1367,7 +1432,10 @@ export function createJamAudioBridge({
     }
   }
 
-  async function beginPlaybackSession({ transitionKind = 'track-replace' } = {}) {
+  async function beginPlaybackSession({
+    transitionKind = 'track-replace',
+    sessionGeneration = null,
+  } = {}) {
     // Await the worker stop so rapid skips cannot race the stop/play sequence.
     // Without this, a second skip arriving 1-2 s after the first can send
     // playTrackBounded to the worker before the previous resetPlaybackState()
@@ -1388,7 +1456,10 @@ export function createJamAudioBridge({
             processorNode?.port.postMessage({ type: 'stop' });
             await sendPlaybackWorkerCommand('stop').catch(() => {});
           } else {
-            stop({ preserveMediaSession });
+            await stop({
+              preserveMediaSession,
+              invalidatePlaybackSession: false,
+            });
           }
         },
       });
@@ -1406,8 +1477,16 @@ export function createJamAudioBridge({
         processorNode?.port.postMessage({ type: 'stop' }); // see Android branch above
         await sendPlaybackWorkerCommand('stop').catch(() => {});
       } else {
-        await stop({ preserveMediaSession: true });
+        await stop({
+          preserveMediaSession: true,
+          invalidatePlaybackSession: false,
+        });
       }
+    }
+
+    if (sessionGeneration !== null &&
+        !isCurrentPlaybackSession(sessionGeneration)) {
+      return false;
     }
 
     pendingPlaybackStartedOnResume = false;
@@ -1425,12 +1504,12 @@ export function createJamAudioBridge({
       timestampMs: nowMs(),
       severity: 'info',
     });
+    return true;
   }
 
   async function playTrack(audioBytes) {
-    await beginPlaybackSession();
     return enqueueLatestPlaybackSession(async (sessionGeneration) => {
-      if (!isCurrentPlaybackSession(sessionGeneration)) return;
+      if (!await beginPlaybackSession({ sessionGeneration })) return;
       setTrackAudioOnSilentElement(audioBytes);
       try {
         await initAudio();
@@ -1445,6 +1524,7 @@ export function createJamAudioBridge({
         createSharedBuffers();
         setStartupPhase('creating decoder');
         await sendPlaybackWorkerCommand('playTrack', {
+          sessionGeneration,
           audioBytes,
           pcmBuffer: sharedPcmBuffer,
           stateBuffer: sharedStateBuffer,
@@ -1480,9 +1560,8 @@ export function createJamAudioBridge({
   }
 
   async function playTrackStreaming() {
-    await beginPlaybackSession();
     return enqueueLatestPlaybackSession(async (sessionGeneration) => {
-      if (!isCurrentPlaybackSession(sessionGeneration)) return;
+      if (!await beginPlaybackSession({ sessionGeneration })) return;
       try {
         ensureCrossOriginIsolation();
         await ensureWasm();
@@ -1508,6 +1587,7 @@ export function createJamAudioBridge({
           Atomics.load(sharedStateView, 4),
           ' framesAvailable=', Atomics.load(sharedStateView, 2));
         await sendPlaybackWorkerCommand('playTrackStreaming', {
+          sessionGeneration,
           pcmBuffer: sharedPcmBuffer,
           stateBuffer: sharedStateBuffer,
           frameCapacity,
@@ -1546,9 +1626,8 @@ export function createJamAudioBridge({
   }
 
   async function playTrackBounded(url, totalSize) {
-    await beginPlaybackSession();
     return enqueueLatestPlaybackSession(async (sessionGeneration) => {
-      if (!isCurrentPlaybackSession(sessionGeneration)) return;
+      if (!await beginPlaybackSession({ sessionGeneration })) return;
       if (enableBoundedUrlAnchorExperiment) {
         setBoundedTrackAudioOnSilentElement(url);
       }
@@ -1573,6 +1652,7 @@ export function createJamAudioBridge({
           Atomics.load(sharedStateView, 4),
           ' framesAvailable=', Atomics.load(sharedStateView, 2));
         await sendPlaybackWorkerCommand('playTrackBounded', {
+          sessionGeneration,
           url,
           totalSize,
           pcmBuffer: sharedPcmBuffer,
@@ -1803,8 +1883,13 @@ export function createJamAudioBridge({
   async function stop(options = {}) {
     appOwnedStopInFlight = true;
     try {
-      playbackSessionGeneration += 1;
-      const { preserveMediaSession = false } = options;
+      const {
+        preserveMediaSession = false,
+        invalidatePlaybackSession = true,
+      } = options;
+      if (invalidatePlaybackSession) {
+        playbackSessionGeneration += 1;
+      }
 
       // Declick: ramp gain to zero before cutting audio to avoid a pop.
       // Mirrors pause() pattern. rampGainToValue() returns early if gain is

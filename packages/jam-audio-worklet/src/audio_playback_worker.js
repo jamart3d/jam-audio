@@ -49,6 +49,7 @@ export function initPlaybackWorker({
   self.addEventListener('error', (event) => {
     self.postMessage({
       type: 'playback-error',
+      fatal: true,
       message: formatUnhandledWorkerReason(event.error ?? event.message),
     });
   });
@@ -56,6 +57,7 @@ export function initPlaybackWorker({
   self.addEventListener('unhandledrejection', (event) => {
     self.postMessage({
       type: 'playback-error',
+      fatal: true,
       message: formatUnhandledWorkerReason(event.reason),
     });
   });
@@ -77,7 +79,7 @@ export function initPlaybackWorker({
             stateBuffer: data.stateBuffer,
             frameCapacity: data.frameCapacity,
             sampleRate: data.sampleRate,
-          });
+          }, data.sessionGeneration);
           self.postMessage({ type: 'response', requestId });
           return;
         case 'playTrackStreaming':
@@ -87,7 +89,7 @@ export function initPlaybackWorker({
             stateBuffer: data.stateBuffer,
             frameCapacity: data.frameCapacity,
             sampleRate: data.sampleRate,
-          });
+          }, data.sessionGeneration);
           self.postMessage({ type: 'response', requestId });
           return;
         case 'playTrackBounded': {
@@ -98,7 +100,7 @@ export function initPlaybackWorker({
             stateBuffer,
             frameCapacity,
             sampleRate,
-          });
+          }, data.sessionGeneration);
           self.postMessage({ type: 'response', requestId });
           return;
         }

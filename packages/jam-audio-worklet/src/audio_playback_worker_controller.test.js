@@ -119,7 +119,7 @@ test('streaming to gapless transition converts thrown decoder setup into playbac
     pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
     frameCapacity: 8,
-  });
+  }, 23);
   controller.preloadNext(new Uint8Array([9]));
   controller.finalizeStream();
   
@@ -131,7 +131,11 @@ test('streaming to gapless transition converts thrown decoder setup into playbac
 
   assert.deepEqual(
     messages.find((message) => message.type === 'playback-error'),
-    { type: 'playback-error', message: 'opus handoff crash' },
+    {
+      type: 'playback-error',
+      message: 'opus handoff crash',
+      sessionGeneration: 23,
+    },
   );
 });
 
@@ -183,11 +187,15 @@ test('playTrack failure emits playback-error', () => {
     pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(5 * Int32Array.BYTES_PER_ELEMENT),
     frameCapacity: 8,
-  });
+  }, 17);
 
   assert.deepEqual(
     messages.find((message) => message.type === 'playback-error'),
-    { type: 'playback-error', message: 'initial crash' },
+    {
+      type: 'playback-error',
+      message: 'initial crash',
+      sessionGeneration: 17,
+    },
   );
 });
 
@@ -1290,14 +1298,14 @@ test('playTrackStreaming as transition emits track-handoff with isStreamingReini
 
   // Start with gapless player (establishes prior session)
   const buffers1 = makeBuffers();
-  controller.playTrack(new Uint8Array([1]), buffers1);
+  controller.playTrack(new Uint8Array([1]), buffers1, 41);
 
   // Advance time to simulate gap duration
   nowValue = 1000 + 312; // 312ms "gap"
 
   // Call playTrackStreaming as a track transition (prior player was active)
   const buffers2 = makeBuffers();
-  controller.playTrackStreaming(buffers2);
+  controller.playTrackStreaming(buffers2, 42);
   controller.appendChunk(new Uint8Array(0));
 
   // Simulate startup buffer filling — run refill ticks until playback-started fires
@@ -1321,6 +1329,14 @@ test('playTrackStreaming as transition emits track-handoff with isStreamingReini
   assert.ok(
     typeof handoffWrapper.event.audibleLateGapMs === 'number' && handoffWrapper.event.audibleLateGapMs > 0,
     `audibleLateGapMs must be > 0, got ${handoffWrapper?.event?.audibleLateGapMs}`,
+  );
+  const playbackStarted = messages
+    .filter((message) => message.type === 'playback-started')
+    .at(-1);
+  assert.equal(
+    playbackStarted?.sessionGeneration,
+    42,
+    'playback-started must identify the active bridge session',
   );
 });
 
@@ -5436,9 +5452,6 @@ test('gapless-duration-provisional includes transition classification fields', (
     assert.match(block, /gaplessHandoffMissingHint:/);
   }
 });
-
-
-
 
 
 
