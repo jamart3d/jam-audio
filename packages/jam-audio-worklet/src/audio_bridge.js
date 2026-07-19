@@ -1039,13 +1039,17 @@ export function createJamAudioBridge({
         emitDiagnosticsEvent(data.event);
         return;
       case 'playback-started':
-        if (isAndroidTransport && audioContext?.state === 'suspended') {
-          // Buffer is ready but the AudioContext is suspended (Android Chrome
-          // browser, no installed PWA). Signal Dart to show the play button
-          // so the UI reflects that audio is buffered but not yet audible.
-          // gesture-resume fires onPlaybackStartedCallback when the user taps,
-          // transitioning the UI from play button → pause button as audio begins.
-          // Desktop and installed-PWA paths always reach the else branch.
+        if (audioContext?.state === 'suspended') {
+          // Buffer is ready but the AudioContext is suspended (autoplay
+          // blocked: Android Chrome without an installed PWA, or desktop
+          // Chrome with a low Media Engagement Index — see
+          // reports/logs/log113.txt). Signal Dart to show the play button so
+          // the UI reflects that audio is buffered but not yet audible.
+          // gesture-resume fires onPlaybackStartedCallback on the first user
+          // interaction, transitioning the UI from play button → pause button
+          // as audio begins. A running context (installed PWA, high MEI, or
+          // gesture-initiated play) takes the else branch and starts
+          // immediately.
           pendingPlaybackStartedOnResume = true;
           if (typeof onPlaybackSuspendedCallback === 'function') onPlaybackSuspendedCallback();
           markPlaybackState('paused');
