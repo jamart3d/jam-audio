@@ -328,6 +328,8 @@ pub struct StreamingDecoder {
     trailing_pad_frames: u64,
     /// Frames to skip after a seek to achieve sample-accurate positioning.
     pending_skip_frames: u64,
+    valid_source_frames_emitted: u64,
+    max_valid_source_frames: Option<u64>,
     /// Lazily-constructed rubato resampler; `None` when source_rate == target_rate.
     resampler: Option<StereoResampler>,
 }
@@ -339,7 +341,7 @@ fn codec_supported_on_target(
     Ok(())
 }
 
-/// Converts a symphonia `(time_base, n_frames)` pair to milliseconds.
+/// Converts a symphonia `(time_base, n_frames)` pair to milliseconds after trimming delay and padding.
 ///
 /// Returns `0.0` for any of:
 /// - `time_base` is `None`
@@ -348,10 +350,13 @@ fn codec_supported_on_target(
 fn duration_ms_from(
     time_base: Option<symphonia::core::units::TimeBase>,
     n_frames: Option<u64>,
+    delay: u64,
+    padding: u64,
 ) -> f64 {
     match (time_base, n_frames) {
         (Some(tb), Some(n)) if n != u64::MAX => {
-            let t = tb.calc_time(n);
+            let audible_frames = n.saturating_sub(delay).saturating_sub(padding);
+            let t = tb.calc_time(audible_frames);
             t.seconds as f64 * 1000.0 + t.frac * 1000.0
         }
         _ => 0.0,
@@ -431,15 +436,25 @@ impl StreamingDecoder {
             .map(|layout| layout.count() as u32)
             .ok_or(DecodeError::MissingChannels)?;
 
-        let duration_ms =
-            duration_ms_from(track.codec_params.time_base, track.codec_params.n_frames);
-
         let init_source_sample_rate = source_sample_rate;
         let raw_delay = track.codec_params.delay.unwrap_or(0) as u64;
-        let raw_padding = track.codec_params.padding.unwrap_or(0) as f64;
-        let rate_ratio = target_sample_rate as f64 / init_source_sample_rate as f64;
-        let encoder_delay_frames = (raw_delay as f64 * rate_ratio).round() as u64;
-        let trailing_pad_frames = (raw_padding * rate_ratio).round() as u64;
+        let raw_padding = track.codec_params.padding.unwrap_or(0) as u64;
+        let encoder_delay_frames = raw_delay;
+        let trailing_pad_frames = raw_padding;
+
+        let total_source_frames = track.codec_params.n_frames;
+        let max_valid_source_frames = match total_source_frames {
+            Some(total) if total != u64::MAX => {
+                Some(total.saturating_sub(raw_delay).saturating_sub(raw_padding))
+            }
+            _ => None,
+        };
+        let duration_ms = duration_ms_from(
+            track.codec_params.time_base,
+            total_source_frames,
+            raw_delay,
+            raw_padding,
+        );
 
         let resampler = if source_sample_rate != target_sample_rate {
             Some(StereoResampler::new(
@@ -487,6 +502,8 @@ impl StreamingDecoder {
             encoder_delay_frames,
             trailing_pad_frames,
             pending_skip_frames: raw_delay,
+            valid_source_frames_emitted: 0,
+            max_valid_source_frames,
             resampler,
         })
     }
@@ -538,13 +555,32 @@ impl StreamingDecoder {
                 &FormatOptions::default(),
                 &MetadataOptions::default(),
             )?;
+            if let Some(track) = probed.format.default_track() {
+                let total_source_frames = track.codec_params.n_frames;
+                if let Some(total) = total_source_frames
+                    && total != u64::MAX
+                {
+                    self.max_valid_source_frames = Some(
+                        total
+                            .saturating_sub(self.encoder_delay_frames)
+                            .saturating_sub(self.trailing_pad_frames),
+                    );
+                    self.duration_ms = duration_ms_from(
+                        track.codec_params.time_base,
+                        total_source_frames,
+                        self.encoder_delay_frames,
+                        self.trailing_pad_frames,
+                    );
+                }
+            }
             self.format = Some(probed.format);
             self.reprobed_after_finalized = true;
         }
 
-        let playback_frame = (ms * self.target_sample_rate as f64 / 1000.0).round() as u64;
-        let target_frame = playback_frame + self.encoder_delay_frames;
-        let target_seconds = target_frame as f64 / self.target_sample_rate as f64;
+        let audible_source_frame =
+            (ms * self.init_source_sample_rate as f64 / 1000.0).round() as u64;
+        let container_source_frame = audible_source_frame + self.encoder_delay_frames;
+        let target_seconds = container_source_frame as f64 / self.init_source_sample_rate as f64;
 
         let frac = target_seconds.fract();
         let num_seconds = target_seconds.trunc() as u64;
@@ -570,6 +606,8 @@ impl StreamingDecoder {
         } else {
             self.pending_skip_frames = 0;
         }
+
+        self.valid_source_frames_emitted = audible_source_frame;
 
         // Reset decoder state and clear processing buffers after successful format seek
         self.decoder.reset();
@@ -655,8 +693,28 @@ impl StreamingDecoder {
                 self.pending_skip_frames -= skip as u64;
             }
 
+            if !chunk_samples.is_empty() {
+                let valid_frames_in_chunk = chunk_samples.len() / self.source_channels as usize;
+                if let Some(max_valid) = self.max_valid_source_frames {
+                    let remaining_valid =
+                        (max_valid.saturating_sub(self.valid_source_frames_emitted)) as usize;
+                    if valid_frames_in_chunk > remaining_valid {
+                        let samples_to_keep = remaining_valid * self.source_channels as usize;
+                        chunk_samples.truncate(samples_to_keep);
+                    }
+                }
+                let actual_valid_frames = chunk_samples.len() / self.source_channels as usize;
+                self.valid_source_frames_emitted += actual_valid_frames as u64;
+            }
+
             // append retains chunk_samples' capacity for reuse on the next iteration
             self.intermediate_samples.append(&mut chunk_samples);
+
+            if let Some(max_valid) = self.max_valid_source_frames
+                && self.valid_source_frames_emitted >= max_valid
+            {
+                break;
+            }
 
             if self.intermediate_samples.len() >= target_samples_stereo {
                 break;
@@ -1694,7 +1752,7 @@ mod tests {
             numer: 1,
             denom: 48000,
         };
-        assert_eq!(duration_ms_from(Some(tb), Some(u64::MAX)), 0.0);
+        assert_eq!(duration_ms_from(Some(tb), Some(u64::MAX), 0, 0), 0.0);
     }
 
     #[test]
@@ -1703,22 +1761,23 @@ mod tests {
             numer: 1,
             denom: 48000,
         };
-        assert_eq!(duration_ms_from(Some(tb), None), 0.0);
+        assert_eq!(duration_ms_from(Some(tb), None, 0, 0), 0.0);
     }
 
     #[test]
     fn duration_ms_from_returns_zero_for_none_time_base() {
-        assert_eq!(duration_ms_from(None, Some(44100)), 0.0);
+        assert_eq!(duration_ms_from(None, Some(44100), 0, 0), 0.0);
     }
 
     #[test]
-    fn duration_ms_from_computes_correctly_for_known_duration() {
-        // 44100 frames at 1/44100 time base = exactly 1000 ms
+    fn duration_ms_from_computes_correctly_for_known_duration_with_trimming() {
+        // 46080 total frames at 1/44100 time base, with delay=1105 and padding=875
+        // Audible frames = 46080 - 1105 - 875 = 44100 = exactly 1000 ms
         let tb = symphonia::core::units::TimeBase {
             numer: 1,
             denom: 44100,
         };
-        let ms = duration_ms_from(Some(tb), Some(44100));
+        let ms = duration_ms_from(Some(tb), Some(46080), 1105, 875);
         assert!((ms - 1000.0).abs() < 0.01, "expected ~1000ms, got {ms}");
     }
 

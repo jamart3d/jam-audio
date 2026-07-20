@@ -26,7 +26,6 @@ pub struct GaplessPlayer {
     total_frames_decoded: u64,
     target_sample_rate: u32,
     ended: bool,
-    pending_skip_frames: u64,
     seam_generation: u32,
     last_seam_position_ms: f64,
 }
@@ -45,7 +44,6 @@ impl GaplessPlayer {
             total_frames_decoded: 0,
             target_sample_rate,
             ended: false,
-            pending_skip_frames: 0,
             seam_generation: 0,
             last_seam_position_ms: 0.0,
         })
@@ -92,13 +90,6 @@ impl GaplessPlayer {
                 .decode_chunk_into(remaining_frames, &mut self.scratch)
             {
                 Ok(true) => {
-                    if self.pending_skip_frames > 0 {
-                        let chunk_frames = (self.scratch.len() / 2) as u64;
-                        let skip = self.pending_skip_frames.min(chunk_frames);
-                        let skip_samples = (skip * 2) as usize;
-                        self.pending_skip_frames -= skip;
-                        self.scratch.drain(..skip_samples);
-                    }
                     let need = target_samples - out.len();
                     if self.scratch.len() <= need {
                         out.extend_from_slice(&self.scratch);
@@ -118,7 +109,6 @@ impl GaplessPlayer {
                 }
                 Ok(false) => {
                     if let Some(next) = self.next.take() {
-                        self.pending_skip_frames = next.encoder_delay_frames();
                         self.active = next;
                         self.seam_generation = self.seam_generation.wrapping_add(1);
                         let seam_frames = self.total_frames_decoded + (out.len() / 2) as u64;
@@ -148,7 +138,6 @@ impl GaplessPlayer {
             .seek_to_ms(ms)
             .map_err(|e| GaplessError::Corrupted(e.to_string()))?;
         self.residual.clear();
-        self.pending_skip_frames = 0;
         self.total_frames_decoded = (ms * self.target_sample_rate as f64 / 1000.0) as u64;
         self.ended = false;
         Ok(())
@@ -176,11 +165,6 @@ impl GaplessPlayer {
 
     pub fn clear_next(&mut self) {
         self.next = None;
-    }
-
-    #[cfg(test)]
-    pub fn inject_pending_skip_frames_for_test(&mut self, n: u64) {
-        self.pending_skip_frames = n;
     }
 }
 
@@ -342,60 +326,6 @@ mod tests {
     fn gapless_error_implements_std_error() {
         let err = GaplessError::Corrupted("bad".into());
         let _: &dyn std::error::Error = &err; // fails to compile if Error not impl'd
-    }
-
-    #[test]
-    fn strips_injected_encoder_delay_at_track_boundary() {
-        let track_frames = 1000usize;
-        let wav1 = make_wav(track_frames);
-        let wav2 = make_wav(track_frames);
-
-        let mut player = GaplessPlayer::new(wav1, DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
-        player.load_next(wav2).unwrap();
-
-        // Inject skip before any decoding so the mechanism is exercised
-        player.inject_pending_skip_frames_for_test(100);
-
-        let mut total_samples = 0usize;
-        loop {
-            let frames = player.decode_frames(256).unwrap();
-            if frames.is_empty() {
-                break;
-            }
-            total_samples += frames.len();
-        }
-
-        // Per-track frames after resampling 44100 -> 48000
-        let per_track_frames =
-            ((track_frames as f64 * DEFAULT_OUTPUT_SAMPLE_RATE as f64) / 44_100.0).round() as usize;
-        // 100 frames were stripped; two tracks decoded
-        let expected_samples = (per_track_frames * 2 - 100) * 2;
-        // Rubato's polyphase sinc filter introduces a group delay of sinc_len/2 frames
-        // (= 64 at our settings). Allow a generous tolerance.
-        let tolerance = (expected_samples as f64 * 0.10) as usize + 128;
-        assert!(
-            total_samples.abs_diff(expected_samples) <= tolerance,
-            "expected {expected_samples} samples (2 tracks * {per_track_frames} frames - 100 skipped), got {total_samples}"
-        );
-    }
-
-    #[test]
-    fn seek_clears_pending_encoder_delay_skip() {
-        let mut player = GaplessPlayer::new(make_wav(48000), DEFAULT_OUTPUT_SAMPLE_RATE).unwrap();
-        player.inject_pending_skip_frames_for_test(1000);
-        player.seek_to_ms(100.0).unwrap();
-        // Assert that pending skip frames are cleared
-        assert_eq!(
-            player.pending_skip_frames, 0,
-            "seek should clear pending skip frames"
-        );
-        // Decode after seek; if pending skip leaked through, we'd lose the first 1000 frames.
-        let out = player.decode_frames(256).unwrap();
-        assert_eq!(
-            out.len(),
-            256 * 2,
-            "seek should consume the encoder-delay skip"
-        );
     }
 
     #[test]

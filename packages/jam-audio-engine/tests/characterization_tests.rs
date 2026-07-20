@@ -89,26 +89,43 @@ fn characterization_gapless_second_track_delay() {
         .load_next(mp3_bytes.clone())
         .expect("load next track");
 
-    // Drain Track 1 completely
-    let mut total_drained = 0;
+    let mut gapless_t2_samples = Vec::new();
+    let mut seam_captured = false;
+
     loop {
-        let frames = player.decode_frames(1024).expect("decode frames");
-        if frames.is_empty() {
+        let mut chunk = Vec::new();
+        player
+            .decode_frames_into(&mut chunk, 1024)
+            .expect("decode frames");
+        if chunk.is_empty() {
             break;
         }
-        total_drained += frames.len() / 2;
-        // Break once we have transitioned into Track 2
-        if total_drained > 50000 {
-            break;
+
+        if player.seam_generation() == 1 {
+            if !seam_captured {
+                seam_captured = true;
+                let t1_target_samples =
+                    (player.last_seam_position_ms() * target_rate as f64 / 1000.0).round() as usize
+                        * 2;
+                let pos_target_samples =
+                    (player.position_ms() * target_rate as f64 / 1000.0).round() as usize * 2;
+                let t2_decoded_so_far = pos_target_samples.saturating_sub(t1_target_samples);
+                let t2_in_this_chunk = t2_decoded_so_far.min(chunk.len());
+                let t2_start_idx = chunk.len() - t2_in_this_chunk;
+                gapless_t2_samples.extend_from_slice(&chunk[t2_start_idx..]);
+            } else {
+                gapless_t2_samples.extend_from_slice(&chunk);
+            }
+
+            if gapless_t2_samples.len() >= standalone_t2_start.len() {
+                gapless_t2_samples.truncate(standalone_t2_start.len());
+                break;
+            }
         }
     }
 
-    // Now decode initial frames of Track 2 via GaplessPlayer
-    let gapless_t2_start = player.decode_frames(200).expect("decode gapless t2 start");
-
-    // RED EXPECTATION: Fails because GaplessPlayer trims second track encoder delay twice.
     assert_eq!(
-        gapless_t2_start, standalone_t2_start,
+        gapless_t2_samples, standalone_t2_start,
         "Gapless second track start must match standalone decoded track 2 start, but double-trimming occurred"
     );
 }
@@ -133,14 +150,13 @@ fn characterization_trailing_padding() {
     }
 
     // mp3_with_delay.mp3 has 46080 total raw samples (44100 Hz * ~1.044s)
-    // LAME metadata: delay = 1105, padding = 383.
-    // Expected audible frames = 46080 - 1105 - 383 = 44592 (or exact post-trim length).
+    // LAME metadata: delay = 1105, padding = 875.
+    // Expected audible frames = 46080 - 1105 - 875 = 44100.
     let raw_delay = 1105;
-    let raw_padding = 383;
+    let raw_padding = 875;
     let total_pcm_container_frames = 46080;
     let expected_audible_frames = total_pcm_container_frames - raw_delay - raw_padding;
 
-    // RED EXPECTATION: Fails because trailing padding is not trimmed and reaches output.
     assert_eq!(
         total_decoded_frames, expected_audible_frames,
         "Decoded frames must exclude trailing padding metadata ({}), but got {}",
