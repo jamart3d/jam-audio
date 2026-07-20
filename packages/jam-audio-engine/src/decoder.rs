@@ -1,3 +1,32 @@
+//! # Sample-Accounting Contract
+//!
+//! This module defines and enforces the audio pipeline sample-accounting contract
+//! across decoding, trimming, resampling, seeking, and gapless playback track transitions.
+//!
+//! ## Contract Principles
+//!
+//! 1. **Single Owner**: `StreamingDecoder` is the sole owner of all stream-level trimming
+//!    (encoder delay, seek alignment skip, and trailing padding). Higher-level components
+//!    such as `GaplessPlayer` MUST NOT perform independent trimming or track duplicate skip state.
+//! 2. **Source-Frame Domain**: All stream trimming is applied in source frames BEFORE resampling.
+//!    No conversion of trimming counts into target rate frames is performed prior to trimming.
+//!    Rounding rules apply exclusively to reported position/duration values (`duration_ms`, decoded position,
+//!    seam position) using round-half-up on the source-to-output ratio, applied exactly once.
+//! 3. **Filter Delay Compensation**: Resampler filter delay (e.g. Rubato `SincFixedIn` group delay / `output_delay()`)
+//!    belongs strictly to the resampler accounting layer. The first audible output frame corresponds
+//!    to the first post-trim source frame offset by filter delay compensation.
+//! 4. **Streaming Finalize**: Incomplete streaming media sources carry zero trailing padding until container metadata
+//!    is finalized. Finalization may update trailing padding before EOF draining occurs.
+//! 5. **Reported Semantics**: All reported time, position, and duration metrics (`duration_ms`, decoded position,
+//!    seam position, EOS) refer strictly to post-trim audible PCM frames.
+//!
+//! ## Codec / Demuxer Packet-Level Trimming Alignment
+//!
+//! Low-level packet trimming (`packet.trim_start()`, `packet.trim_end()`) performed inside codec decoders
+//! (such as Symphonia decoders or the custom `OpusDecoder`) operates at the container packetization boundary
+//! (e.g., Ogg packet granule trimming). This packet-level trimming produces clean source PCM frames for
+//! `StreamingDecoder` and aligns with `StreamingDecoder`'s role as the single stream-level trimming owner.
+
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
 
