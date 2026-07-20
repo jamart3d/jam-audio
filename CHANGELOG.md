@@ -1,11 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] - 2026-07-20
 
 ### Added
+- Canonical versioned shared-memory protocol (`protocol/worklet_shared_state.json` + generator) between the Rust ring buffer and worklet JS, replacing a silent 5-slot/9-slot mismatch with a fail-fast version/slot handshake.
+- Atomic epoch-based seek/reset protocol preventing mixed-epoch PCM from reaching output across seek, stop, and track-replacement paths.
+- Authoritative shared underrun-episode and silent-frame counters, render-safe (no allocation or `postMessage` in the audio callback), surfaced through bridge snapshots and handoff diagnostics.
 - Hardened bounded latency profiles (`interactive`, `balanced`, `resilient`) wired into controller and bridge public API (`createJamAudioBridge({ latencyProfile })`).
 - Central input validation and checked arithmetic for output sample rates (8k–192kHz), channel counts (1–8), ring-buffer capacities, and frame request sizes across Rust and Wasm surfaces.
-- Configured scoped package metadata for `@jamart3d/jam-audio-worklet` with npm exports and verified publish dry-run.
+- Configured scoped package metadata for `@jamart3d/jam-audio-worklet` and `@jamart3d/jam-audio-engine-wasm` with npm exports, MIT license (both packages, matching the engine crate), and verified publish dry-runs.
 
 ### Changed
 - Refactored audio sample-accounting contract: `StreamingDecoder` is now the sole owner of all stream-level encoder delay, seek-alignment, and trailing-padding trimming in the source-frame domain.
@@ -15,7 +18,10 @@
 - Made resampler EOF drain exact and idempotent, excluding synthetic zero-padding tail frames.
 - Recovered native `SharedCell` mutexes post-poisoning via `PoisonError::into_inner()`, aligning implementation with documented behavior.
 - Transitioned unknown `AudioMetadata.duration_ms` from `0.0` to `None` (`undefined` in JS) while reserving `Some(0.0)` for known zero-length assets.
+- Corrected `jam-audio-flutter`'s documented scope to match its real surface (metadata/artwork extraction only, web target only); removed an unused Rust-level re-export that misleadingly implied a playback API.
 
+### Fixed
+- Fixed a protocol regression where the worklet's worker entry silently dropped `protocolVersion`/`protocolSlots` from play messages, causing every playback attempt to fail its version handshake.
 
 ## [0.4.5] - 2026-06-28
 

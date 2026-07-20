@@ -1,6 +1,6 @@
 [package]
 name = "jam_audio_flutter"
-version = "0.4.5"
+version = "0.5.0"
 edition = "2024"
 description = "Flutter/Dart bridge for audio metadata and artwork extraction from the Jam Audio engine (web target only; no playback)"
 repository = "https://github.com/jamart3d/jam-audio"
