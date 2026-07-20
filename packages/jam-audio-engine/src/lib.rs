@@ -18,7 +18,7 @@ use shared_cell::SharedCell;
 
 pub use decoder::{
     AppendableMediaSource, DEFAULT_OUTPUT_SAMPLE_RATE, DecodeError, DecodedAudioData,
-    StreamingDecoder, WindowedMediaSource, decode_audio_bytes,
+    StereoResampler, StreamingDecoder, WindowedMediaSource, decode_audio_bytes,
 };
 pub use gapless_player::GaplessPlayer;
 pub use metadata::{
@@ -588,7 +588,12 @@ impl StreamingPlayer {
 }
 
 fn decode_error_to_js(e: DecodeError) -> JsValue {
-    JsValue::from_str(&e.to_string())
+    match e {
+        DecodeError::Resample { operation, message } => {
+            gapless_error_to_js("resample", &format!("{operation}: {message}"))
+        }
+        _ => JsValue::from_str(&e.to_string()),
+    }
 }
 
 fn js_string(s: &str) -> JsValue {

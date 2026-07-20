@@ -50,12 +50,14 @@ use symphonia::default::{get_probe, register_enabled_codecs};
 /// input buffer so that callers can push variable-sized stereo interleaved chunks
 /// without worrying about the rubato chunk-size constraint.  Call `flush` at end
 /// of stream to drain any remaining buffered frames.
-struct StereoResampler {
+pub struct StereoResampler {
     inner: SincFixedIn<f32>,
     /// Deinterleaved per-channel input staging buffer.
     pending: [Vec<f32>; 2],
     /// Fixed chunk size that `SincFixedIn` expects.
     chunk_frames: usize,
+    pub source_rate: u32,
+    pub target_rate: u32,
 }
 
 fn extend_interleaved_stereo(out: &mut Vec<f32>, left: &[f32], right: &[f32]) {
@@ -78,7 +80,34 @@ fn extend_first_two_channels(out: &mut Vec<f32>, samples: &[f32], source_channel
 }
 
 impl StereoResampler {
-    fn new(source_rate: u32, target_rate: u32, chunk_frames: usize) -> Self {
+    pub fn new(
+        source_rate: u32,
+        target_rate: u32,
+        chunk_frames: usize,
+    ) -> Result<Self, DecodeError> {
+        if source_rate == 0 || source_rate > 768_000 {
+            return Err(DecodeError::Resample {
+                operation: "new",
+                message: format!(
+                    "source sample rate must be > 0 and <= 768000 (got {source_rate})"
+                ),
+            });
+        }
+        if target_rate == 0 || target_rate > 768_000 {
+            return Err(DecodeError::Resample {
+                operation: "new",
+                message: format!(
+                    "target sample rate must be > 0 and <= 768000 (got {target_rate})"
+                ),
+            });
+        }
+        if chunk_frames == 0 {
+            return Err(DecodeError::Resample {
+                operation: "new",
+                message: "chunk_frames must be > 0".to_string(),
+            });
+        }
+
         let ratio = target_rate as f64 / source_rate as f64;
         let params = SincInterpolationParameters {
             sinc_len: 128,
@@ -87,21 +116,31 @@ impl StereoResampler {
             oversampling_factor: 64,
             window: WindowFunction::BlackmanHarris2,
         };
-        let inner = SincFixedIn::<f32>::new(ratio, 1.0, params, chunk_frames, 2)
-            .expect("rubato SincFixedIn params valid");
-        Self {
+        let inner = SincFixedIn::<f32>::new(ratio, 1.0, params, chunk_frames, 2).map_err(|e| {
+            DecodeError::Resample {
+                operation: "new",
+                message: e.to_string(),
+            }
+        })?;
+        Ok(Self {
             inner,
             pending: [
                 Vec::with_capacity(chunk_frames * 2),
                 Vec::with_capacity(chunk_frames * 2),
             ],
             chunk_frames,
-        }
+            source_rate,
+            target_rate,
+        })
     }
 
     /// Push interleaved stereo `samples` into the resampler, emitting resampled
     /// frames into `out` whenever a full input chunk is available.
-    fn push_interleaved(&mut self, samples: &[f32], out: &mut Vec<f32>) {
+    pub fn push_interleaved(
+        &mut self,
+        samples: &[f32],
+        out: &mut Vec<f32>,
+    ) -> Result<(), DecodeError> {
         // Deinterleave into pending buffers.
         for frame in samples.chunks_exact(2) {
             self.pending[0].push(frame[0]);
@@ -109,31 +148,39 @@ impl StereoResampler {
         }
         // Drain complete chunks.
         while self.pending[0].len() >= self.chunk_frames {
-            self.process_one_chunk(out);
+            self.process_one_chunk(out)?;
         }
+        Ok(())
     }
 
     /// Flush any remaining buffered frames by padding with silence and processing.
-    fn flush(&mut self, out: &mut Vec<f32>) {
+    pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecodeError> {
         if self.pending[0].is_empty() {
-            return;
+            return Ok(());
         }
         // Pad both channels to chunk_frames with silence.
         let have = self.pending[0].len();
         let need = self.chunk_frames - have;
         self.pending[0].extend(std::iter::repeat_n(0.0f32, need));
         self.pending[1].extend(std::iter::repeat_n(0.0f32, need));
-        self.process_one_chunk(out);
+        self.process_one_chunk(out)?;
+        Ok(())
     }
 
-    fn process_one_chunk(&mut self, out: &mut Vec<f32>) {
+    fn process_one_chunk(&mut self, out: &mut Vec<f32>) -> Result<(), DecodeError> {
         // Extract exactly chunk_frames from the front of pending.
         let l: Vec<f32> = self.pending[0].drain(..self.chunk_frames).collect();
         let r: Vec<f32> = self.pending[1].drain(..self.chunk_frames).collect();
         let in_buf = [l, r];
-        if let Ok(resampled) = self.inner.process(&in_buf, None) {
-            extend_interleaved_stereo(out, &resampled[0], &resampled[1]);
-        }
+        let resampled = self
+            .inner
+            .process(&in_buf, None)
+            .map_err(|e| DecodeError::Resample {
+                operation: "process",
+                message: e.to_string(),
+            })?;
+        extend_interleaved_stereo(out, &resampled[0], &resampled[1]);
+        Ok(())
     }
 }
 
@@ -354,6 +401,32 @@ impl StreamingDecoder {
         let encoder_delay_frames = (raw_delay as f64 * rate_ratio).round() as u64;
         let trailing_pad_frames = (raw_padding * rate_ratio).round() as u64;
 
+        let resampler = if source_sample_rate != target_sample_rate {
+            Some(StereoResampler::new(
+                source_sample_rate,
+                target_sample_rate,
+                1024,
+            )?)
+        } else {
+            if source_sample_rate == 0 || source_sample_rate > 768_000 {
+                return Err(DecodeError::Resample {
+                    operation: "new",
+                    message: format!(
+                        "source sample rate must be > 0 and <= 768000 (got {source_sample_rate})"
+                    ),
+                });
+            }
+            if target_sample_rate == 0 || target_sample_rate > 768_000 {
+                return Err(DecodeError::Resample {
+                    operation: "new",
+                    message: format!(
+                        "target sample rate must be > 0 and <= 768000 (got {target_sample_rate})"
+                    ),
+                });
+            }
+            None
+        };
+
         Ok(Self {
             format: Some(format),
             decoder,
@@ -374,7 +447,7 @@ impl StreamingDecoder {
             encoder_delay_frames,
             trailing_pad_frames,
             pending_skip_frames: raw_delay,
-            resampler: None,
+            resampler,
         })
     }
 
@@ -550,7 +623,7 @@ impl StreamingDecoder {
                 && let Some(resampler) = self.resampler.as_mut()
             {
                 let before = out.len();
-                resampler.flush(out);
+                resampler.flush(out)?;
                 if out.len() > before {
                     return Ok(true);
                 }
@@ -560,7 +633,7 @@ impl StreamingDecoder {
 
         let source_channels = self.source_channels;
         let samples = std::mem::take(&mut self.intermediate_samples);
-        self.normalize_to_stereo_output(&samples, source_channels, out);
+        self.normalize_to_stereo_output(&samples, source_channels, out)?;
         self.intermediate_samples = samples;
         self.intermediate_samples.clear();
         Ok(true)
@@ -576,11 +649,11 @@ impl StreamingDecoder {
         samples: &[f32],
         source_channels: u32,
         out: &mut Vec<f32>,
-    ) {
+    ) -> Result<(), DecodeError> {
         // --- channel folding into stereo_scratch ---
         self.stereo_scratch.clear();
         match source_channels {
-            0 => return,
+            0 => return Ok(()),
             1 => {
                 self.stereo_scratch.reserve(samples.len() * 2);
                 for &s in samples {
@@ -601,23 +674,37 @@ impl StreamingDecoder {
         }
 
         if self.stereo_scratch.is_empty() {
-            return;
+            return Ok(());
         }
 
         // --- no resampling needed ---
         if self.source_sample_rate == self.target_sample_rate {
             out.extend_from_slice(&self.stereo_scratch);
-            return;
+            return Ok(());
         }
 
         // --- rubato resampling ---
         // The resampler uses a fixed chunk size determined at construction. We use a
         // consistent chunk size of 1024 frames regardless of actual stereo_scratch length,
         // so the resampler only needs to be created once per rate pair.
-        let resampler = self.resampler.get_or_insert_with(|| {
-            StereoResampler::new(self.source_sample_rate, self.target_sample_rate, 1024)
-        });
-        resampler.push_interleaved(&self.stereo_scratch, out);
+        let resampler = match &mut self.resampler {
+            Some(r)
+                if r.source_rate == self.source_sample_rate
+                    && r.target_rate == self.target_sample_rate =>
+            {
+                r
+            }
+            _ => {
+                self.resampler = Some(StereoResampler::new(
+                    self.source_sample_rate,
+                    self.target_sample_rate,
+                    1024,
+                )?);
+                self.resampler.as_mut().unwrap()
+            }
+        };
+        resampler.push_interleaved(&self.stereo_scratch, out)?;
+        Ok(())
     }
 }
 
