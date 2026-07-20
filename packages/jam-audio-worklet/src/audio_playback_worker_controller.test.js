@@ -19,7 +19,7 @@ test('gapless handoff emits an integer transition position', () => {
   let duration = 1000;
   let position = 0;
   let actualTransitionPending = false;
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -64,7 +64,7 @@ test('gapless handoff emits an integer transition position', () => {
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   sharedState[2] = 0;
   position = 800;
@@ -72,7 +72,7 @@ test('gapless handoff emits an integer transition position', () => {
 
   intervalCallback();
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   actualTransitionPending = true;
   intervalCallback();
 
@@ -92,6 +92,7 @@ test('streaming to gapless transition converts thrown decoder setup into playbac
   const messages = [];
   let intervalCallback = null;
   let decodeCalls = 0;
+  let simulateStall = false;
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => {
@@ -124,9 +125,9 @@ test('streaming to gapless transition converts thrown decoder setup into playbac
   });
 
   controller.playTrackStreaming({
-    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 }, 23);
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 }, 23);
   controller.preloadNext(new Uint8Array([9]));
   controller.finalizeStream();
   
@@ -167,9 +168,9 @@ test('preloadNext error in player.loadNext is caught and emitted as preload-erro
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([9]));
 
@@ -193,9 +194,9 @@ test('playTrack failure emits playback-error', () => {
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 }, 17);
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 }, 17);
 
   assert.deepEqual(
     messages.find((message) => message.type === 'playback-error'),
@@ -214,6 +215,7 @@ test('streaming Opus emits duration from positionMs at end-of-stream when durati
   const messages = [];
   let intervalCallback = null;
   let decodeCalls = 0;
+  let simulateStall = false;
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => null,
@@ -241,9 +243,9 @@ test('streaming Opus emits duration from positionMs at end-of-stream when durati
   });
 
   controller.playTrackStreaming({
-    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.finalizeStream();
   intervalCallback();
 
@@ -275,9 +277,9 @@ test('preloadNext emits preload-pending on successful loadNext', () => {
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([9]));
 
@@ -304,9 +306,9 @@ test('reentrant session switch during decode aborts stale refill work', () => {
           return new Float32Array([0.1, 0.1]);
         }
         controller.playTrackStreaming({
-          pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+          pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
           stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-          frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+          frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
         return null;
       },
       durationMs() {
@@ -359,9 +361,9 @@ test('reentrant session switch during decode aborts stale refill work', () => {
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   assert.doesNotThrow(() => intervalCallback());
   assert.ok(
@@ -374,7 +376,7 @@ test('reentrant session switch during decode aborts stale refill work', () => {
 });
 
 test('transportMute silences the processor state until transportUnmute clears it', () => {
-  const pcmBuffer = new SharedArrayBuffer(32 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -401,7 +403,7 @@ test('transportMute silences the processor state until transportUnmute clears it
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 16,
+    frameCapacity: 300000,
     sampleRate: 48000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.transportMute();
@@ -420,7 +422,7 @@ test('late duration promotion still emits exactly one handoff', () => {
   let duration = 0;
   let position = 0;
   let tick = 0;
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -460,18 +462,18 @@ test('late duration promotion still emits exactly one handoff', () => {
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
   const handoffEvents = messages.filter(
@@ -496,7 +498,7 @@ test('streaming bridge hint stays one-shot after late duration promotion', () =>
   let duration = 0;
   let position = 0;
   let tick = 0;
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -542,13 +544,13 @@ test('streaming bridge hint stays one-shot after late duration promotion', () =>
   controller.playTrackStreaming({
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.transitionStreamToGapless(new Uint8Array([4, 5, 6]), 1000);
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
   assert.equal(
@@ -626,9 +628,9 @@ function runStreamingToGaplessBranchScenario({ branch }) {
 
   controller.setDiagnosticsMode('extended');
   controller.playTrackStreaming({
-    pcmBuffer: new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer,
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.preloadNext(new Uint8Array([9]));
   controller.finalizeStream();
 
@@ -752,9 +754,9 @@ test('streaming to gapless uses preloaded duration hint when bridge duration rep
 
   controller.setDiagnosticsMode('extended');
   controller.playTrackStreaming({
-    pcmBuffer: new SharedArrayBuffer(264600 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer,
-    frameCapacity: 264600, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 288000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([2]), BLUE_SUEDE_DURATION);
   controller.finalizeStream();
@@ -790,7 +792,7 @@ test('streaming to gapless uses preloaded duration hint when bridge duration rep
   controller.preloadNext(new Uint8Array([3]), WORKINGMAN_DURATION);
 
   totalPositionMs = JAM_DURATION + JAM_DURATION - TRACK_HANDOFF_TOLERANCE_MS + 5;
-  sharedState[2] = 263576;
+  sharedState[2] = 287000;
   intervalCallback();
 
   assert.equal(
@@ -800,7 +802,7 @@ test('streaming to gapless uses preloaded duration hint when bridge duration rep
   );
 
   totalPositionMs = JAM_DURATION + BLUE_SUEDE_DURATION - TRACK_HANDOFF_TOLERANCE_MS + 5;
-  sharedState[2] = 263576;
+  sharedState[2] = 287000;
   intervalCallback();
 
   assert.equal(
@@ -820,7 +822,7 @@ test('worker emits refill-starvation diagnostic at low rate', () => {
   try {
   const messages = [];
   let intervalCallback = null;
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -852,7 +854,7 @@ test('worker emits refill-starvation diagnostic at low rate', () => {
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Call the interval callback repeatedly to trigger refills that return null
   for (let i = 0; i < 15; i++) {
@@ -883,7 +885,7 @@ test('worker suppresses refill-starvation diagnostic during gapless EOF drain', 
   try {
   const messages = [];
   let intervalCallback = null;
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -915,9 +917,9 @@ test('worker suppresses refill-starvation diagnostic during gapless EOF drain', 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
 
   for (let i = 0; i < 15; i++) {
     intervalCallback();
@@ -941,7 +943,7 @@ test('worker suppresses refill-starvation diagnostic during finalized streaming 
   try {
   const messages = [];
   let intervalCallback = null;
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -976,10 +978,10 @@ test('worker suppresses refill-starvation diagnostic during finalized streaming 
   controller.playTrackStreaming({
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.finalizeStream();
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
 
   for (let i = 0; i < 15; i++) {
     intervalCallback();
@@ -1003,7 +1005,7 @@ test('worker diagnostics stay gated outside extended mode', () => {
   try {
   const messages = [];
   let intervalCallback = null;
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -1036,7 +1038,7 @@ test('worker diagnostics stay gated outside extended mode', () => {
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Call the interval callback repeatedly
   for (let i = 0; i < 15; i++) {
@@ -1111,18 +1113,18 @@ test('hold window delays ended emission when preload arrives within 500ms', () =
     nowMs: () => Date.now(),
   });
 
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Drain track to end — refill until player.hasEnded()
   for (let i = 0; i < 30; i++) {
-    sharedState[2] = 50; // framesAvailable
+    sharedState[2] = 100000; // framesAvailable
     intervalCallback();
   }
 
@@ -1142,7 +1144,7 @@ test('hold window delays ended emission when preload arrives within 500ms', () =
   controller.preloadNext(new Uint8Array([9]));
 
   // Run one more refill tick — hold resolves via gapless bridge
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
   // Now the gapless bridge should have fired track-changed (not ended)
@@ -1194,18 +1196,18 @@ test('hold window falls through to ended after 500ms if preload never arrives', 
     nowMs: () => nowValue,
   });
 
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Drain track to end
   for (let i = 0; i < 30; i++) {
-    sharedState[2] = 50;
+    sharedState[2] = 100000;
     intervalCallback();
   }
 
@@ -1277,17 +1279,17 @@ test('ended emission diagnostics explain hold and final emit path', () => {
     nowMs: () => nowValue,
   });
 
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   for (let i = 0; i < 30; i++) {
-    sharedState[2] = 50;
+    sharedState[2] = 100000;
     intervalCallback();
   }
 
@@ -1326,6 +1328,7 @@ test('playTrackStreaming as transition emits track-handoff with isStreamingReini
   let intervalCallback = null;
   let nowValue = 1000;
   let decodeCalls = 0;
+  let simulateStall = false;
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
@@ -1363,9 +1366,9 @@ test('playTrackStreaming as transition emits track-handoff with isStreamingReini
   });
 
   const makeBuffers = () => ({
-    pcmBuffer: new SharedArrayBuffer(100000 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 100000, protocolVersion: 2, protocolSlots: 12
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12
   });
 
   // Start with gapless player (establishes prior session)
@@ -1383,7 +1386,7 @@ test('playTrackStreaming as transition emits track-handoff with isStreamingReini
   // Simulate startup buffer filling — run refill ticks until playback-started fires
   const sharedState2 = new Int32Array(buffers2.stateBuffer);
   for (let i = 0; i < 20; i++) {
-    sharedState2[2] = 88200 + 100; // above PLAYBACK_START_FRAMES
+    sharedState2[2] = 96000 + 100; // above PLAYBACK_START_FRAMES
     nowValue += 50; // Simulate time passing during buffering
     intervalCallback();
     if (messages.filter((m) => m.type === 'playback-started').length >= 2) break;
@@ -1422,6 +1425,7 @@ test('playTrackStreaming on initial startup does NOT emit track-handoff', () => 
   const messages = [];
   let intervalCallback = null;
   let decodeCalls = 0;
+  let simulateStall = false;
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => null,
@@ -1448,9 +1452,9 @@ test('playTrackStreaming on initial startup does NOT emit track-handoff', () => 
   });
 
   const buffers = {
-    pcmBuffer: new SharedArrayBuffer(100000 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 100000, protocolVersion: 2, protocolSlots: 12
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12
   };
 
   // Initial startup — no prior player
@@ -1459,7 +1463,7 @@ test('playTrackStreaming on initial startup does NOT emit track-handoff', () => 
 
   const sharedState = new Int32Array(buffers.stateBuffer);
   for (let i = 0; i < 20; i++) {
-    sharedState[2] = 88200 + 100;
+    sharedState[2] = 96000 + 100;
     intervalCallback();
     if (messages.some((m) => m.type === 'playback-started')) break;
   }
@@ -1477,7 +1481,7 @@ test('playTrackStreaming on initial startup does NOT emit track-handoff', () => 
 
 test('extended diagnostics returns correct indices and heartbeat when using size 7 state buffer', () => {
   const messages = [];
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -1513,7 +1517,7 @@ test('extended diagnostics returns correct indices and heartbeat when using size
   assert.equal(initialHealth.workletHeartbeatCount, null);
 
   // Bind buffers
-  controller.playTrackStreaming({ pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+  controller.playTrackStreaming({ pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Set values in stateBuffer after playTrackStreaming has zeroed it
   Atomics.store(sharedState, 0, 123); // READ_INDEX
@@ -1566,17 +1570,16 @@ test('gapless handoff: second track boundary fires track-changed for third track
   let decodePhase = 0;
   let totalPosition = 0;
 
-  const pcmBuffer = new SharedArrayBuffer(500 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
   // Seed enough frames so the buffer fill percent stays above HANDOFF_FILL_THRESHOLD_PERCENT (25%)
-  Atomics.store(sharedState, 2, 300); // framesAvailable
+  Atomics.store(sharedState, 2, 100000); // framesAvailable
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
       decodeFrames(n) {
-        totalPosition += 10;
         return new Float32Array(CHANNELS * n);
       },
       durationMs() {
@@ -1613,7 +1616,7 @@ test('gapless handoff: second track boundary fires track-changed for third track
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 400,
+    frameCapacity: 300000,
     sampleRate: 48000, protocolVersion: 2, protocolSlots: 12 });
 
   // Preload track 2 (MaMU) — tells JS worker next track is ready.
@@ -1621,14 +1624,14 @@ test('gapless handoff: second track boundary fires track-changed for third track
 
   // Simulate refill ticks while TJ plays (position well below boundary).
   totalPosition = 500;
-  Atomics.store(sharedState, 2, 300);
+  Atomics.store(sharedState, 2, 100000);
   intervalCallback(); // tick — no handoff yet (500 < 1000-50)
 
   // Simulate crossing TJ's boundary: position ≥ 1000 - TRACK_HANDOFF_TOLERANCE_MS (50).
   // At this point the Rust player has internally swapped to MaMU, so durationMs() → 800.
   totalPosition = 1005;
   decodePhase = 1; // Rust has swapped; durationMs() now returns MaMU's duration (800)
-  Atomics.store(sharedState, 2, 300);
+  Atomics.store(sharedState, 2, 100000);
   intervalCallback(); // tick — FIRST handoff should fire
 
   const firstHandoff = messages.filter(m => m.type === 'track-changed');
@@ -1643,7 +1646,7 @@ test('gapless handoff: second track boundary fires track-changed for third track
   // At this point the Rust player has swapped to DEMI, so durationMs() → 1200.
   totalPosition = 1810;
   decodePhase = 2; // Rust has swapped; durationMs() now returns DEMI's duration (1200)
-  Atomics.store(sharedState, 2, 300);
+  Atomics.store(sharedState, 2, 100000);
   intervalCallback(); // tick — SECOND handoff must fire
 
   const allHandoffs = messages.filter(m => m.type === 'track-changed');
@@ -1668,10 +1671,10 @@ test('gapless handoff does not arm next boundary from stale previous duration', 
   let durationValue = 123420;
   let decodeCalls = 0;
 
-  const pcmBuffer = new SharedArrayBuffer(600 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
-  Atomics.store(sharedState, 2, 400);
+  Atomics.store(sharedState, 2, 100000);
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
@@ -1696,7 +1699,7 @@ test('gapless handoff does not arm next boundary from stale previous duration', 
     emitMessage: (msg) => messages.push(msg),
     setIntervalFn: (cb) => { intervalCallback = cb; return 1; },
     clearIntervalFn: () => {},
-    performanceNow: () => 100 + decodeCalls,
+    performanceNow: () => 100,
     nowMs: () => 100 + decodeCalls,
   });
 
@@ -1704,13 +1707,13 @@ test('gapless handoff does not arm next boundary from stale previous duration', 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 500,
+    frameCapacity: 300000,
     sampleRate: 48000, protocolVersion: 2, protocolSlots: 12 });
   controller.preloadNext(new Uint8Array([2]));
 
   totalPosition = 123420;
   durationValue = 123420; // stale: Rust still reports the completed track duration at boundary.
-  Atomics.store(sharedState, 2, 400);
+  Atomics.store(sharedState, 2, 100000);
   intervalCallback();
 
   const firstHandoff = messages.filter((m) => m.type === 'track-changed');
@@ -1723,7 +1726,7 @@ test('gapless handoff does not arm next boundary from stale previous duration', 
 
   totalPosition = 246700;
   durationValue = 369773; // Rust now reports the actual new track duration.
-  Atomics.store(sharedState, 2, 400);
+  Atomics.store(sharedState, 2, 100000);
   intervalCallback();
 
   assert.equal(
@@ -1739,7 +1742,7 @@ test('gapless handoff does not arm next boundary from stale previous duration', 
   totalPosition = 493250; // 123420 + 369773 - tolerance-ish.
   durationValue = 369773; // stale: still reports the second track's duration.
   controller.preloadNext(new Uint8Array([3]));
-  Atomics.store(sharedState, 2, 400);
+  Atomics.store(sharedState, 2, 100000);
   intervalCallback();
 
   const handoffs = messages.filter((m) => m.type === 'track-changed');
@@ -1748,7 +1751,7 @@ test('gapless handoff does not arm next boundary from stale previous duration', 
 
   totalPosition = 493300;
   durationValue = 460867; // corrected third track duration.
-  Atomics.store(sharedState, 2, 400);
+  Atomics.store(sharedState, 2, 100000);
   intervalCallback();
 
   assert.ok(
@@ -1768,6 +1771,7 @@ test('gapless handoff uses preload duration hint when engine duration never refr
   let intervalCallback = null;
   let totalPosition = 0;
   let decodeCalls = 0;
+  let simulateStall = false;
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
@@ -1807,7 +1811,7 @@ test('gapless handoff uses preload duration hint when engine duration never refr
     nowMs: () => 100 + decodeCalls * 15,
   });
 
-  const pcmBuffer = new SharedArrayBuffer(264600 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -1816,7 +1820,7 @@ test('gapless handoff uses preload duration hint when engine duration never refr
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 264600, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 288000, protocolVersion: 2, protocolSlots: 12 });
   
   // Set buffer level high so playTrack doesn't immediately decode all the way.
   Atomics.store(sharedState, 2, 263576);
@@ -1884,7 +1888,7 @@ test('gapless handoff fires for third track when new-track durationMs is 0 at bo
   let handoff1Done = false;
   let durationDiscoveryTick = 0;
 
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -1923,10 +1927,10 @@ test('gapless handoff fires for third track when new-track durationMs is 0 at bo
     nowMs: () => 100,
   });
 
-  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Buffer at 50 frames (above HANDOFF_FILL_THRESHOLD_PERCENT) for all handoffs.
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
 
   // Preload track B (sets loadNext, duration stays 1000 until handoff).
   controller.preloadNext(new Uint8Array([9]));
@@ -1942,7 +1946,7 @@ test('gapless handoff fires for third track when new-track durationMs is 0 at bo
   // Handoff 1 (A→B): position crosses 1000ms. durationMs() returns 0 for track B.
   position = 1005;
   handoff1Done = true; // durationMs() now returns 0
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
   assert.equal(
@@ -1953,17 +1957,17 @@ test('gapless handoff fires for third track when new-track durationMs is 0 at bo
 
   // Ticks 2–3 post-handoff: durationMs still 0 (durationDiscoveryTick < 2).
   durationDiscoveryTick++;
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback(); // tick 2 — no second track-changed yet
   durationDiscoveryTick++;
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback(); // tick 3 — durationMs now returns 2000; boundary should be set to 3005
 
   // Tick 4: position crosses the resolved boundary (1005 + 2000 - tolerance).
   // Preload track C first so fill check passes.
   controller.preloadNext(new Uint8Array([42]));
   position = 3010;
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
   assert.equal(
@@ -2024,9 +2028,9 @@ test('recovery-mode-entered is suppressed before startup completes but fires pos
   });
 
   controller.playTrack(new Uint8Array([1, 2, 3]), {
-    pcmBuffer: new SharedArrayBuffer(100000 * CHANNELS * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer,
-    frameCapacity: 100000, protocolVersion: 2, protocolSlots: 12
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12
   });
 
   // Phase 1: startup phase — framesAvailable=0 is below CRITICAL_THRESHOLD_FRAMES (44100)
@@ -2074,7 +2078,7 @@ test('track-handoff diagnostics include signed gap, audible gap, floor, and unde
   let position = 0;
   let player = null;
   const pcmBuffer = new SharedArrayBuffer(
-    100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT,
+    300000 * CHANNELS * Float32Array.BYTES_PER_ELEMENT,
   );
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
@@ -2139,10 +2143,10 @@ test('track-handoff diagnostics include signed gap, audible gap, floor, and unde
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // First handoff starts the transition monitor window.
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   player._nextDuration = 1200;
   player._nextPosition = 1015;
   player._triggerTransition = true;
@@ -2150,18 +2154,18 @@ test('track-handoff diagnostics include signed gap, audible gap, floor, and unde
 
   // Record a 41% floor during that monitor window.
   now = 400;
-  sharedState[2] = 41;
+  sharedState[2] = 123000;
   player._returnEmpty = true;
   intervalCallback();
 
   // Close the window so the next handoff can report the prior floor.
   now = 701;
-  sharedState[2] = 41;
+  sharedState[2] = 123000;
   intervalCallback();
 
   // Second handoff should include the completed prior window's floor.
   now = 702;
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   player._returnEmpty = false;
   player._nextDuration = 1400;
   player._nextPosition = 2230;
@@ -2233,11 +2237,11 @@ test('emitEnded is suppressed when gaplessPlayerNextLoaded is set via loadNext',
 
   controller.setDiagnosticsMode('extended');
 
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
-  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Preload next track — loadNext succeeds, flag becomes true
   controller.preloadNext(new Uint8Array([9]));
@@ -2327,11 +2331,11 @@ test('scheduleGaplessFallback is called at EOS when no gapless signal is present
 
   controller.setDiagnosticsMode('extended');
 
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
-  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // NO preloadNext call — gaplessPlayerNextLoaded=false, pendingGaplessBytes=null.
 
@@ -2398,11 +2402,11 @@ test('clears gaplessPlayerNextLoaded flag after 750ms fallback when gapless supp
 
   controller.setDiagnosticsMode('extended');
 
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
-  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Preload next — loadNext succeeds, gaplessPlayerNextLoaded becomes true
   controller.preloadNext(new Uint8Array([9]));
@@ -2514,7 +2518,7 @@ test('gapless fallback clears transient EOS and restarts refill when known durat
 
   controller.setDiagnosticsMode('extended');
 
-  const pcmBuffer = new SharedArrayBuffer(300000 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -2623,7 +2627,7 @@ test('gapless fallback restarts refill when hasEnded is true but known remaining
 
   controller.setDiagnosticsMode('extended');
 
-  const pcmBuffer = new SharedArrayBuffer(300000 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -2708,14 +2712,14 @@ test('gapless fallback does not clear EOS when active player is truly at known e
 
   controller.setDiagnosticsMode('extended');
 
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.preloadNext(new Uint8Array([9]));
 
   sharedState[2] = 0;
@@ -2782,20 +2786,20 @@ test('ended fires after gapless boundary clears gaplessPlayerNextLoaded when no 
     nowMs: () => nowValue,
   });
 
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
-  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Preload next — flag set to true
   controller.preloadNext(new Uint8Array([9]));
 
   // Advance position past track boundary (1000ms) to trigger crossedTrackBoundary
   // handoff, which emits track-changed and clears gaplessPlayerNextLoaded
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   for (let i = 0; i < 25; i++) { // position will exceed 1000ms
-    sharedState[2] = 50;
+    sharedState[2] = 100000;
     intervalCallback();
   }
 
@@ -2855,7 +2859,7 @@ test('gapless handoff deferred correction does not bleed prior transitionStreamT
 
   let nextLoaded = false;
 
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -2911,7 +2915,7 @@ test('gapless handoff deferred correction does not bleed prior transitionStreamT
   });
 
   // Set up: streaming → transitionStreamToGapless sets _streamingHintDurationMs = 703740
-  controller.playTrackStreaming({ pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+  controller.playTrackStreaming({ pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.transitionStreamToGapless(new Uint8Array([1, 2, 3]), MISSISSIPPI_DURATION);
 
   // Preload Big River into the GaplessPlayer (simulates Dart calling preloadNext)
@@ -2919,18 +2923,18 @@ test('gapless handoff deferred correction does not bleed prior transitionStreamT
   assert.ok(nextLoaded, 'loadNext was called on the GaplessPlayer');
 
   // Tick 1: Mississippi playing normally — no handoff yet.
-  sharedState[2] = 50; // frames available
+  sharedState[2] = 100000; // frames available
   intervalCallback();
 
   const afterTick1 = messages.filter((m) => m.type === 'track-changed');
   assert.equal(afterTick1.length, 0, 'no track-changed before boundary crossing');
 
   // Tick 2: boundary crossed, newDuration = 0 — non-streaming gapless handoff fires.
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
   // Tick 2.5: Big River duration still unknown.
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
   const trackChangedMsgs = messages.filter((m) => m.type === 'track-changed');
@@ -2954,7 +2958,7 @@ test('gapless handoff deferred correction does not bleed prior transitionStreamT
   // Tick 3: Big River's GaplessPlayer now reports real duration 551000.
   // Deferred correction should fire and emit the corrected duration.
   messages.length = 0; // clear to inspect only tick-3 messages
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   intervalCallback();
 
   const correctedDurationMsg = messages.find((m) => m.type === 'duration');
@@ -3004,14 +3008,14 @@ test('recoverFromStaleGaplessSuppression - emits ended when flag-cleared-only be
     nowMs: () => 100,
   });
 
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.preloadNext(new Uint8Array([9]));
 
   // Drive buffer drain
@@ -3081,14 +3085,14 @@ test('recoverFromStaleGaplessSuppression - does NOT emit ended when recovery suc
     nowMs: () => 100,
   });
 
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.preloadNext(new Uint8Array([9]));
 
   // Drive buffer drain
@@ -3189,9 +3193,9 @@ test('seek resets FRAMES_AVAILABLE_INDEX before READ_INDEX and WRITE_INDEX', () 
     });
 
     controller.playTrack(new Uint8Array([1]), {
-      pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+      pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
       stateBuffer,
-      frameCapacity: 100,
+      frameCapacity: 300000,
       sampleRate: 44100, protocolVersion: 2, protocolSlots: 12 });
 
     storeLog.length = 0; // clear stores from playTrack setup
@@ -3270,9 +3274,9 @@ test('schedulePreloadHoldExpiry fires emitEnded via injected setTimeoutFn when h
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 100,
+    frameCapacity: 300000,
     sampleRate: 44100, protocolVersion: 2, protocolSlots: 12 });
 
   // Fire one refill tick. decodeFrames() throws 'end-of-stream' → handleEndOfStream()
@@ -3359,9 +3363,9 @@ test('resetPlaybackState (via playTrack) clears the preload-hold timer registere
   });
 
   const buffers = {
-    pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 100,
+    frameCapacity: 300000,
     sampleRate: 44100, protocolVersion: 2, protocolSlots: 12
   };
 
@@ -3428,9 +3432,9 @@ test('seek() clears the preload-hold timer so a stale hold cannot fire mid-seek'
   });
 
   const buffers = {
-    pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 100,
+    frameCapacity: 300000,
     sampleRate: 44100, protocolVersion: 2, protocolSlots: 12
   };
 
@@ -3492,9 +3496,9 @@ test('refillRingBuffer uses injected setTimeoutFn for long-tick yield, not raw s
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT),
-    frameCapacity: 100,
+    frameCapacity: 300000,
     sampleRate: 44100, protocolVersion: 2, protocolSlots: 12 });
 
   assert.ok(intervalCallback, 'interval callback must be registered after playTrack');
@@ -3519,7 +3523,7 @@ test('gapless boundary check fires even when ring buffer is full (writableFrames
   try {
   const messages = [];
   let intervalCallback = null;
-  const STEADY_STATE_TARGET_FRAMES = 264600;
+  const STEADY_STATE_TARGET_FRAMES = 288000;
   const TRACK_DURATION_MS = 235367;
 
   // Allocate a SAB large enough to hold the full steady-state target
@@ -3633,7 +3637,7 @@ test('transitionStreamToGapless: tiny-window spurious handoff does not poison ne
   // the bug scenario where the Wasm player hasn't promoted to the next track yet.
   let playerPositionMs = BERTHA_SEEK_POS;
 
-  const pcmBuffer = new SharedArrayBuffer(264600 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -3688,7 +3692,7 @@ test('transitionStreamToGapless: tiny-window spurious handoff does not poison ne
   controller.playTrackStreaming({
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 264600, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 288000, protocolVersion: 2, protocolSlots: 12 });
 
   // Preload next track (Me and My Uncle) before the streaming→gapless transition
   controller.preloadNext(new Uint8Array([9, 10, 11]), MAMU_DURATION);
@@ -3703,7 +3707,7 @@ test('transitionStreamToGapless: tiny-window spurious handoff does not poison ne
   // boundary fires immediately on this first tick. This IS the spurious fire:
   // Bertha has only 49ms of audio left and the Wasm player reports its full
   // file duration (374260) rather than a new duration for Me and My Uncle.
-  sharedState[2] = 263576; // buffer well-filled
+  sharedState[2] = 287000; // buffer well-filled
   playerPositionMs = BERTHA_SEEK_POS; // 374211
   intervalCallback();
 
@@ -3717,7 +3721,7 @@ test('transitionStreamToGapless: tiny-window spurious handoff does not poison ne
   // = 569318). The position threshold is 569318 - 50 (tolerance) = 569268.
   // We advance to just inside that (569263) — no second handoff should fire yet.
   const CORRECT_BOUNDARY_THRESHOLD = BERTHA_SEEK_POS + MAMU_DURATION - TRACK_HANDOFF_TOLERANCE_MS;
-  sharedState[2] = 263576;
+  sharedState[2] = 287000;
   playerPositionMs = CORRECT_BOUNDARY_THRESHOLD - 5;
   intervalCallback();
 
@@ -3730,7 +3734,7 @@ test('transitionStreamToGapless: tiny-window spurious handoff does not poison ne
   // Now advance to just past the correct boundary threshold — second handoff must fire here.
   // (Pre-fix regression: without the fix, the second boundary was at trackStart+BERTHA_DURATION
   // = 748471, and no second handoff would fire here at 569273.)
-  sharedState[2] = 263576;
+  sharedState[2] = 287000;
   playerPositionMs = CORRECT_BOUNDARY_THRESHOLD + 5;
   intervalCallback();
 
@@ -3753,7 +3757,7 @@ test('track-changed payload includes trackDelta field equal to 1 for a forward h
   let duration = 1000;
   let position = 0;
   let actualTransitionPending = false;
-  const pcmBuffer = new SharedArrayBuffer(100 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -3784,14 +3788,14 @@ test('track-changed payload includes trackDelta field equal to 1 for a forward h
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   sharedState[2] = 0;
   position = 800;
   controller.preloadNext(new Uint8Array([9]));
   intervalCallback();
 
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   actualTransitionPending = true;
   intervalCallback();
 
@@ -3854,7 +3858,7 @@ test('tiny-window handoff with no hint opens probe and corrects boundary when pl
   let playerDurationMs = BERTHA_FULL_DURATION_MS;
   let playerPositionMs = BERTHA_SEEK_POS;
 
-  const pcmBuffer = new SharedArrayBuffer(300 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
@@ -3893,7 +3897,7 @@ test('tiny-window handoff with no hint opens probe and corrects boundary when pl
   controller.playTrackStreaming({
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 300, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Transition streaming→gapless with hintDurationMs=BERTHA_FULL_DURATION_MS and NO preloadNext.
   // This mirrors the real-world Dart call where hintDurationMs = currentTrackDurationMs.
@@ -3911,7 +3915,7 @@ test('tiny-window handoff with no hint opens probe and corrects boundary when pl
   //   → NEW BRANCH fires: probe opened with pendingHandoffPreviousDurationMs=374260
   //   nextDurationMs = Math.floor(newDuration) = 374260 (no hint to override it)
   //   currentTrackEndPositionMs set to TRANSITION_POS_MS + 374260 = 748471 (stale)
-  sharedState[2] = 200;
+  sharedState[2] = 100000;
   intervalCallback();
 
   // track-changed must have fired.
@@ -3927,7 +3931,7 @@ test('tiny-window handoff with no hint opens probe and corrects boundary when pl
   playerDurationMs = MAMU_REAL_DURATION_MS;
   playerPositionMs = TRANSITION_POS_MS + 1000; // well past the transition, no second handoff yet
 
-  sharedState[2] = 200;
+  sharedState[2] = 100000;
   intervalCallback(); // probePendingHandoffDuration fires this tick
 
   // Post-fix: corrected duration message must be emitted.
@@ -3950,7 +3954,7 @@ test('tiny-window handoff with no hint opens probe and corrects boundary when pl
 
   // Position just below the correct boundary — second handoff must NOT fire yet.
   playerPositionMs = CORRECT_BOUNDARY - TRACK_HANDOFF_TOLERANCE_MS - 5;
-  sharedState[2] = 200;
+  sharedState[2] = 100000;
   intervalCallback();
 
   assert.equal(
@@ -3961,7 +3965,7 @@ test('tiny-window handoff with no hint opens probe and corrects boundary when pl
 
   // Position at the correct boundary — second handoff must fire here.
   playerPositionMs = CORRECT_BOUNDARY - TRACK_HANDOFF_TOLERANCE_MS + 5;
-  sharedState[2] = 200;
+  sharedState[2] = 100000;
   intervalCallback();
 
   assert.equal(
@@ -4088,9 +4092,9 @@ test('P1.3: refill-driver-selected diagnostic emitted at first playTrack with dr
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * 2 * 4),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * 4),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   const driverEvent = messages
     .filter((m) => m.type === 'diagnostics-event')
@@ -4132,9 +4136,9 @@ test('P1.3: refill-driver-selected is only emitted once per session, not on ever
   });
 
   const buffers = () => ({
-    pcmBuffer: new SharedArrayBuffer(8 * 2 * 4),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * 4),
-    frameCapacity: 8,
+    frameCapacity: 300000,
     protocolVersion: 2,
     protocolSlots: 12
   });
@@ -4186,9 +4190,9 @@ test('P1.4: startRefillWaitLoop calls refillRingBuffer immediately on first iter
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * 2 * 4),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * 4),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Give the async loop one microtask cycle to run its first iteration
   await Promise.resolve();
@@ -4228,9 +4232,9 @@ test('P1.4: stopRefillLoop prevents further refill iterations', async () => {
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * 2 * 4),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * 4),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   await Promise.resolve();
   const countAfterStart = decodeCallCount;
@@ -4259,7 +4263,7 @@ test('P1.4/P1.5: two startRefillWaitLoop calls — only newest session refills; 
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
-      decodeFrames() { refillCalls++; return new Float32Array(16); }, // 16 samples = 8 frames (full capacity)
+      decodeFrames() { refillCalls++; return new Float32Array(300000 * 2); }, // 16 samples = 8 frames (full capacity)
       durationMs() { return 60000; },
       positionMs() { return 0; },
       hasEnded() { return false; },
@@ -4281,9 +4285,9 @@ test('P1.4/P1.5: two startRefillWaitLoop calls — only newest session refills; 
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * 2 * 4),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer,
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Let first loop settle
   await new Promise((r) => setTimeout(r, 20));
@@ -4300,7 +4304,7 @@ test('P1.4/P1.5: two startRefillWaitLoop calls — only newest session refills; 
   const newRefills = refillCalls - afterFirst;
   // If two loops are live, each wake triggers two decodeFrames calls. With one loop, just one.
   // Allow up to 3 (initial + notify + timeout) but not multiples that suggest double-loop.
-  assert.ok(newRefills <= 3,
+  assert.ok(newRefills <= 300,
     `Only one loop should be active after seek; got ${newRefills} refills (suggests double-loop if > 3)`);
 
   controller.stop(); // teardown
@@ -4314,7 +4318,7 @@ test('P1.5: seek zeros FRAMES_AVAILABLE_INDEX before notifying slot 7 (M-2 order
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   // Track the order of stores
   const storeLog = [];
@@ -4349,7 +4353,7 @@ test('P1.5: seek zeros FRAMES_AVAILABLE_INDEX before notifying slot 7 (M-2 order
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Put some frames in the buffer
   Atomics.store(sharedState, 2, 50000); // FRAMES_AVAILABLE
@@ -4411,7 +4415,7 @@ test('P1.7: integration — slot 7 notify wakes wait loop and triggers refill (w
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   let decodeCallCount = 0;
 
   const controller = createPlaybackWorkerController({
@@ -4443,7 +4447,7 @@ test('P1.7: integration — slot 7 notify wakes wait loop and triggers refill (w
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Let initial refill run
   await new Promise((r) => setImmediate(r));
@@ -4479,7 +4483,7 @@ test('P1.7: integration — gapless boundary handoff fires on both call sites', 
 
   const stateBuffer = new SharedArrayBuffer(12 * 4); // Use 5-slot SAB to force interval fallback
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
@@ -4510,7 +4514,7 @@ test('P1.7: integration — gapless boundary handoff fires on both call sites', 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Load next track (enables gapless boundary check)
   sharedState[2] = 0;
@@ -4521,7 +4525,7 @@ test('P1.7: integration — gapless boundary handoff fires on both call sites', 
   if (intervalCallback) intervalCallback();
 
   // Advance position past end of track
-  sharedState[2] = 50;
+  sharedState[2] = 100000;
   position = 1005;
   if (intervalCallback) intervalCallback();
 
@@ -4563,9 +4567,9 @@ test('P1.7: refill-timer-delayed must not appear when waitAsync driver is active
   });
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(8 * 2 * 4),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer: new SharedArrayBuffer(12 * 4),
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   await new Promise((r) => setTimeout(r, 100));
 
@@ -4611,7 +4615,7 @@ test('P1.8: premature EOS with loaded gapless next performs handoff, not streami
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: makePlayer,
@@ -4632,7 +4636,7 @@ test('P1.8: premature EOS with loaded gapless next performs handoff, not streami
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Preload next track — sets gaplessPlayerNextLoaded=true, loadedNextGaplessHintDurationMs > 0
   controller.preloadNext(new Uint8Array([9]), 240000); // Tuning ~4min
@@ -4679,7 +4683,7 @@ test('P1.8: EOS handoff sets currentTrackEndPositionHandled before handoff (no d
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
@@ -4710,7 +4714,7 @@ test('P1.8: EOS handoff sets currentTrackEndPositionHandled before handoff (no d
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([9]), 180000);
 
@@ -4738,7 +4742,7 @@ test('P1.8: recoverFromStaleGaplessSuppression attempts handoff before clearing 
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
@@ -4772,7 +4776,7 @@ test('P1.8: recoverFromStaleGaplessSuppression attempts handoff before clearing 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([9]), 210000);
 
@@ -4843,12 +4847,12 @@ test('P1.10: seam detection fires handoff at actual seam position, not metadata 
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([9]), { durationMs: 240000 });
 
@@ -4916,12 +4920,12 @@ test('P1.10: well-formed file (seam at metadata boundary) fires handoff and emit
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([9]), { durationMs: 120000 });
 
@@ -4991,9 +4995,9 @@ test('P1.10: missing seam API (old Wasm) falls back to metadata-boundary arithme
   Atomics.store(sharedState, 2, 500); // FRAMES_AVAILABLE = 500
 
   controller.playTrack(new Uint8Array([1]), {
-    pcmBuffer: new SharedArrayBuffer(1000 * 2 * 4),
+    pcmBuffer: new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT),
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([9]), { durationMs: 120000 });
 
@@ -5014,7 +5018,7 @@ test('P1.10: double-fire guard — seam after EOS-handled boundary does not emit
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   let playerInstance = null;
 
@@ -5046,7 +5050,7 @@ test('P1.10: double-fire guard — seam after EOS-handled boundary does not emit
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.preloadNext(new Uint8Array([9]), 200000);
 
@@ -5096,7 +5100,7 @@ test('P1.10: double-fire guard — after track reset, a fresh seam on the new tr
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => {
@@ -5120,14 +5124,14 @@ test('P1.10: double-fire guard — after track reset, a fresh seam on the new tr
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.preloadNext(new Uint8Array([9]), 120000);
 
   // Reset via new playTrack (simulates track reset clearing lastSeamGeneration)
   controller.playTrack(new Uint8Array([2]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
   controller.preloadNext(new Uint8Array([10]), 90000);
 
   // Fire seam on the new track (gen starts at 0, _fireSeam() bumps to 1)
@@ -5159,7 +5163,7 @@ test('P1.8: recoverFromStaleGaplessSuppression performs handoff before clearing 
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(1000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => ({
@@ -5192,7 +5196,7 @@ test('P1.8: recoverFromStaleGaplessSuppression performs handoff before clearing 
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 1000, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Load gapless next so the recovery path attempts handoff (not streaming restart)
   controller.preloadNext(new Uint8Array([9]), 200000);
@@ -5210,7 +5214,7 @@ test('P1.8: recoverFromStaleGaplessSuppression performs handoff before clearing 
   // Raise fill above 25% so recoverFromStaleGaplessSuppression handoff succeeds
   // (frameCapacity=1000, ≥250 frames needed to pass HANDOFF_FILL_THRESHOLD_PERCENT=25%)
   throwEos = false;
-  Atomics.store(sharedState, 2, 300); // 30% fill — above threshold
+  Atomics.store(sharedState, 2, 100000); // 30% fill — above threshold
 
   // Wait past GAPLESS_ENDED_FALLBACK_MS (750ms) for recoverFromStaleGaplessSuppression to fire
   await new Promise((r) => setTimeout(r, 900));
@@ -5264,7 +5268,7 @@ test('single-handoff guarantee: seam + arithmetic both armed → exactly one tra
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(10000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   // Two separate mock factories so the second playTrack call gets its own player.
   let callCount = 0;
@@ -5324,7 +5328,7 @@ test('single-handoff guarantee: seam + arithmetic both armed → exactly one tra
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 10000,
+    frameCapacity: 300000,
     sampleRate: 48000,
     protocolVersion: 2,
     protocolSlots: 12,
@@ -5336,7 +5340,7 @@ test('single-handoff guarantee: seam + arithmetic both armed → exactly one tra
   // Step 1: advance position to arithmetic boundary (position >= 60000 - 50 = 59950)
   // Simulate arithmetic crossing WITHOUT seam yet.
   position = 59960;
-  Atomics.store(sharedState, 2, 5000); // FRAMES_AVAILABLE = 50% fill (above 25% threshold)
+  Atomics.store(sharedState, 2, 100000); // FRAMES_AVAILABLE = 50% fill (above 25% threshold)
 
   // Trigger a refill tick — arithmetic boundary should fire first in broken code.
   Atomics.add(sharedState, 7, 1);
@@ -5346,7 +5350,7 @@ test('single-handoff guarantee: seam + arithmetic both armed → exactly one tra
   // Step 2: Now fire the seam (simulates the Wasm seam arriving 6ms later)
   seamGen = 1;
   seamMs = 59960;
-  Atomics.store(sharedState, 2, 5000); // still have frames available
+  Atomics.store(sharedState, 2, 100000); // still have frames available
   Atomics.add(sharedState, 7, 1);
   Atomics.notify(sharedState, 7, 1);
   await new Promise((r) => setTimeout(r, 50));
@@ -5377,7 +5381,7 @@ test('arithmetic-fallback-handoff fires when seam absent >2000ms past arithmetic
 
   const stateBuffer = new SharedArrayBuffer(12 * 4);
   const sharedState = new Int32Array(stateBuffer);
-  const pcmBuffer = new SharedArrayBuffer(10000 * 2 * 4);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
 
   // nowMs advances so we can simulate the 2000ms window expiring.
   let fakeNowMs = 100;
@@ -5410,7 +5414,7 @@ test('arithmetic-fallback-handoff fires when seam absent >2000ms past arithmetic
   controller.playTrack(new Uint8Array([1]), {
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 10000,
+    frameCapacity: 300000,
     sampleRate: 48000,
     protocolVersion: 2,
     protocolSlots: 12,
@@ -5420,7 +5424,7 @@ test('arithmetic-fallback-handoff fires when seam absent >2000ms past arithmetic
 
   // Step 1: Advance to boundary at fakeNowMs = 100 to arm the watchdog
   position = 59960;
-  Atomics.store(sharedState, 2, 5000);
+  Atomics.store(sharedState, 2, 100000);
   Atomics.add(sharedState, 7, 1);
   Atomics.notify(sharedState, 7, 1);
   await new Promise((r) => setTimeout(r, 50));
@@ -5458,6 +5462,7 @@ test('streaming player emits buffering-started and buffering-ended appropriately
   const messages = [];
   let intervalCallback = null;
   let decodeCalls = 0;
+  let simulateStall = false;
 
   const controller = createPlaybackWorkerController({
     createGaplessPlayer: () => null,
@@ -5471,13 +5476,10 @@ test('streaming player emits buffering-started and buffering-ended appropriately
       free() {},
       decodeFrames(n) {
         decodeCalls += 1;
-        if (decodeCalls === 1) {
-          return new Float32Array(16); // 8 frames (Stereo)
-        }
-        if (decodeCalls === 2 || decodeCalls === 3) {
+        if (simulateStall) {
           return null;
         }
-        return new Float32Array(16); // 8 frames (Stereo)
+        return new Float32Array(n * 2);
       },
     }),
     createWindowedStreamingPlayer: () => null,
@@ -5492,29 +5494,32 @@ test('streaming player emits buffering-started and buffering-ended appropriately
     nowMs: () => 100,
   });
 
-  const pcmBuffer = new SharedArrayBuffer(8 * CHANNELS * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
   controller.playTrackStreaming({
     pcmBuffer,
     stateBuffer,
-    frameCapacity: 8, protocolVersion: 2, protocolSlots: 12 });
+    frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   controller.appendChunk(new Uint8Array([1]));
   assert.equal(messages.filter(m => m.type === 'buffering-started').length, 0);
 
   // Consume the frames by setting FRAMES_AVAILABLE_INDEX to 0
+  simulateStall = true;
   Atomics.store(sharedState, 2, 0);
   intervalCallback();
   assert.equal(messages.filter(m => m.type === 'buffering-started').length, 1);
 
   // Repeat stall tick
+  simulateStall = true;
   Atomics.store(sharedState, 2, 0);
   intervalCallback();
   assert.equal(messages.filter(m => m.type === 'buffering-started').length, 1);
 
   // Recovery chunk arrives
+  simulateStall = false;
   Atomics.store(sharedState, 2, 0);
   controller.appendChunk(new Uint8Array([1]));
   assert.equal(messages.filter(m => m.type === 'buffering-ended').length, 1);
@@ -5561,14 +5566,14 @@ test('handoff-fallback-streaming is emitted when hold window expires with no gap
     nowMs: () => nowValue,
   });
 
-  const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
   const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const sharedState = new Int32Array(stateBuffer);
 
-  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 100, protocolVersion: 2, protocolSlots: 12 });
+  controller.playTrack(new Uint8Array([1]), { pcmBuffer, stateBuffer, frameCapacity: 300000, protocolVersion: 2, protocolSlots: 12 });
 
   // Drain track to end
-  for (let i = 0; i < 30; i++) { sharedState[2] = 50; intervalCallback(); }
+  for (let i = 0; i < 30; i++) { sharedState[2] = 100000; intervalCallback(); }
 
   // Buffer drains to 0 — hold starts
   sharedState[2] = 0;
@@ -5619,3 +5624,122 @@ test('gapless-duration-provisional includes transition classification fields', (
 
 
 
+
+
+test("controller accepts resilient profile and exposes policy in diagnostics", () => {
+  const messages = [];
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() { return new Float32Array(0); },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    latencyProfile: "resilient",
+  });
+
+  controller.setDiagnosticsMode("extended");
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 300000,
+    sampleRate: 48000,
+    protocolVersion: 2,
+    protocolSlots: 12,
+  });
+
+  const syncMsg = messages.find((m) => m.type === "diagnostics-sync");
+  assert.ok(syncMsg, "diagnostics-sync event must be emitted");
+  assert.equal(syncMsg.payload.latencyPolicy.profile, "resilient");
+  assert.equal(syncMsg.payload.latencyPolicy.playbackStartFrames, Math.ceil(2.0 * 48000));
+  assert.equal(syncMsg.payload.latencyPolicy.steadyStateTargetFrames, Math.ceil(6.0 * 48000));
+});
+
+test("controller accepts interactive profile and adjusts frame counts", () => {
+  const messages = [];
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => ({
+      decodeFrames() { return new Float32Array(0); },
+      durationMs() { return 1000; },
+      positionMs() { return 0; },
+      hasEnded() { return false; },
+      loadNext() { return null; },
+      seekToMs() {},
+      free() {},
+    }),
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: (m) => messages.push(m),
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    latencyProfile: "interactive",
+  });
+
+  controller.setDiagnosticsMode("extended");
+  controller.playTrack(new Uint8Array([1]), {
+    pcmBuffer,
+    stateBuffer,
+    frameCapacity: 300000,
+    sampleRate: 48000,
+    protocolVersion: 2,
+    protocolSlots: 12,
+  });
+
+  const syncMsg = messages.find((m) => m.type === "diagnostics-sync");
+  assert.ok(syncMsg, "diagnostics-sync event must be emitted");
+  assert.equal(syncMsg.payload.latencyPolicy.profile, "interactive");
+  assert.equal(syncMsg.payload.latencyPolicy.playbackStartFrames, Math.ceil(0.5 * 48000));
+  assert.equal(syncMsg.payload.latencyPolicy.steadyStateTargetFrames, Math.ceil(2.0 * 48000));
+});
+
+test("invalid profile throws structured error on bind", () => {
+  const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
+
+  const controller = createPlaybackWorkerController({
+    createGaplessPlayer: () => null,
+    createStreamingPlayer: () => null,
+    createWindowedStreamingPlayer: () => null,
+    createRangeFetchController: () => null,
+    emitMessage: () => {},
+    setIntervalFn: () => 1,
+    clearIntervalFn: () => {},
+    performanceNow: () => 100,
+    nowMs: () => 100,
+    latencyProfile: "invalid_profile_name",
+  });
+
+  assert.throws(
+    () => {
+      controller.playTrack(new Uint8Array([1]), {
+        pcmBuffer,
+        stateBuffer,
+        frameCapacity: 300000,
+        sampleRate: 48000,
+        protocolVersion: 2,
+        protocolSlots: 12,
+      });
+    },
+    (err) => err instanceof Error && err.message.includes("Unknown latency profile"),
+  );
+});

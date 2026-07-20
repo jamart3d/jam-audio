@@ -19,6 +19,7 @@
 //   all port transfers MUST go through the main thread (bridge).
 // Wiring confirmed functional via node mock environment (S2 PASS).
 
+import { computeBufferPolicy } from './buffer_policy.js';
 import {
   createBaseWorkerDiagnostics,
   createSharedPlaybackWorkerControllerCore,
@@ -52,12 +53,13 @@ const SILENT_FRAMES_INDEX = 10;
 const EPOCH_INDEX = 11;
 // protocol:end
 const CHANNELS = 2;
-const REFILL_CHUNK_FRAMES = 1024;
-const REFILL_CHUNK_FRAMES_RECOVERY = 4096;
+// Replaced by computeBufferPolicy — kept for reference
+// const REFILL_CHUNK_FRAMES = 1024;
+// const REFILL_CHUNK_FRAMES_RECOVERY = 4096;
+// const PLAYBACK_START_FRAMES = 88200;       // 2.0s at 44.1kHz, 1.84s at 48kHz
+// const STEADY_STATE_TARGET_FRAMES = 264600; // 6.0s at 44.1kHz, ~5.5s at 48kHz
+// const CRITICAL_THRESHOLD_FRAMES = 44100;   // 1.0s at 44.1kHz, ~0.92s at 48kHz
 const REFILL_INTERVAL_MS = 15;
-const PLAYBACK_START_FRAMES = 88200;
-const STEADY_STATE_TARGET_FRAMES = 264600; // ~5.5s at 48kHz
-const CRITICAL_THRESHOLD_FRAMES = 44100; // ~1s at 44.1kHz
 const REFILL_MAX_TICK_DURATION_MS = 20;
 const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 const RESUME_THRESHOLD_BYTES = 2 * 1024 * 1024;
@@ -85,6 +87,7 @@ function createPlaybackWorkerController({
   workletPort = null,          // S2: MessageChannel port1, transferred from bridge → worker → here
   onWorkletPortReady = null,   // S2: callback so tests can verify the port was received
   waitTimeoutMs = 1000,        // Finding 5: injected so tests use 10ms and never hang
+  latencyProfile = 'resilient',
 }) {
   const workletPortState = createWorkletPortState({
     initialPort: workletPort,
@@ -169,6 +172,7 @@ function createPlaybackWorkerController({
   let pendingGaplessFallbackRecoveryConfirmation = false;
   let pendingGaplessSampleRate = 0;
   let activeSampleRate = 48000;
+  let activePolicy = null;
   const core = createSharedPlaybackWorkerControllerCore({
     emitMessage,
     clearIntervalFn,
@@ -184,6 +188,16 @@ function createPlaybackWorkerController({
         fetchToDecodeLagMs: diagnostics.fetchToDecodeLagMs,
         resumeAfterStallLatencyMs: diagnostics.resumeAfterStallLatencyMs,
       };
+      if (activePolicy) {
+        payload.latencyPolicy = {
+          profile: activePolicy.profile,
+          playbackStartFrames: activePolicy.playbackStartFrames,
+          steadyStateTargetFrames: activePolicy.steadyStateTargetFrames,
+          criticalThresholdFrames: activePolicy.criticalThresholdFrames,
+          startupDurationSec: activePolicy.startupDurationSec,
+          steadyDurationSec: activePolicy.steadyDurationSec,
+        };
+      }
       if (diagnosticsMode === 'extended') {
         if (sharedState) {
           payload.readIndex = Atomics.load(sharedState, READ_INDEX);
@@ -272,7 +286,7 @@ function createPlaybackWorkerController({
       isBelowLowWaterMark = false;
     }
 
-    const isCritical = framesAvailable < CRITICAL_THRESHOLD_FRAMES && frameCapacity > 0;
+    const isCritical = activePolicy ? framesAvailable < activePolicy.criticalThresholdFrames : false;
     if (isCritical !== diagnostics.recoveryModeActive) {
       diagnostics.recoveryModeActive = isCritical;
       if (isCritical && startupCompleted) {
@@ -880,18 +894,20 @@ function createPlaybackWorkerController({
     return refillDriver;
   }
 
-  function bindSharedBuffers({ pcmBuffer, stateBuffer, frameCapacity: nextCapacity, protocolVersion, protocolSlots }) {
+  function bindSharedBuffers({ pcmBuffer, stateBuffer, frameCapacity: nextCapacity, sampleRate: nextSampleRate = 48000, protocolVersion, protocolSlots }) {
     const stateLen = stateBuffer.byteLength / Int32Array.BYTES_PER_ELEMENT;
     if (protocolVersion !== PROTOCOL_VERSION || protocolSlots !== PROTOCOL_SLOTS || stateLen !== PROTOCOL_SLOTS) {
       throw new Error(`Protocol mismatch in worker. Expected version ${PROTOCOL_VERSION} with ${PROTOCOL_SLOTS} slots, but received version ${protocolVersion} with ${protocolSlots} slots (stateBuffer length: ${stateLen}).`);
     }
     frameCapacity = nextCapacity;
+    activeSampleRate = nextSampleRate;
+    activePolicy = computeBufferPolicy({ sampleRate: activeSampleRate, profile: latencyProfile, frameCapacity });
     sharedSamples = new Float32Array(pcmBuffer);
     sharedState = new Int32Array(stateBuffer);
     const epoch = Atomics.load(sharedState, EPOCH_INDEX);
     sharedState.fill(0);
     Atomics.store(sharedState, EPOCH_INDEX, epoch + 1);
-    Atomics.store(sharedState, TARGET_FRAMES_INDEX, STEADY_STATE_TARGET_FRAMES);
+    Atomics.store(sharedState, TARGET_FRAMES_INDEX, activePolicy.steadyStateTargetFrames);
     Atomics.store(sharedState, REFILL_REQUEST_INDEX, 0); // reset generation counter
     updateBufferMetrics();
     selectRefillDriver();
@@ -970,7 +986,7 @@ function createPlaybackWorkerController({
     const activePlayer = currentPlayer();
     const framesAvailable = optionalFrames ?? diagnostics.framesAvailable;
     const bufferReady =
-      framesAvailable >= PLAYBACK_START_FRAMES ||
+      framesAvailable >= (activePolicy ? activePolicy.playbackStartFrames : Infinity) ||
       (((streamingFinalized || playerHasEnded(player)) && framesAvailable > 0));
 
     if (!activePlayer || startupCompleted || !bufferReady) {
@@ -1379,10 +1395,10 @@ function createPlaybackWorkerController({
 
     while (true) {
       const framesAvailable = Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX);
-      const currentTargetFrames = startupCompleted ? STEADY_STATE_TARGET_FRAMES : frameCapacity;
+      const currentTargetFrames = startupCompleted ? (activePolicy ? activePolicy.steadyStateTargetFrames : frameCapacity) : frameCapacity;
 
-      const isCritical = framesAvailable < CRITICAL_THRESHOLD_FRAMES;
-      const currentChunkSize = isCritical ? REFILL_CHUNK_FRAMES_RECOVERY : REFILL_CHUNK_FRAMES;
+      const isCritical = activePolicy ? framesAvailable < activePolicy.criticalThresholdFrames : false;
+      const currentChunkSize = isCritical ? (activePolicy ? activePolicy.refillChunkFramesRecovery : 4096) : (activePolicy ? activePolicy.refillChunkFrames : 1024);
 
       const writableFrames = Math.min(
         currentTargetFrames - framesAvailable,
@@ -1639,7 +1655,7 @@ function createPlaybackWorkerController({
       );
       emitMessage({ type: 'position', positionMs: currentPositionMs });
 
-      if (!startupCompleted && Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX) >= PLAYBACK_START_FRAMES) {
+      if (!startupCompleted && Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX) >= (activePolicy ? activePolicy.playbackStartFrames : Infinity)) {
         maybeStartPlaybackIfBuffered(Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX));
       }
 

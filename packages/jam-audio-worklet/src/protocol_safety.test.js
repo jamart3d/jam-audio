@@ -291,7 +291,7 @@ test('10. Blocker verification: bridge snapshot and handoff diagnostics read und
     let duration = 1000;
     let position = 0;
     let player = null;
-    const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+    const pcmBuffer = new SharedArrayBuffer(300000 * 2 * Float32Array.BYTES_PER_ELEMENT);
     
     const controller = createPlaybackWorkerController({
       createGaplessPlayer: () => {
@@ -332,7 +332,7 @@ test('10. Blocker verification: bridge snapshot and handoff diagnostics read und
     controller.playTrack(new Uint8Array([1]), {
       pcmBuffer,
       stateBuffer,
-      frameCapacity: 100,
+      frameCapacity: 300000,
       protocolVersion: 2,
       protocolSlots: 12,
     });
@@ -367,7 +367,7 @@ test('10. Blocker verification: bridge snapshot and handoff diagnostics read und
     assert.equal(diag.silentFrameCount, 256, 'Controller diagnostics silentFrameCount reads authoritatively from SAB');
 
     // 4. Verify track-handoff diagnostics event reports the correct underrunDelta
-    Atomics.store(state, 2, 50);
+    Atomics.store(state, 2, 100000);
     player._nextDuration = 1200;
     player._nextPosition = 1015;
     player._triggerTransition = true;
@@ -375,7 +375,7 @@ test('10. Blocker verification: bridge snapshot and handoff diagnostics read und
 
     // Call intervalCallback mid-window to record the candidate floor
     now = 400;
-    Atomics.store(state, 2, 41);
+    Atomics.store(state, 2, 123000);
     intervalCallback();
 
     // Starve more (increment underrun count by 3, making total = 5) before window closes
@@ -383,12 +383,12 @@ test('10. Blocker verification: bridge snapshot and handoff diagnostics read und
 
     // Close the window so the next handoff can report the prior floor.
     now = 701;
-    Atomics.store(state, 2, 41);
+    Atomics.store(state, 2, 123000);
     intervalCallback();
 
     // Close transition monitor and trigger second handoff
     now = 702;
-    Atomics.store(state, 2, 50);
+    Atomics.store(state, 2, 100000);
     player._nextDuration = 1400;
     player._nextPosition = 2230;
     player._triggerTransition = true;

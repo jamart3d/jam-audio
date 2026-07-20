@@ -43,11 +43,14 @@ export function createJamAudioBridge({
   namespace = 'jamAudioBridge',
   channels = 2,
   silentWavUrl = 'audio/silent.wav',
+  latencyProfile = 'resilient',
+  declickDurationMs,
+  enableBoundedUrlAnchorExperiment: enableBoundedUrlAnchorExperimentParam,
 }) {
   const CHANNELS = channels;
-  const DECLICK_DURATION_S = (window._jamdiscDeclickDurationMs ?? 15) / 1000;
+  const DECLICK_DURATION_S = (declickDurationMs ?? window._jamdiscDeclickDurationMs ?? 15) / 1000;
   const SNAPSHOT_INTERVAL_MS = 250;
-  const enableBoundedUrlAnchorExperiment = window._jamdiscEnableBoundedUrlAnchorExperiment === true;
+  const enableBoundedUrlAnchorExperiment = enableBoundedUrlAnchorExperimentParam ?? (window._jamdiscEnableBoundedUrlAnchorExperiment === true);
 
   let wasmReadyPromise;
   let audioContext;
@@ -1006,7 +1009,13 @@ export function createJamAudioBridge({
   function ensurePlaybackWorker() {
     if (playbackWorker) return playbackWorker;
     setWorkerState('starting');
-    playbackWorker = new Worker(playbackWorkerModuleUrl, { type: 'module' });
+    let workerUrl = playbackWorkerModuleUrl;
+    if (typeof window !== 'undefined' && window.location) {
+      const parsedUrl = new URL(playbackWorkerModuleUrl, window.location.href);
+      parsedUrl.searchParams.set('latencyProfile', latencyProfile);
+      workerUrl = parsedUrl.toString();
+    }
+    playbackWorker = new Worker(workerUrl, { type: 'module' });
     playbackWorker.addEventListener('message', handlePlaybackWorkerMessage);
     playbackWorker.addEventListener('error', (event) => {
       const workerErrorMessage =

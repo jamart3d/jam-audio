@@ -7,8 +7,11 @@ export function initPlaybackWorker({
   GaplessPlayerClass,
   StreamingPlayerClass,
   WindowedStreamingPlayerClass,
+  latencyProfile,
 }) {
   let wasmReadyPromise;
+
+  const profile = latencyProfile ?? (typeof self !== 'undefined' && self.location?.search ? new URLSearchParams(self.location.search).get('latencyProfile') : null) ?? 'resilient';
 
   function ensureWasm() {
     if (!wasmReadyPromise) {
@@ -44,6 +47,7 @@ export function initPlaybackWorker({
     clearIntervalFn: (timerId) => self.clearInterval(timerId),
     performanceNow: () => performance.now(),
     nowMs: () => Date.now(),
+    latencyProfile: profile,
   });
 
   self.addEventListener('error', (event) => {
