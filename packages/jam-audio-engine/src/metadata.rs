@@ -24,13 +24,13 @@ pub struct AudioMetadata {
     duration_ms: Option<f64>,
 }
 
-fn duration_ms_from(time_base: Option<TimeBase>, n_frames: Option<u64>) -> f64 {
+fn duration_ms_from(time_base: Option<TimeBase>, n_frames: Option<u64>) -> Option<f64> {
     match (time_base, n_frames) {
         (Some(tb), Some(n)) if n != u64::MAX => {
             let t = tb.calc_time(n);
-            t.seconds as f64 * 1000.0 + t.frac * 1000.0
+            Some(t.seconds as f64 * 1000.0 + t.frac * 1000.0)
         }
-        _ => 0.0,
+        _ => None,
     }
 }
 
@@ -85,10 +85,8 @@ pub fn extract_metadata_with_size_internal(data: &[u8], total_file_size: u64) ->
 
     // Check default track for duration
     if let Some(track) = probed.format.default_track() {
-        result.duration_ms = Some(duration_ms_from(
-            track.codec_params.time_base,
-            track.codec_params.n_frames,
-        ));
+        result.duration_ms =
+            duration_ms_from(track.codec_params.time_base, track.codec_params.n_frames);
     }
 
     // Try container metadata first
@@ -256,21 +254,39 @@ mod tests {
     }
 
     #[test]
-    fn duration_ms_from_returns_zero_for_unknown_sentinel() {
+    fn duration_ms_from_returns_none_for_unknown_sentinel() {
         let tb = TimeBase {
             numer: 1,
             denom: 48000,
         };
-        assert_eq!(duration_ms_from(Some(tb), Some(u64::MAX)), 0.0);
+        assert_eq!(duration_ms_from(Some(tb), Some(u64::MAX)), None);
     }
 
     #[test]
-    fn duration_ms_from_returns_zero_for_no_frames() {
+    fn duration_ms_from_returns_none_for_no_frames() {
         let tb = TimeBase {
             numer: 1,
             denom: 48000,
         };
-        assert_eq!(duration_ms_from(Some(tb), None), 0.0);
+        assert_eq!(duration_ms_from(Some(tb), None), None);
+    }
+
+    #[test]
+    fn duration_ms_from_returns_some_zero_for_zero_frames() {
+        let tb = TimeBase {
+            numer: 1,
+            denom: 48000,
+        };
+        assert_eq!(duration_ms_from(Some(tb), Some(0)), Some(0.0));
+    }
+
+    #[test]
+    fn duration_ms_from_returns_some_duration_for_known_frames() {
+        let tb = TimeBase {
+            numer: 1,
+            denom: 48000,
+        };
+        assert_eq!(duration_ms_from(Some(tb), Some(48000)), Some(1000.0));
     }
 
     #[test]
