@@ -20,6 +20,20 @@ fi
 echo "Building jam_audio_engine..."
 $WASM_PACK_CMD build --target web --release --out-name jam_audio_engine
 
+# Patch pkg/package.json for scoped npm distribution
+PKG_JSON="$SCRIPT_DIR/pkg/package.json"
+if [ -f "$PKG_JSON" ]; then
+    node -e '
+      const fs = require("fs");
+      const pkg = JSON.parse(fs.readFileSync(process.argv[1]));
+      pkg.name = "@jamart3d/jam-audio-engine-wasm";
+      pkg.license = "MIT OR Apache-2.0";
+      pkg.publishConfig = { access: "public" };
+      pkg.repository = { type: "git", url: "git+https://github.com/jamart3d/jam-audio.git" };
+      fs.writeFileSync(process.argv[1], JSON.stringify(pkg, null, 2) + "\n");
+    ' "$PKG_JSON"
+fi
+
 # 2. Sync artifacts to the web app
 PKG_DIR="$SCRIPT_DIR/pkg"
 WEB_PKG_DIR="$SCRIPT_DIR/../../apps/jamdisc_web/web/pkg"
