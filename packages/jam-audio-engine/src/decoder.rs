@@ -134,6 +134,13 @@ impl StereoResampler {
         })
     }
 
+    /// Resets internal Rubato resampler state and clears any pending input samples.
+    pub fn reset(&mut self) {
+        self.inner.reset();
+        self.pending[0].clear();
+        self.pending[1].clear();
+    }
+
     /// Push interleaved stereo `samples` into the resampler, emitting resampled
     /// frames into `out` whenever a full input chunk is available.
     pub fn push_interleaved(
@@ -531,8 +538,14 @@ impl StreamingDecoder {
             self.pending_skip_frames = 0;
         }
 
-        // Ensure we avoid glitchy audio after a seek by resetting the decoder
+        // Reset decoder state and clear processing buffers after successful format seek
         self.decoder.reset();
+        if let Some(resampler) = &mut self.resampler {
+            resampler.reset();
+        }
+        self.intermediate_samples.clear();
+        self.stereo_scratch.clear();
+        self.sample_buffer = None;
 
         Ok(())
     }
@@ -1688,5 +1701,38 @@ mod tests {
         let mut out = Vec::new();
         extend_first_two_channels(&mut out, &[1.0, 2.0, 9.0, 3.0, 4.0, 8.0], 3);
         assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn stereo_resampler_reset_clears_pending_and_state() {
+        let mut resampler = StereoResampler::new(44100, 48000, 1024).expect("resampler init");
+        let input_partial = vec![0.5f32; 1000]; // 500 stereo frames (less than 1024 chunk_frames)
+        let mut out = Vec::new();
+
+        resampler
+            .push_interleaved(&input_partial, &mut out)
+            .unwrap();
+        assert!(out.is_empty(), "Partial push should not emit full chunk");
+        assert_eq!(resampler.pending[0].len(), 500);
+
+        resampler.reset();
+        assert_eq!(resampler.pending[0].len(), 0);
+        assert_eq!(resampler.pending[1].len(), 0);
+
+        // Pushing 1024 frames after reset should yield exact same output as a brand new resampler
+        let full_chunk = vec![0.25f32; 2048];
+        let mut out_post_reset = Vec::new();
+        resampler
+            .push_interleaved(&full_chunk, &mut out_post_reset)
+            .unwrap();
+
+        let mut fresh_resampler =
+            StereoResampler::new(44100, 48000, 1024).expect("fresh resampler");
+        let mut out_fresh = Vec::new();
+        fresh_resampler
+            .push_interleaved(&full_chunk, &mut out_fresh)
+            .unwrap();
+
+        assert_eq!(out_post_reset, out_fresh);
     }
 }
