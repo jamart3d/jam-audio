@@ -14,7 +14,8 @@ const jsConsts = [
   `const PROTOCOL_SLOTS = ${stateDef.slots};`,
 ];
 for (const [key, value] of Object.entries(stateDef.indices)) {
-  jsConsts.push(`const ${key} = ${value};`);
+  const slotVal = typeof value === 'object' ? value.slot : value;
+  jsConsts.push(`const ${key} = ${slotVal};`);
 }
 const jsReplacement = jsConsts.join('\n');
 

@@ -367,16 +367,28 @@ test('10. Blocker verification: bridge snapshot and handoff diagnostics read und
     assert.equal(diag.silentFrameCount, 256, 'Controller diagnostics silentFrameCount reads authoritatively from SAB');
 
     // 4. Verify track-handoff diagnostics event reports the correct underrunDelta
+    Atomics.store(state, 2, 50);
     player._nextDuration = 1200;
     player._nextPosition = 1015;
     player._triggerTransition = true;
     intervalCallback();
 
-    // Starve more (increment underrun count by 3, making total = 5)
+    // Call intervalCallback mid-window to record the candidate floor
+    now = 400;
+    Atomics.store(state, 2, 41);
+    intervalCallback();
+
+    // Starve more (increment underrun count by 3, making total = 5) before window closes
     Atomics.store(state, 9, 5);
+
+    // Close the window so the next handoff can report the prior floor.
+    now = 701;
+    Atomics.store(state, 2, 41);
+    intervalCallback();
 
     // Close transition monitor and trigger second handoff
     now = 702;
+    Atomics.store(state, 2, 50);
     player._nextDuration = 1400;
     player._nextPosition = 2230;
     player._triggerTransition = true;

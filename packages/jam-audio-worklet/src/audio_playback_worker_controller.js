@@ -135,6 +135,30 @@ function createPlaybackWorkerController({
   let consecutiveZeroRefills = 0;
   let currentSessionId = 0;
   let activePlaybackSessionGeneration = null;
+  function createWorkerDiagnostics(overrides = {}) {
+    const diag = createBaseWorkerDiagnostics({
+      lowWaterMarkCount: 0,
+      recoveryModeActive: false,
+      activeBoundedWindowSize: 0,
+      retainedBytes: 0,
+      pendingSeekDistanceMs: 0,
+      fetchToDecodeLagMs: 0,
+      resumeAfterStallLatencyMs: 0,
+      ...overrides,
+    });
+    Object.defineProperties(diag, {
+      underrunCount: {
+        get: () => sharedState ? Atomics.load(sharedState, UNDERRUN_EPISODES_INDEX) : 0,
+        set: () => {}
+      },
+      silentFrameCount: {
+        get: () => sharedState ? Atomics.load(sharedState, SILENT_FRAMES_INDEX) : 0,
+        set: () => {}
+      }
+    });
+    return diag;
+  }
+
   let diagnostics = createWorkerDiagnostics();
 
   let lastSeamGeneration = 0;
@@ -864,20 +888,11 @@ function createPlaybackWorkerController({
     frameCapacity = nextCapacity;
     sharedSamples = new Float32Array(pcmBuffer);
     sharedState = new Int32Array(stateBuffer);
-    let epoch = 0;
-    if (sharedState.length > EPOCH_INDEX) {
-        epoch = Atomics.load(sharedState, EPOCH_INDEX);
-    }
+    const epoch = Atomics.load(sharedState, EPOCH_INDEX);
     sharedState.fill(0);
-    if (sharedState.length > EPOCH_INDEX) {
-        Atomics.store(sharedState, EPOCH_INDEX, epoch + 1);
-    }
-    if (sharedState.length > TARGET_FRAMES_INDEX) {
-      Atomics.store(sharedState, TARGET_FRAMES_INDEX, STEADY_STATE_TARGET_FRAMES);
-    }
-    if (sharedState.length > REFILL_REQUEST_INDEX) {
-      Atomics.store(sharedState, REFILL_REQUEST_INDEX, 0); // reset generation counter
-    }
+    Atomics.store(sharedState, EPOCH_INDEX, epoch + 1);
+    Atomics.store(sharedState, TARGET_FRAMES_INDEX, STEADY_STATE_TARGET_FRAMES);
+    Atomics.store(sharedState, REFILL_REQUEST_INDEX, 0); // reset generation counter
     updateBufferMetrics();
     selectRefillDriver();
   }
@@ -2051,18 +2066,14 @@ function createPlaybackWorkerController({
           Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
           Atomics.store(sharedState, READ_INDEX, 0);
           Atomics.store(sharedState, WRITE_INDEX, 0);
-          if (sharedState.length > EPOCH_INDEX) {
-            Atomics.add(sharedState, EPOCH_INDEX, 1);
-          }
+          Atomics.add(sharedState, EPOCH_INDEX, 1);
 
           // Notify slot 7 so any still-running loop iteration wakes immediately
           // to see the new FRAMES_AVAILABLE=0. stopRefillLoop() above bumps
           // currentSessionId, so the old loop will exit; this notify is a
           // belt-and-suspenders wake in case the loop is mid-waitAsync.
-          if (sharedState && sharedState.length > REFILL_REQUEST_INDEX) {
-            Atomics.add(sharedState, REFILL_REQUEST_INDEX, 1);
-            Atomics.notify(sharedState, REFILL_REQUEST_INDEX, 1);
-          }
+          Atomics.add(sharedState, REFILL_REQUEST_INDEX, 1);
+          Atomics.notify(sharedState, REFILL_REQUEST_INDEX, 1);
         }
         trackStartPositionMs = 0;
         pendingGaplessHintDurationMs = 0;
@@ -2177,6 +2188,9 @@ function createPlaybackWorkerController({
 
     setWorkletPort,
     getWorkletPort,
+    getDiagnostics() {
+      return diagnostics;
+    },
     getSabConstants() {
       return { REFILL_REQUEST_INDEX, TARGET_FRAMES_INDEX };
     },

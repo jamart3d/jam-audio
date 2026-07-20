@@ -95,7 +95,7 @@ class JamAudioProcessor extends AudioWorkletProcessor {
     // Hoist common loads outside the hot loop to reduce atomic overhead.
     const shouldStop = Atomics.load(this.state, STOP_INDEX) === 1;
     const isEOS = Atomics.load(this.state, END_OF_STREAM_INDEX) === 1;
-    const currentEpoch = this.state.length > 11 ? Atomics.load(this.state, 11) : 0; // EPOCH_INDEX = 11
+    const currentEpoch = Atomics.load(this.state, EPOCH_INDEX);
 
     if (shouldStop) {
       this.isUnderrunning = false;
@@ -176,7 +176,7 @@ class JamAudioProcessor extends AudioWorkletProcessor {
     }
 
     if (framesToProcess > 0) {
-      if (this.state.length > 11 && Atomics.load(this.state, 11) !== currentEpoch) {
+      if (Atomics.load(this.state, EPOCH_INDEX) !== currentEpoch) {
           return true; // Abort commit: worker reset the indices.
       }
       

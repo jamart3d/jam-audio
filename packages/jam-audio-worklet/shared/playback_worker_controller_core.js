@@ -68,6 +68,7 @@ function createBaseWorkerDiagnostics(overrides = {}) {
     transitionGapMs: null,
     lastTransitionFloorPercent: null,
     underrunCount: 0,
+    silentFrameCount: 0,
     ...overrides,
   };
 }

@@ -2,17 +2,101 @@
   "version": 2,
   "slots": 12,
   "indices": {
-    "READ_INDEX": 0,
-    "WRITE_INDEX": 1,
-    "FRAMES_AVAILABLE_INDEX": 2,
-    "END_OF_STREAM_INDEX": 3,
-    "STOP_INDEX": 4,
-    "TOTAL_FRAMES_RENDERED_INDEX": 5,
-    "HEARTBEAT_COUNT_INDEX": 6,
-    "REFILL_REQUEST_INDEX": 7,
-    "TARGET_FRAMES_INDEX": 8,
-    "UNDERRUN_EPISODES_INDEX": 9,
-    "SILENT_FRAMES_INDEX": 10,
-    "EPOCH_INDEX": 11
+    "READ_INDEX": {
+      "slot": 0,
+      "writer": "processor",
+      "reader": "worker",
+      "initial": 0,
+      "range": "[0, frameCapacity)",
+      "semantics": "Current read cursor position in the ring buffer, incremented by the processor after audio samples are successfully copied to the output channels."
+    },
+    "WRITE_INDEX": {
+      "slot": 1,
+      "writer": "worker",
+      "reader": "processor",
+      "initial": 0,
+      "range": "[0, frameCapacity)",
+      "semantics": "Current write cursor position in the ring buffer, incremented by the worker after new PCM data is fetched and decoded."
+    },
+    "FRAMES_AVAILABLE_INDEX": {
+      "slot": 2,
+      "writer": "both",
+      "reader": "both",
+      "initial": 0,
+      "range": "[0, frameCapacity]",
+      "semantics": "Count of decoded frames ready in the ring buffer. Processor decrements atomically on consume; worker increments atomically on write. Clamped at zero to avoid race conditions."
+    },
+    "END_OF_STREAM_INDEX": {
+      "slot": 3,
+      "writer": "worker",
+      "reader": "processor",
+      "initial": 0,
+      "range": "[0, 1]",
+      "semantics": "Set to 1 by the worker to signal the processor that no further PCM data will be supplied for the current track."
+    },
+    "STOP_INDEX": {
+      "slot": 4,
+      "writer": "worker",
+      "reader": "processor",
+      "initial": 0,
+      "range": "[0, 1]",
+      "semantics": "Set to 1 by the worker to suspend processing and instruct the processor to emit silence immediately without checking available frames or signalling underruns."
+    },
+    "TOTAL_FRAMES_RENDERED_INDEX": {
+      "slot": 5,
+      "writer": "processor",
+      "reader": "worker",
+      "initial": 0,
+      "range": "[0, 2^31-1]",
+      "semantics": "Monotonically increasing count of total frames processed and rendered by the processor."
+    },
+    "HEARTBEAT_COUNT_INDEX": {
+      "slot": 6,
+      "writer": "processor",
+      "reader": "worker",
+      "initial": 0,
+      "range": "[0, 2^31-1]",
+      "semantics": "Heartbeat count incremented by the processor at the end of each process block to serve as a liveness indicator."
+    },
+    "REFILL_REQUEST_INDEX": {
+      "slot": 7,
+      "writer": "processor",
+      "reader": "worker",
+      "initial": 0,
+      "range": "[0, 2^31-1]",
+      "semantics": "Futex target for waitAsync. Incremented by the processor when available frames drop below the low-water mark, waking the worker's refill loop."
+    },
+    "TARGET_FRAMES_INDEX": {
+      "slot": 8,
+      "writer": "worker",
+      "reader": "processor",
+      "initial": 264600,
+      "range": "[0, frameCapacity]",
+      "semantics": "Target number of frames the worker aims to keep filled in the ring buffer for adaptive buffering."
+    },
+    "UNDERRUN_EPISODES_INDEX": {
+      "slot": 9,
+      "writer": "processor",
+      "reader": "both",
+      "initial": 0,
+      "range": "[0, 2^31-1]",
+      "semantics": "Atomically incremented by the processor whenever a render quantum is processed with zero frames available while not at end-of-stream."
+    },
+    "SILENT_FRAMES_INDEX": {
+      "slot": 10,
+      "writer": "processor",
+      "reader": "both",
+      "initial": 0,
+      "range": "[0, 2^31-1]",
+      "semantics": "Atomically accumulated count of silent frames output by the processor during underrun episodes."
+    },
+    "EPOCH_INDEX": {
+      "slot": 11,
+      "writer": "worker",
+      "reader": "processor",
+      "initial": 0,
+      "range": "[0, 2^31-1]",
+      "semantics": "Transaction epoch counter. Incremented by the worker during seeks or resets. Processor aborts index commits if the epoch changes mid-process loop."
+    }
   }
 }

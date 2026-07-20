@@ -124,6 +124,16 @@ export function createJamAudioBridge({
   let onBufferingCallback = null;
 
   let diagnosticsState = createDiagnosticsState();
+  Object.defineProperties(diagnosticsState, {
+    underrunCount: {
+      get: () => sharedStateBuffer ? Atomics.load(new Int32Array(sharedStateBuffer), UNDERRUN_EPISODES_INDEX) : 0,
+      set: () => {}
+    },
+    silentFrameCount: {
+      get: () => sharedStateBuffer ? Atomics.load(new Int32Array(sharedStateBuffer), SILENT_FRAMES_INDEX) : 0,
+      set: () => {}
+    }
+  });
   let lastKnownBufferedDurationMs = 0;
   let silentAudioEl = null;
   let currentTrackBlobUrl = null;
@@ -906,19 +916,7 @@ export function createJamAudioBridge({
       });
       connectProcessorToChain(processorNode, eqFilterNodes, gainNode);
       processorNode.port.onmessage = (event) => {
-        if (event.data.type === 'underrun') {
-          diagnosticsState.underrunCount =
-            event.data.underrunCount ?? diagnosticsState.underrunCount + 1;
-          emitDiagnosticsEvent({
-            type: 'underrun',
-            label: 'Underrun',
-            timestampMs: nowMs(),
-            severity: 'error',
-            framesAvailable:
-              event.data.framesAvailable ?? diagnosticsState.framesAvailable,
-            bufferFillPercent: diagnosticsState.bufferFillPercent,
-          });
-        } else if (event.data.type === 'position') {
+        if (event.data.type === 'position') {
           lastPositionEventTs = nowMs();
           const positionMs = (event.data.framesRendered / audioContext.sampleRate) * 1000;
           diagnosticsState.positionMs = Math.round(positionMs);
