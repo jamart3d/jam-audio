@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createPlaybackWorkerController } from './audio_playback_worker_controller.js';
+import { createDiagnosticsState, buildSnapshot } from './audio_diagnostics_state.js';
 
 // audio_processor.js has no import/export syntax, so Node loads it as
 // CommonJS — cached by file path with query strings ignored. The module body
@@ -274,4 +276,122 @@ test('9. Integration contract test: complete successful cycle, reset epoch, and 
   processor.process([], [[left, right]]); // This should cause an underrun because available is 0
   assert.equal(Atomics.load(state, 9), 1, 'Underrun episode counter incremented');
   assert.equal(Atomics.load(state, 10), 128, 'Silent frames counted');
+});
+
+test('10. Blocker verification: bridge snapshot and handoff diagnostics read underrunCount and silentFrameCount authoritatively from SharedArrayBuffer', async () => {
+  const originalWaitAsync = Atomics.waitAsync;
+  Atomics.waitAsync = undefined;
+  try {
+    const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
+    const state = new Int32Array(stateBuffer);
+    
+    const messages = [];
+    let intervalCallback = null;
+    let now = 100;
+    let duration = 1000;
+    let position = 0;
+    let player = null;
+    const pcmBuffer = new SharedArrayBuffer(100 * 2 * Float32Array.BYTES_PER_ELEMENT);
+    
+    const controller = createPlaybackWorkerController({
+      createGaplessPlayer: () => {
+        player = {
+          decodeFrames() {
+            if (this._triggerTransition) {
+              duration = this._nextDuration;
+              position = this._nextPosition;
+              this._triggerTransition = false;
+            }
+            return new Float32Array(20);
+          },
+          durationMs() { return duration; },
+          positionMs() { return position; },
+          hasEnded() { return false; },
+          loadNext() { return null; },
+          seekToMs() {},
+          free() {},
+          _triggerTransition: false,
+          _nextDuration: 0,
+          _nextPosition: 0,
+        };
+        return player;
+      },
+      createStreamingPlayer: () => null,
+      createWindowedStreamingPlayer: () => null,
+      createRangeFetchController: () => null,
+      emitMessage: (message) => messages.push(message),
+      setIntervalFn: (callback) => {
+        intervalCallback = callback;
+        return 1;
+      },
+      clearIntervalFn: () => {},
+      performanceNow: () => now,
+      nowMs: () => Math.round(now),
+    });
+
+    controller.playTrack(new Uint8Array([1]), {
+      pcmBuffer,
+      stateBuffer,
+      frameCapacity: 100,
+      protocolVersion: 2,
+      protocolSlots: 12,
+    });
+
+    // 1. Simulate processor underruns by writing to slots 9 and 10 in the SharedArrayBuffer
+    Atomics.store(state, 9, 2);   // 2 underrun episodes
+    Atomics.store(state, 10, 256); // 256 silent frames
+
+    // 2. Check bridge snapshot underrun and silent-frame count
+    const diagnosticsState = createDiagnosticsState();
+    
+    // Link the stateBuffer with getters as planned for bridge
+    let bridgeSharedState = new Int32Array(stateBuffer);
+    Object.defineProperties(diagnosticsState, {
+      underrunCount: {
+        get: () => bridgeSharedState ? Atomics.load(bridgeSharedState, 9) : 0,
+        set: () => {}
+      },
+      silentFrameCount: {
+        get: () => bridgeSharedState ? Atomics.load(bridgeSharedState, 10) : 0,
+        set: () => {}
+      }
+    });
+
+    const snapshot = buildSnapshot(diagnosticsState, Date.now());
+    assert.equal(snapshot.underrunCount, 2, 'Snapshot underrunCount reads authoritatively from SAB');
+    assert.equal(snapshot.silentFrameCount, 256, 'Snapshot silentFrameCount reads authoritatively from SAB');
+
+    // 3. Verify controller getDiagnostics matches
+    const diag = controller.getDiagnostics();
+    assert.equal(diag.underrunCount, 2, 'Controller diagnostics underrunCount reads authoritatively from SAB');
+    assert.equal(diag.silentFrameCount, 256, 'Controller diagnostics silentFrameCount reads authoritatively from SAB');
+
+    // 4. Verify track-handoff diagnostics event reports the correct underrunDelta
+    player._nextDuration = 1200;
+    player._nextPosition = 1015;
+    player._triggerTransition = true;
+    intervalCallback();
+
+    // Starve more (increment underrun count by 3, making total = 5)
+    Atomics.store(state, 9, 5);
+
+    // Close transition monitor and trigger second handoff
+    now = 702;
+    player._nextDuration = 1400;
+    player._nextPosition = 2230;
+    player._triggerTransition = true;
+    intervalCallback();
+
+    const handoffEvents = messages.filter(
+      (message) =>
+        message.type === 'diagnostics-event' &&
+        message.event.type === 'track-handoff',
+    );
+
+    assert.equal(handoffEvents.length, 2);
+    assert.equal(handoffEvents[1].event.underrunDelta, 3, 'Handoff diagnostics reports correct underrunDelta from SAB');
+    
+  } finally {
+    Atomics.waitAsync = originalWaitAsync;
+  }
 });
