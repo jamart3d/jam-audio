@@ -52,18 +52,12 @@ mod imp {
         }
 
         pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-            let guard = self
-                .0
-                .lock()
-                .expect("shared cell mutex poisoned");
+            let guard = self.0.lock().expect("shared cell mutex poisoned");
             f(&guard)
         }
 
         pub fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-            let mut guard = self
-                .0
-                .lock()
-                .expect("shared cell mutex poisoned");
+            let mut guard = self.0.lock().expect("shared cell mutex poisoned");
             f(&mut guard)
         }
     }
