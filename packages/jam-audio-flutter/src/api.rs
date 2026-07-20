@@ -24,6 +24,10 @@ impl From<jam_audio_engine::AudioMetadata> for AudioMetadata {
 
 /// Extracts metadata from audio data using the internal shared parser.
 /// This function is intended to be called via flutter_rust_bridge.
+///
+/// Empty, malformed, and unsupported input all return `AudioMetadata::default()`
+/// (all fields `None`); this function does not distinguish those cases and
+/// cannot fail. Runs synchronously on the calling isolate.
 #[flutter_rust_bridge::frb(sync)]
 pub fn extract_metadata(data: Vec<u8>) -> AudioMetadata {
     extract_metadata_internal(&data).into()
@@ -31,6 +35,10 @@ pub fn extract_metadata(data: Vec<u8>) -> AudioMetadata {
 
 /// Extracts artwork from audio data.
 /// This function is intended to be called via flutter_rust_bridge.
+///
+/// Empty, malformed, unsupported, and artwork-absent input all return `None`;
+/// this function does not distinguish those cases and cannot fail. Runs
+/// synchronously on the calling isolate.
 #[allow(unexpected_cfgs)]
 #[flutter_rust_bridge::frb(sync)]
 pub fn extract_artwork(data: Vec<u8>) -> Option<Vec<u8>> {

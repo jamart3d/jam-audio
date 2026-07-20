@@ -2,7 +2,7 @@
 name = "jam_audio_flutter"
 version = "0.4.5"
 edition = "2024"
-description = "Flutter bridge for the Jamdisc Rust audio engine"
+description = "Flutter/Dart bridge for audio metadata and artwork extraction from the Jam Audio engine (web target only; no playback)"
 repository = "https://github.com/jamart3d/jam-audio"
 license = "MIT"
 

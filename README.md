@@ -21,7 +21,7 @@ Browser and Flutter media APIs offer convenience but limited control. For music 
 The pipeline is split into three main packages to ensure a clean separation between the core DSP logic, the Flutter bridge, and the browser-native AudioWorklet glue.
 
 - `jam-audio-engine`: The core Rust audio engine. Handles decoding, metadata extraction, ring buffering, and gapless playback.
-- `jam-audio-flutter`: Flutter-specific bindings for the engine using `flutter_rust_bridge`.
+- `jam-audio-flutter`: Flutter/Dart bindings for audio metadata and artwork extraction only, using `flutter_rust_bridge`. Not a playback bridge; built for the web target only.
 - `jam-audio-worklet`: Generic JavaScript `AudioWorklet` bridge and processor for low-latency web playback. Includes the canonical Media Session heartbeat implementation in `src/audio_bridge.js` to ensure PWA persistence on mobile platforms, plus diagnostics callbacks for playback health and lifecycle inspection.
 
 ## Requirements
