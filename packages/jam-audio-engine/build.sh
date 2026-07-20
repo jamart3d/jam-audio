@@ -27,7 +27,7 @@ if [ -f "$PKG_JSON" ]; then
       const fs = require("fs");
       const pkg = JSON.parse(fs.readFileSync(process.argv[1]));
       pkg.name = "@jamart3d/jam-audio-engine-wasm";
-      pkg.license = "MIT OR Apache-2.0";
+      pkg.license = "MIT";
       pkg.publishConfig = { access: "public" };
       pkg.repository = { type: "git", url: "git+https://github.com/jamart3d/jam-audio.git" };
       fs.writeFileSync(process.argv[1], JSON.stringify(pkg, null, 2) + "\n");
