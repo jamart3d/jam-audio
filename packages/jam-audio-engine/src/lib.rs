@@ -18,7 +18,7 @@ use shared_cell::SharedCell;
 
 pub use decoder::{
     AppendableMediaSource, DEFAULT_OUTPUT_SAMPLE_RATE, DecodeError, DecodedAudioData,
-    StereoResampler, StreamingDecoder, WindowedMediaSource, decode_audio_bytes,
+    MAX_DECODE_FRAMES, StereoResampler, StreamingDecoder, WindowedMediaSource, decode_audio_bytes,
 };
 pub use gapless_player::GaplessPlayer;
 pub use metadata::{
@@ -53,8 +53,17 @@ pub struct WasmGaplessPlayer {
 impl WasmGaplessPlayer {
     #[wasm_bindgen(constructor)]
     pub fn new(bytes: Vec<u8>, sample_rate: Option<u32>) -> Result<WasmGaplessPlayer, JsValue> {
-        let player = GaplessPlayer::new(bytes, sample_rate.unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE))
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if bytes.is_empty() {
+            return Err(JsValue::from_str("audio input was empty"));
+        }
+        let sr = sample_rate.unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE);
+        if !(8_000..=192_000).contains(&sr) {
+            return Err(JsValue::from_str(&format!(
+                "Invalid sample rate: {sr}. Must be 8000–192000 Hz."
+            )));
+        }
+        let player =
+            GaplessPlayer::new(bytes, sr).map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(Self {
             inner: player,
             output_buffer: Vec::with_capacity(2048),
@@ -71,6 +80,18 @@ impl WasmGaplessPlayer {
 
     #[wasm_bindgen(js_name = decodeFrames)]
     pub fn decode_frames(&mut self, n: u32) -> JsValue {
+        if n > MAX_DECODE_FRAMES {
+            return gapless_error_to_js(
+                "invalid_argument",
+                &format!("Requested frame count exceeds maximum {MAX_DECODE_FRAMES}"),
+            );
+        }
+        let _samples = match (n as usize).checked_mul(2) {
+            Some(s) => s,
+            None => {
+                return gapless_error_to_js("invalid_argument", "Frame allocation overflow");
+            }
+        };
         match self
             .inner
             .decode_frames_into(&mut self.output_buffer, n as usize)
@@ -446,8 +467,9 @@ pub struct WindowedStreamingPlayer {
 impl WindowedStreamingPlayer {
     #[wasm_bindgen(constructor)]
     pub fn new(total_size: Option<u64>, max_window_mb: u32) -> Self {
+        let max_mb = max_window_mb.clamp(1, 1024);
         Self {
-            core: StreamingCore::windowed(total_size, max_window_mb, DEFAULT_OUTPUT_SAMPLE_RATE),
+            core: StreamingCore::windowed(total_size, max_mb, DEFAULT_OUTPUT_SAMPLE_RATE),
             output_buffer: Vec::with_capacity(2048),
         }
     }
@@ -494,6 +516,18 @@ impl WindowedStreamingPlayer {
 
     #[wasm_bindgen(js_name = decodeFrames)]
     pub fn decode_frames(&mut self, n: u32) -> Result<JsValue, JsValue> {
+        if n > MAX_DECODE_FRAMES {
+            return Err(decode_error_to_js(DecodeError::Resample {
+                operation: "decode",
+                message: format!("Requested frame count exceeds maximum {MAX_DECODE_FRAMES}"),
+            }));
+        }
+        let _samples = (n as usize).checked_mul(2).ok_or_else(|| {
+            decode_error_to_js(DecodeError::Resample {
+                operation: "decode",
+                message: "Frame allocation overflow".to_string(),
+            })
+        })?;
         match self
             .core
             .decode_frames_into(n, &mut self.output_buffer)
@@ -518,11 +552,12 @@ pub struct StreamingPlayer {
 impl StreamingPlayer {
     #[wasm_bindgen(constructor)]
     pub fn new(target_sample_rate: Option<u32>, max_buffered_mb: Option<u32>) -> Self {
+        let sr = target_sample_rate
+            .unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE)
+            .clamp(8_000, 192_000);
+        let max_mb = max_buffered_mb.unwrap_or(0).min(1024);
         Self {
-            core: StreamingCore::appendable(
-                target_sample_rate.unwrap_or(DEFAULT_OUTPUT_SAMPLE_RATE),
-                max_buffered_mb.unwrap_or(0),
-            ),
+            core: StreamingCore::appendable(sr, max_mb),
             output_buffer: Vec::with_capacity(2048),
         }
     }
@@ -995,5 +1030,54 @@ mod tests {
     #[test]
     fn init_console_error_panic_hook_is_callable_on_host() {
         init_console_error_panic_hook();
+    }
+
+    #[test]
+    fn gapless_player_sample_rate_and_input_boundaries() {
+        // Empty bytes
+        assert!(GaplessPlayer::new(vec![], 48000).is_err());
+
+        // Sample rate below min (7999)
+        let err_below = match GaplessPlayer::new(vec![1, 2, 3], 7999) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for sample rate below min"),
+        };
+        assert!(err_below.to_string().contains("Invalid sample rate"));
+
+        // Sample rate at min (8000) - fails on corrupt bytes, not sample rate
+        let err_min = match GaplessPlayer::new(vec![1, 2, 3], 8000) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for corrupt bytes"),
+        };
+        assert!(!err_min.to_string().contains("Invalid sample rate"));
+
+        // Sample rate at max (192000)
+        let err_max = match GaplessPlayer::new(vec![1, 2, 3], 192000) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for corrupt bytes"),
+        };
+        assert!(!err_max.to_string().contains("Invalid sample rate"));
+
+        // Sample rate above max (192001)
+        let err_above = match GaplessPlayer::new(vec![1, 2, 3], 192001) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for sample rate above max"),
+        };
+        assert!(err_above.to_string().contains("Invalid sample rate"));
+    }
+
+    #[test]
+    fn streaming_player_sample_rate_boundaries() {
+        let p_below = StreamingPlayer::new(Some(7999), None);
+        assert_eq!(p_below.core.target_sample_rate, 8000);
+
+        let p_min = StreamingPlayer::new(Some(8000), None);
+        assert_eq!(p_min.core.target_sample_rate, 8000);
+
+        let p_max = StreamingPlayer::new(Some(192000), None);
+        assert_eq!(p_max.core.target_sample_rate, 192000);
+
+        let p_above = StreamingPlayer::new(Some(192001), None);
+        assert_eq!(p_above.core.target_sample_rate, 192000);
     }
 }

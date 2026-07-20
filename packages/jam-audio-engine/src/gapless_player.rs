@@ -32,6 +32,11 @@ pub struct GaplessPlayer {
 
 impl GaplessPlayer {
     pub fn new(bytes: Vec<u8>, target_sample_rate: u32) -> Result<Self, GaplessError> {
+        if !(8_000..=192_000).contains(&target_sample_rate) {
+            return Err(GaplessError::Corrupted(format!(
+                "Invalid sample rate: {target_sample_rate}. Must be 8000–192000 Hz."
+            )));
+        }
         let active = StreamingDecoder::new(bytes, target_sample_rate)
             .map_err(|e| GaplessError::Corrupted(e.to_string()))?;
         let residual = PcmRingBuffer::new(DEFAULT_FRAME_CAPACITY, 2)

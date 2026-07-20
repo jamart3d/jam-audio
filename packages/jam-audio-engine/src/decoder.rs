@@ -225,6 +225,11 @@ impl StereoResampler {
 }
 
 pub const DEFAULT_OUTPUT_SAMPLE_RATE: u32 = 48_000;
+pub const MIN_SAMPLE_RATE: u32 = 8_000;
+pub const MAX_SAMPLE_RATE: u32 = 192_000;
+pub const MIN_CHANNELS: u32 = 1;
+pub const MAX_CHANNELS: u32 = 8;
+pub const MAX_DECODE_FRAMES: u32 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedAudioData {
@@ -402,6 +407,15 @@ impl StreamingDecoder {
     where
         S: MediaSource + 'static,
     {
+        if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&target_sample_rate) {
+            return Err(DecodeError::Resample {
+                operation: "new",
+                message: format!(
+                    "target sample rate must be between {MIN_SAMPLE_RATE} and {MAX_SAMPLE_RATE} Hz (got {target_sample_rate})"
+                ),
+            });
+        }
+
         let has_known_byte_len = media_source.byte_len().is_some();
         let media_stream = MediaSourceStream::new(Box::new(media_source), Default::default());
         let hint = Hint::new();
@@ -435,6 +449,15 @@ impl StreamingDecoder {
             .channels
             .map(|layout| layout.count() as u32)
             .ok_or(DecodeError::MissingChannels)?;
+
+        if !(MIN_CHANNELS..=MAX_CHANNELS).contains(&source_channels) {
+            return Err(DecodeError::Resample {
+                operation: "probe",
+                message: format!(
+                    "source channel count must be between {MIN_CHANNELS} and {MAX_CHANNELS} (got {source_channels})"
+                ),
+            });
+        }
 
         let init_source_sample_rate = source_sample_rate;
         let raw_delay = track.codec_params.delay.unwrap_or(0) as u64;

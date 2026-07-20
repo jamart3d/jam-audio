@@ -9,18 +9,44 @@ pub struct RingBufferLayout {
     channels: usize,
 }
 
+pub const MIN_FRAME_CAPACITY: usize = 1;
+pub const MAX_FRAME_CAPACITY: usize = 100_000_000;
+pub const MIN_CHANNELS: usize = 1;
+pub const MAX_CHANNELS: usize = 8;
+
 impl RingBufferLayout {
     pub fn new(frame_capacity: usize, channels: usize) -> Result<Self, RingBufferError> {
-        if frame_capacity == 0 {
+        if !(MIN_FRAME_CAPACITY..=MAX_FRAME_CAPACITY).contains(&frame_capacity) {
             return Err(RingBufferError::InvalidLayout {
-                reason: "frame_capacity must be positive",
+                reason: "frame_capacity out of bounds (must be 1..=100000000)",
             });
         }
-        if channels == 0 {
+        if !(MIN_CHANNELS..=MAX_CHANNELS).contains(&channels) {
             return Err(RingBufferError::InvalidLayout {
-                reason: "channels must be positive",
+                reason: "channels out of bounds (must be 1..=8)",
             });
         }
+        let sample_cap =
+            frame_capacity
+                .checked_mul(channels)
+                .ok_or(RingBufferError::InvalidLayout {
+                    reason: "frame_capacity * channels overflowed",
+                })?;
+        let sample_bytes = sample_cap.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            RingBufferError::InvalidLayout {
+                reason: "sample byte count overflowed",
+            },
+        )?;
+        let state_bytes = SHARED_STATE_SLOTS
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or(RingBufferError::InvalidLayout {
+                reason: "state byte count overflowed",
+            })?;
+        state_bytes
+            .checked_add(sample_bytes)
+            .ok_or(RingBufferError::InvalidLayout {
+                reason: "total shared buffer byte count overflowed",
+            })?;
 
         Ok(Self {
             frame_capacity,
@@ -37,19 +63,27 @@ impl RingBufferLayout {
     }
 
     pub fn sample_capacity(self) -> usize {
-        self.frame_capacity * self.channels
+        self.frame_capacity
+            .checked_mul(self.channels)
+            .expect("sample_capacity checked at construction")
     }
 
     pub fn state_bytes(self) -> usize {
-        SHARED_STATE_SLOTS * std::mem::size_of::<u32>()
+        SHARED_STATE_SLOTS
+            .checked_mul(std::mem::size_of::<u32>())
+            .expect("state_bytes checked at construction")
     }
 
     pub fn sample_bytes(self) -> usize {
-        self.sample_capacity() * std::mem::size_of::<f32>()
+        self.sample_capacity()
+            .checked_mul(std::mem::size_of::<f32>())
+            .expect("sample_bytes checked at construction")
     }
 
     pub fn shared_buffer_bytes(self) -> usize {
-        self.state_bytes() + self.sample_bytes()
+        self.state_bytes()
+            .checked_add(self.sample_bytes())
+            .expect("shared_buffer_bytes checked at construction")
     }
 }
 
@@ -245,20 +279,27 @@ mod tests {
     }
 
     #[test]
-    fn ring_buffer_layout_rejects_zero_capacity() {
+    fn ring_buffer_layout_boundary_tests() {
+        // Below min capacity (0)
         assert!(RingBufferLayout::new(0, 2).is_err());
-    }
+        // At min capacity (1)
+        assert!(RingBufferLayout::new(1, 2).is_ok());
+        // At max capacity (100_000_000)
+        assert!(RingBufferLayout::new(100_000_000, 2).is_ok());
+        // Above max capacity (100_000_001)
+        assert!(RingBufferLayout::new(100_000_001, 2).is_err());
 
-    #[test]
-    fn ring_buffer_layout_rejects_zero_channels() {
+        // Below min channels (0)
         assert!(RingBufferLayout::new(1024, 0).is_err());
-    }
+        // At min channels (1)
+        assert!(RingBufferLayout::new(1024, 1).is_ok());
+        // At max channels (8)
+        assert!(RingBufferLayout::new(1024, 8).is_ok());
+        // Above max channels (9)
+        assert!(RingBufferLayout::new(1024, 9).is_err());
 
-    #[test]
-    fn ring_buffer_layout_accepts_valid_params() {
-        let layout = RingBufferLayout::new(1024, 2).unwrap();
-        assert_eq!(layout.frame_capacity(), 1024);
-        assert_eq!(layout.channels(), 2);
+        // Arithmetic overflow
+        assert!(RingBufferLayout::new(usize::MAX, 2).is_err());
     }
 
     #[test]
