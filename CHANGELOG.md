@@ -2,12 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+- Hardened bounded latency profiles (`interactive`, `balanced`, `resilient`) wired into controller and bridge public API (`createJamAudioBridge({ latencyProfile })`).
+- Central input validation and checked arithmetic for output sample rates (8k–192kHz), channel counts (1–8), ring-buffer capacities, and frame request sizes across Rust and Wasm surfaces.
+- Configured scoped package metadata for `@jamart3d/jam-audio-worklet` with npm exports and verified publish dry-run.
+
 ### Changed
 - Refactored audio sample-accounting contract: `StreamingDecoder` is now the sole owner of all stream-level encoder delay, seek-alignment, and trailing-padding trimming in the source-frame domain.
 - Consolidated gapless handoff in `GaplessPlayer` by removing redundant next-track delay skip.
 - Made resampler operations fallible, replacing panics and swallowed errors with `DecodeError::Resample`.
 - Made seek state reset transactional: format seek succeeds before resampler/decoder state is reset.
 - Made resampler EOF drain exact and idempotent, excluding synthetic zero-padding tail frames.
+- Recovered native `SharedCell` mutexes post-poisoning via `PoisonError::into_inner()`, aligning implementation with documented behavior.
+- Transitioned unknown `AudioMetadata.duration_ms` from `0.0` to `None` (`undefined` in JS) while reserving `Some(0.0)` for known zero-length assets.
 
 
 ## [0.4.5] - 2026-06-28

@@ -61,6 +61,26 @@ git push
 git push origin vX.Y.Z
 ```
 
+## Registry Publishing Dry-Run
+
+For scoped npm packages (`@jamart3d/jam-audio-worklet`, `@jamart3d/jam-audio-engine-wasm`):
+
+1. Validate worklet package dry-run:
+```bash
+cd packages/jam-audio-worklet && npm publish --dry-run
+```
+
+2. Validate Wasm package dry-run:
+```bash
+cd packages/jam-audio-engine && wasm-pack build --target web --out-name jam_audio_engine && cd pkg && npm publish --dry-run
+```
+
+3. Actual publication (requires owner authorization):
+```bash
+cd packages/jam-audio-worklet && npm publish --access public
+cd packages/jam-audio-engine/pkg && npm publish --access public
+```
+
 ## Notes
 
 - Do not hold a finished patch release just because later roadmap phases exist.

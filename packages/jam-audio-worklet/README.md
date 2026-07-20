@@ -14,7 +14,7 @@ Generic JS bridge and worklet package for the Jam Audio Pipeline.
 ## Usage
 
 ```js
-import { createJamAudioBridge } from 'jam_audio_worklet';
+import { createJamAudioBridge } from '@jamart3d/jam-audio-worklet';
 
 const bridge = createJamAudioBridge({
   wasmModuleLoader: async () => {
@@ -22,8 +22,16 @@ const bridge = createJamAudioBridge({
   },
   processorModuleUrl: 'path/to/audio_processor.js',
   playbackWorkerModuleUrl: 'path/to/audio_playback_worker.js',
+  latencyProfile: 'resilient', // 'resilient' (default) | 'balanced' | 'interactive'
+  declickDurationMs: 15,
 });
 ```
+
+### Latency Profiles
+
+- `resilient` (default): 2.0s startup, 6.0s steady target, 1.0s critical threshold. Maximum buffer reliability for PWA/background audio.
+- `balanced`: 1.0s startup, 4.0s steady target, 0.5s critical threshold. Moderate buffer headroom.
+- `interactive`: 0.5s startup, 2.0s steady target, 0.25s critical threshold. Minimum latency for interactive applications.
 
 ## Large Files
 

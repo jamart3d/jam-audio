@@ -1,9 +1,21 @@
 {
-  "name": "jam_audio_worklet",
+  "name": "@jamart3d/jam-audio-worklet",
   "version": "0.4.5",
   "description": "Generic audio worklet and bridge for Jam Audio Pipeline",
   "type": "module",
   "main": "src/audio_bridge.js",
+  "exports": {
+    ".": "./src/audio_bridge.js",
+    "./worker": "./src/audio_playback_worker.js",
+    "./policy": "./src/buffer_policy.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/",
+    "!src/**/*.test.js",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "find src -name '*.js' ! -name '*.test.js' -exec node --check {} \\; && node --test src/*.test.js"
   },
@@ -13,6 +25,13 @@
     "bridge",
     "web-audio"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jamart3d/jam-audio.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "author": "",
   "license": "ISC"
 }
