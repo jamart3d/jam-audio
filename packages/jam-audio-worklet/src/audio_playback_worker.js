@@ -79,6 +79,8 @@ export function initPlaybackWorker({
             stateBuffer: data.stateBuffer,
             frameCapacity: data.frameCapacity,
             sampleRate: data.sampleRate,
+            protocolVersion: data.protocolVersion,
+            protocolSlots: data.protocolSlots,
           }, data.sessionGeneration);
           self.postMessage({ type: 'response', requestId });
           return;
@@ -89,17 +91,21 @@ export function initPlaybackWorker({
             stateBuffer: data.stateBuffer,
             frameCapacity: data.frameCapacity,
             sampleRate: data.sampleRate,
+            protocolVersion: data.protocolVersion,
+            protocolSlots: data.protocolSlots,
           }, data.sessionGeneration);
           self.postMessage({ type: 'response', requestId });
           return;
         case 'playTrackBounded': {
           await ensureWasm();
-          const { url, totalSize, sampleRate, pcmBuffer, stateBuffer, frameCapacity } = data;
+          const { url, totalSize, sampleRate, pcmBuffer, stateBuffer, frameCapacity, protocolVersion, protocolSlots } = data;
           controller.playTrackBounded(url, totalSize, sampleRate, {
             pcmBuffer,
             stateBuffer,
             frameCapacity,
             sampleRate,
+            protocolVersion,
+            protocolSlots,
           }, data.sessionGeneration);
           self.postMessage({ type: 'response', requestId });
           return;
