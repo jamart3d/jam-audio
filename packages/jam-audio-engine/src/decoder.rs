@@ -157,6 +157,10 @@ pub enum DecodeError {
     NoDefaultTrack,
     DecoderState(&'static str),
     Symphonia(String),
+    Resample {
+        operation: &'static str,
+        message: String,
+    },
 }
 
 impl fmt::Display for DecodeError {
@@ -169,6 +173,9 @@ impl fmt::Display for DecodeError {
             Self::NoDefaultTrack => write!(f, "audio container did not expose a default track"),
             Self::DecoderState(message) => write!(f, "{message}"),
             Self::Symphonia(message) => write!(f, "{message}"),
+            Self::Resample { operation, message } => {
+                write!(f, "resampler error during {operation}: {message}")
+            }
         }
     }
 }

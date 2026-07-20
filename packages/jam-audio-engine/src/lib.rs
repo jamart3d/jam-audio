@@ -12,6 +12,8 @@ mod opus_decoder;
 mod ring_buffer;
 mod shared_cell;
 
+pub mod test_helpers;
+
 use shared_cell::SharedCell;
 
 pub use decoder::{
