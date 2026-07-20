@@ -71,9 +71,18 @@ When `setSessionQueue(trackIds, currentIndex)` is used, the bridge stores lightw
 
 ## Protocol
 
-Uses a stable `SharedArrayBuffer` layout:
-- Slot 0: READ_INDEX
-- Slot 1: WRITE_INDEX
-- Slot 2: FRAMES_AVAILABLE_INDEX
-- Slot 3: END_OF_STREAM_INDEX
-- Slot 4: STOP_INDEX
+Uses a versioned `SharedArrayBuffer` layout (Version 2, 12 slots):
+- Slot 0: `READ_INDEX`
+- Slot 1: `WRITE_INDEX`
+- Slot 2: `FRAMES_AVAILABLE_INDEX`
+- Slot 3: `END_OF_STREAM_INDEX`
+- Slot 4: `STOP_INDEX`
+- Slot 5: `TOTAL_FRAMES_RENDERED_INDEX`
+- Slot 6: `HEARTBEAT_COUNT_INDEX`
+- Slot 7: `REFILL_REQUEST_INDEX` (futex)
+- Slot 8: `TARGET_FRAMES_INDEX`
+- Slot 9: `UNDERRUN_EPISODES_INDEX` (atomic underrun episode counter)
+- Slot 10: `SILENT_FRAMES_INDEX` (atomic cumulative silent frames rendered counter)
+- Slot 11: `EPOCH_INDEX` (atomic epoch tracker to prevent out-of-sync writes on seek/reset)
+
+During initialization, the controller (`audio_playback_worker_controller.js`) and processor (`audio_processor.js`) validate that the initialization payload matches the expected `protocolVersion` (2) and `protocolSlots` (12). Any mismatch throws a structured error to prevent silent data corruption or undefined state.
