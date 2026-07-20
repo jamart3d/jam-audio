@@ -58,6 +58,9 @@ pub struct StereoResampler {
     chunk_frames: usize,
     pub source_rate: u32,
     pub target_rate: u32,
+    total_input_frames: usize,
+    total_output_frames: usize,
+    flushed: bool,
 }
 
 fn extend_interleaved_stereo(out: &mut Vec<f32>, left: &[f32], right: &[f32]) {
@@ -131,6 +134,9 @@ impl StereoResampler {
             chunk_frames,
             source_rate,
             target_rate,
+            total_input_frames: 0,
+            total_output_frames: 0,
+            flushed: false,
         })
     }
 
@@ -139,6 +145,9 @@ impl StereoResampler {
         self.inner.reset();
         self.pending[0].clear();
         self.pending[1].clear();
+        self.total_input_frames = 0;
+        self.total_output_frames = 0;
+        self.flushed = false;
     }
 
     /// Push interleaved stereo `samples` into the resampler, emitting resampled
@@ -148,6 +157,7 @@ impl StereoResampler {
         samples: &[f32],
         out: &mut Vec<f32>,
     ) -> Result<(), DecodeError> {
+        self.total_input_frames += samples.len() / 2;
         // Deinterleave into pending buffers.
         for frame in samples.chunks_exact(2) {
             self.pending[0].push(frame[0]);
@@ -155,26 +165,48 @@ impl StereoResampler {
         }
         // Drain complete chunks.
         while self.pending[0].len() >= self.chunk_frames {
-            self.process_one_chunk(out)?;
+            let frames = self.process_one_chunk(out)?;
+            self.total_output_frames += frames;
         }
         Ok(())
     }
 
     /// Flush any remaining buffered frames by padding with silence and processing.
     pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecodeError> {
-        if self.pending[0].is_empty() {
+        if self.flushed {
             return Ok(());
         }
-        // Pad both channels to chunk_frames with silence.
-        let have = self.pending[0].len();
-        let need = self.chunk_frames - have;
-        self.pending[0].extend(std::iter::repeat_n(0.0f32, need));
-        self.pending[1].extend(std::iter::repeat_n(0.0f32, need));
-        self.process_one_chunk(out)?;
+        self.flushed = true;
+
+        let expected_output = (self.total_input_frames as f64 * self.target_rate as f64
+            / self.source_rate as f64)
+            .round() as usize;
+
+        while self.total_output_frames < expected_output {
+            let remaining_needed = expected_output.saturating_sub(self.total_output_frames);
+            if remaining_needed == 0 {
+                break;
+            }
+
+            let have = self.pending[0].len();
+            let need = self.chunk_frames - have;
+            self.pending[0].extend(std::iter::repeat_n(0.0f32, need));
+            self.pending[1].extend(std::iter::repeat_n(0.0f32, need));
+
+            let mut flushed_scratch = Vec::new();
+            let flushed_frames = self.process_one_chunk(&mut flushed_scratch)?;
+            if flushed_frames == 0 {
+                break;
+            }
+            let to_take = flushed_frames.min(remaining_needed);
+            out.extend_from_slice(&flushed_scratch[..to_take * 2]);
+            self.total_output_frames += to_take;
+        }
+
         Ok(())
     }
 
-    fn process_one_chunk(&mut self, out: &mut Vec<f32>) -> Result<(), DecodeError> {
+    fn process_one_chunk(&mut self, out: &mut Vec<f32>) -> Result<usize, DecodeError> {
         // Extract exactly chunk_frames from the front of pending.
         let l: Vec<f32> = self.pending[0].drain(..self.chunk_frames).collect();
         let r: Vec<f32> = self.pending[1].drain(..self.chunk_frames).collect();
@@ -186,8 +218,9 @@ impl StereoResampler {
                 operation: "process",
                 message: e.to_string(),
             })?;
+        let frames = resampled[0].len();
         extend_interleaved_stereo(out, &resampled[0], &resampled[1]);
-        Ok(())
+        Ok(frames)
     }
 }
 
