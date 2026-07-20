@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+- Refactored audio sample-accounting contract: `StreamingDecoder` is now the sole owner of all stream-level encoder delay, seek-alignment, and trailing-padding trimming in the source-frame domain.
+- Consolidated gapless handoff in `GaplessPlayer` by removing redundant next-track delay skip.
+- Made resampler operations fallible, replacing panics and swallowed errors with `DecodeError::Resample`.
+- Made seek state reset transactional: format seek succeeds before resampler/decoder state is reset.
+- Made resampler EOF drain exact and idempotent, excluding synthetic zero-padding tail frames.
+
+
 ## [0.4.5] - 2026-06-28
 
 ### Changed
