@@ -52,12 +52,18 @@ mod imp {
         }
 
         pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-            let guard = self.0.lock().expect("shared cell mutex poisoned");
+            let guard = match self.0.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             f(&guard)
         }
 
         pub fn with_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-            let mut guard = self.0.lock().expect("shared cell mutex poisoned");
+            let mut guard = match self.0.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             f(&mut guard)
         }
     }
@@ -71,7 +77,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
-    fn with_and_with_mut_panic_after_poisoned_mutex() {
+    fn with_and_with_mut_recover_after_poisoned_mutex() {
         let cell = SharedCell::new(1usize);
         let poisoned = cell.clone();
 
@@ -84,17 +90,14 @@ mod tests {
 
         assert!(result.is_err());
 
-        let result_with = catch_unwind(AssertUnwindSafe(|| {
-            cell.with(|value| *value);
-        }));
-        assert!(result_with.is_err());
+        // Inverted: recovery via PoisonError::into_inner() allows access post-poison
+        assert_eq!(cell.with(|value| *value), 2);
 
-        let result_with_mut = catch_unwind(AssertUnwindSafe(|| {
-            cell.with_mut(|value| {
-                *value = 3;
-            });
-        }));
-        assert!(result_with_mut.is_err());
+        cell.with_mut(|value| {
+            *value = 3;
+        });
+
+        assert_eq!(cell.with(|value| *value), 3);
     }
 
     #[test]
