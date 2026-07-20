@@ -1,5 +1,7 @@
 pub const DEFAULT_FRAME_CAPACITY: usize = 524_288;
-pub const SHARED_STATE_SLOTS: usize = 5;
+// protocol:begin
+pub const SHARED_STATE_SLOTS: usize = 12;
+// protocol:end
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RingBufferLayout {
@@ -181,11 +183,11 @@ mod tests {
         let layout = RingBufferLayout::new(DEFAULT_FRAME_CAPACITY, 2).unwrap();
 
         assert_eq!(layout.sample_capacity(), DEFAULT_FRAME_CAPACITY * 2);
-        assert_eq!(layout.state_bytes(), 20);
+        assert_eq!(layout.state_bytes(), 48);
         assert_eq!(layout.sample_bytes(), DEFAULT_FRAME_CAPACITY * 2 * 4);
         assert_eq!(
             layout.shared_buffer_bytes(),
-            20 + (DEFAULT_FRAME_CAPACITY * 2 * 4)
+            48 + (DEFAULT_FRAME_CAPACITY * 2 * 4)
         );
     }
 

@@ -148,7 +148,7 @@ test('S6: STOP_INDEX suppresses worklet signal — refill loop must not wake for
   // Spec §3.1: "if STOP_INDEX == 1, the worklet must NOT signal"
   // This test verifies the check: worklet reads STOP_INDEX before signalling.
   const STOP_INDEX = 4;
-  const stateBuffer = new SharedArrayBuffer(9 * Int32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const state = new Int32Array(stateBuffer);
   Atomics.store(state, STOP_INDEX, 1); // stopped
 
@@ -184,7 +184,7 @@ test('P1.2: process() adds to REFILL_REQUEST_INDEX when frames drop below low-wa
   const TARGET_FRAMES_INDEX = 8;
   const LOW_WATER_FRACTION = 0.5;
 
-  const stateBuffer = new SharedArrayBuffer(9 * Int32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const state = new Int32Array(stateBuffer);
 
   const STEADY_STATE_TARGET = 264600;
@@ -242,7 +242,7 @@ test('process wraps readFrame at frameCapacity and preserves channel order', asy
     40, 41,
   ]);
 
-  const stateBuffer = new SharedArrayBuffer(9 * Int32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const state = new Int32Array(stateBuffer);
   Atomics.store(state, 0, 3); // READ_INDEX
   Atomics.store(state, 2, 3); // FRAMES_AVAILABLE_INDEX
@@ -250,11 +250,13 @@ test('process wraps readFrame at frameCapacity and preserves channel order', asy
   const processor = new ProcessorClass();
   processor.handleMessage({
     type: 'init',
-    pcmBuffer,
-    stateBuffer,
-    frameCapacity: 4,
+      pcmBuffer,
+      stateBuffer,
+      frameCapacity: 4,
     channels: 2,
-  });
+    protocolVersion: 2,
+    protocolSlots: 12,
+    });
 
   const left = new Float32Array(4);
   const right = new Float32Array(4);
@@ -276,7 +278,7 @@ test('process properly duplicates mono input to stereo output', async () => {
     10, 20, 30, 40
   ]);
 
-  const stateBuffer = new SharedArrayBuffer(9 * Int32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const state = new Int32Array(stateBuffer);
   Atomics.store(state, 0, 2); // READ_INDEX
   Atomics.store(state, 2, 3); // FRAMES_AVAILABLE_INDEX
@@ -284,11 +286,13 @@ test('process properly duplicates mono input to stereo output', async () => {
   const processor = new ProcessorClass();
   processor.handleMessage({
     type: 'init',
-    pcmBuffer,
-    stateBuffer,
-    frameCapacity: 4,
+      pcmBuffer,
+      stateBuffer,
+      frameCapacity: 4,
     channels: 1,
-  });
+    protocolVersion: 2,
+    protocolSlots: 12,
+    });
 
   const left = new Float32Array(4);
   const right = new Float32Array(4);
@@ -313,7 +317,7 @@ test('process handles stereo input with mono output (left === right)', async () 
     40, 41,
   ]);
 
-  const stateBuffer = new SharedArrayBuffer(9 * Int32Array.BYTES_PER_ELEMENT);
+  const stateBuffer = new SharedArrayBuffer(12 * Int32Array.BYTES_PER_ELEMENT);
   const state = new Int32Array(stateBuffer);
   Atomics.store(state, 0, 2); // READ_INDEX
   Atomics.store(state, 2, 3); // FRAMES_AVAILABLE_INDEX
@@ -321,11 +325,13 @@ test('process handles stereo input with mono output (left === right)', async () 
   const processor = new ProcessorClass();
   processor.handleMessage({
     type: 'init',
-    pcmBuffer,
-    stateBuffer,
-    frameCapacity: 4,
+      pcmBuffer,
+      stateBuffer,
+      frameCapacity: 4,
     channels: 2,
-  });
+    protocolVersion: 2,
+    protocolSlots: 12,
+    });
 
   const monoOutput = new Float32Array(4);
 

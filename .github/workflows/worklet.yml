@@ -23,6 +23,9 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Check worklet syntax
+      - name: Check protocol generator
+        run: node protocol/generate.mjs --check
+
+      - name: Check worklet syntax and tests
         working-directory: packages/jam-audio-worklet
         run: npm test

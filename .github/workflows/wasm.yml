@@ -43,3 +43,7 @@ jobs:
       - name: wasm-pack build
         working-directory: packages/jam-audio-engine
         run: wasm-pack build --target web --release --out-name jam_audio_engine
+
+      - name: wasm-pack test
+        working-directory: packages/jam-audio-engine
+        run: wasm-pack test --headless --chrome

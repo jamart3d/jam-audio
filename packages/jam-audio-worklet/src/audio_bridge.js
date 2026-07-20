@@ -19,6 +19,22 @@ import {
   clampGain,
 } from './audio_bridge_eq.js';
 
+// protocol:begin
+const PROTOCOL_VERSION = 2;
+const PROTOCOL_SLOTS = 12;
+const READ_INDEX = 0;
+const WRITE_INDEX = 1;
+const FRAMES_AVAILABLE_INDEX = 2;
+const END_OF_STREAM_INDEX = 3;
+const STOP_INDEX = 4;
+const TOTAL_FRAMES_RENDERED_INDEX = 5;
+const HEARTBEAT_COUNT_INDEX = 6;
+const REFILL_REQUEST_INDEX = 7;
+const TARGET_FRAMES_INDEX = 8;
+const UNDERRUN_EPISODES_INDEX = 9;
+const SILENT_FRAMES_INDEX = 10;
+const EPOCH_INDEX = 11;
+// protocol:end
 
 export function createJamAudioBridge({
   wasmModuleLoader,
@@ -967,7 +983,7 @@ export function createJamAudioBridge({
     sharedPcmBuffer = new SharedArrayBuffer(
       frameCapacity * CHANNELS * Float32Array.BYTES_PER_ELEMENT,
     );
-    sharedStateBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 9);
+    sharedStateBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * PROTOCOL_SLOTS);
     diagnosticsState.framesAvailable = 0;
     diagnosticsState.frameCapacity = frameCapacity;
     diagnosticsState.bufferFillPercent = 0;
@@ -1530,6 +1546,8 @@ export function createJamAudioBridge({
           stateBuffer: sharedStateBuffer,
           frameCapacity,
           sampleRate: audioContext.sampleRate,
+          protocolVersion: PROTOCOL_VERSION,
+          protocolSlots: PROTOCOL_SLOTS,
         });
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
         setStartupPhase('prebuffering');
@@ -1539,6 +1557,8 @@ export function createJamAudioBridge({
           stateBuffer: sharedStateBuffer,
           frameCapacity,
           channels: CHANNELS,
+          protocolVersion: PROTOCOL_VERSION,
+          protocolSlots: PROTOCOL_SLOTS,
         });
         wireWorkletPortOnce();
       } catch (error) {
@@ -1592,6 +1612,8 @@ export function createJamAudioBridge({
           stateBuffer: sharedStateBuffer,
           frameCapacity,
           sampleRate: audioContext.sampleRate,
+          protocolVersion: PROTOCOL_VERSION,
+          protocolSlots: PROTOCOL_SLOTS,
         });
         console.log('[deeplink-diag] playTrackStreaming: post-worker STOP=',
           Atomics.load(sharedStateView, 4),
@@ -1605,6 +1627,8 @@ export function createJamAudioBridge({
           stateBuffer: sharedStateBuffer,
           frameCapacity,
           channels: CHANNELS,
+          protocolVersion: PROTOCOL_VERSION,
+          protocolSlots: PROTOCOL_SLOTS,
         });
         wireWorkletPortOnce();
       } catch (error) {
@@ -1659,6 +1683,8 @@ export function createJamAudioBridge({
           stateBuffer: sharedStateBuffer,
           frameCapacity,
           sampleRate: audioContext.sampleRate,
+          protocolVersion: PROTOCOL_VERSION,
+          protocolSlots: PROTOCOL_SLOTS,
         });
         console.log('[deeplink-diag] playTrackBounded: post-worker STOP=',
           Atomics.load(sharedStateView, 4),
@@ -1672,6 +1698,8 @@ export function createJamAudioBridge({
           stateBuffer: sharedStateBuffer,
           frameCapacity,
           channels: CHANNELS,
+          protocolVersion: PROTOCOL_VERSION,
+          protocolSlots: PROTOCOL_SLOTS,
         });
         wireWorkletPortOnce();
       } catch (error) {
@@ -2279,6 +2307,8 @@ export function createJamAudioBridge({
       stateBuffer: sharedStateBuffer,
       frameCapacity,
       channels: CHANNELS,
+      protocolVersion: PROTOCOL_VERSION,
+      protocolSlots: PROTOCOL_SLOTS,
     });
     workletPortWired = false;
     wireWorkletPortOnce();

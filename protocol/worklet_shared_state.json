@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "slots": 12,
+  "indices": {
+    "READ_INDEX": 0,
+    "WRITE_INDEX": 1,
+    "FRAMES_AVAILABLE_INDEX": 2,
+    "END_OF_STREAM_INDEX": 3,
+    "STOP_INDEX": 4,
+    "TOTAL_FRAMES_RENDERED_INDEX": 5,
+    "HEARTBEAT_COUNT_INDEX": 6,
+    "REFILL_REQUEST_INDEX": 7,
+    "TARGET_FRAMES_INDEX": 8,
+    "UNDERRUN_EPISODES_INDEX": 9,
+    "SILENT_FRAMES_INDEX": 10,
+    "EPOCH_INDEX": 11
+  }
+}

@@ -1,10 +1,19 @@
+// protocol:begin
+const PROTOCOL_VERSION = 2;
+const PROTOCOL_SLOTS = 12;
 const READ_INDEX = 0;
-const _WRITE_INDEX = 1;
+const WRITE_INDEX = 1;
 const FRAMES_AVAILABLE_INDEX = 2;
-const _END_OF_STREAM_INDEX = 3;
+const END_OF_STREAM_INDEX = 3;
 const STOP_INDEX = 4;
-const REFILL_REQUEST_INDEX = 7; // futex: worklet stores generation counter, worker waitAsync
-const TARGET_FRAMES_INDEX = 8;  // adaptive fill target in frames (Phase 2); Phase 1: STEADY_STATE
+const TOTAL_FRAMES_RENDERED_INDEX = 5;
+const HEARTBEAT_COUNT_INDEX = 6;
+const REFILL_REQUEST_INDEX = 7;
+const TARGET_FRAMES_INDEX = 8;
+const UNDERRUN_EPISODES_INDEX = 9;
+const SILENT_FRAMES_INDEX = 10;
+const EPOCH_INDEX = 11;
+// protocol:end
 const LOW_WATER_FRACTION = 0.5; // low-water mark = floor(target * LOW_WATER_FRACTION)
 
 
@@ -24,6 +33,10 @@ class JamAudioProcessor extends AudioWorkletProcessor {
 
   handleMessage(data) {
     if (data.type === 'init') {
+      const stateLen = data.stateBuffer.byteLength / Int32Array.BYTES_PER_ELEMENT;
+      if (data.protocolVersion !== PROTOCOL_VERSION || data.protocolSlots !== PROTOCOL_SLOTS || stateLen !== PROTOCOL_SLOTS) {
+        throw new Error(`Protocol mismatch in processor. Expected version ${PROTOCOL_VERSION} with ${PROTOCOL_SLOTS} slots, but received version ${data.protocolVersion} with ${data.protocolSlots} slots (stateBuffer length: ${stateLen}).`);
+      }
       this.samples = new Float32Array(data.pcmBuffer);
       this.state = new Int32Array(data.stateBuffer);
       this.frameCapacity = data.frameCapacity;
@@ -81,9 +94,28 @@ class JamAudioProcessor extends AudioWorkletProcessor {
 
     // Hoist common loads outside the hot loop to reduce atomic overhead.
     const shouldStop = Atomics.load(this.state, STOP_INDEX) === 1;
+    const isEOS = Atomics.load(this.state, END_OF_STREAM_INDEX) === 1;
+    const currentEpoch = this.state.length > 11 ? Atomics.load(this.state, 11) : 0; // EPOCH_INDEX = 11
+
+    if (shouldStop) {
+      this.isUnderrunning = false;
+      left.fill(0);
+      right.fill(0);
+      return true;
+    }
+
     const initialAvailableFrames = Atomics.load(this.state, FRAMES_AVAILABLE_INDEX);
 
-    if (shouldStop || initialAvailableFrames <= 0) {
+    if (initialAvailableFrames <= 0) {
+      if (!isEOS) {
+        if (!this.isUnderrunning) {
+          this.isUnderrunning = true;
+          Atomics.add(this.state, 9, 1); // UNDERRUN_EPISODES_INDEX
+        }
+        Atomics.add(this.state, 10, left.length); // SILENT_FRAMES_INDEX
+      } else {
+        this.isUnderrunning = false;
+      }
       left.fill(0);
       right.fill(0);
       return true;
@@ -133,11 +165,32 @@ class JamAudioProcessor extends AudioWorkletProcessor {
     left.fill(0, framesToProcess);
     right.fill(0, framesToProcess);
 
+    if (framesToProcess < left.length && !isEOS) {
+       if (!this.isUnderrunning) {
+          this.isUnderrunning = true;
+          Atomics.add(this.state, 9, 1);
+       }
+       Atomics.add(this.state, 10, left.length - framesToProcess);
+    } else if (framesToProcess === left.length) {
+       this.isUnderrunning = false;
+    }
+
     if (framesToProcess > 0) {
+      if (this.state.length > 11 && Atomics.load(this.state, 11) !== currentEpoch) {
+          return true; // Abort commit: worker reset the indices.
+      }
+      
       // Single batch update for shared state indices and counters.
       Atomics.store(this.state, READ_INDEX, readFrame);
-      const framesAfterSub = Atomics.sub(this.state, FRAMES_AVAILABLE_INDEX, framesToProcess)
-        - framesToProcess;
+      
+      let prevFrames;
+      let nextFrames;
+      do {
+         prevFrames = Atomics.load(this.state, FRAMES_AVAILABLE_INDEX);
+         nextFrames = Math.max(0, prevFrames - framesToProcess);
+      } while (Atomics.compareExchange(this.state, FRAMES_AVAILABLE_INDEX, prevFrames, nextFrames) !== prevFrames);
+      
+      const framesAfterSub = nextFrames;
 
       // Low-water signal: wake the worker if buffer is hungry.
       // Two atomic ops only — no allocation, no postMessage in the hot path.

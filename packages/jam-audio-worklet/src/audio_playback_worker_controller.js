@@ -35,13 +35,22 @@ import {
 } from './playback_worker_controller_refill.js';
 
 
+// protocol:begin
+const PROTOCOL_VERSION = 2;
+const PROTOCOL_SLOTS = 12;
 const READ_INDEX = 0;
 const WRITE_INDEX = 1;
 const FRAMES_AVAILABLE_INDEX = 2;
 const END_OF_STREAM_INDEX = 3;
 const STOP_INDEX = 4;
-const REFILL_REQUEST_INDEX = 7; // futex: worklet add+notify when hungry; worker waitAsync target
-const TARGET_FRAMES_INDEX = 8;  // adaptive fill target (Phase 1: STEADY_STATE_TARGET_FRAMES)
+const TOTAL_FRAMES_RENDERED_INDEX = 5;
+const HEARTBEAT_COUNT_INDEX = 6;
+const REFILL_REQUEST_INDEX = 7;
+const TARGET_FRAMES_INDEX = 8;
+const UNDERRUN_EPISODES_INDEX = 9;
+const SILENT_FRAMES_INDEX = 10;
+const EPOCH_INDEX = 11;
+// protocol:end
 const CHANNELS = 2;
 const REFILL_CHUNK_FRAMES = 1024;
 const REFILL_CHUNK_FRAMES_RECOVERY = 4096;
@@ -847,11 +856,22 @@ function createPlaybackWorkerController({
     return refillDriver;
   }
 
-  function bindSharedBuffers({ pcmBuffer, stateBuffer, frameCapacity: nextCapacity }) {
+  function bindSharedBuffers({ pcmBuffer, stateBuffer, frameCapacity: nextCapacity, protocolVersion, protocolSlots }) {
+    const stateLen = stateBuffer.byteLength / Int32Array.BYTES_PER_ELEMENT;
+    if (protocolVersion !== PROTOCOL_VERSION || protocolSlots !== PROTOCOL_SLOTS || stateLen !== PROTOCOL_SLOTS) {
+      throw new Error(`Protocol mismatch in worker. Expected version ${PROTOCOL_VERSION} with ${PROTOCOL_SLOTS} slots, but received version ${protocolVersion} with ${protocolSlots} slots (stateBuffer length: ${stateLen}).`);
+    }
     frameCapacity = nextCapacity;
     sharedSamples = new Float32Array(pcmBuffer);
     sharedState = new Int32Array(stateBuffer);
+    let epoch = 0;
+    if (sharedState.length > EPOCH_INDEX) {
+        epoch = Atomics.load(sharedState, EPOCH_INDEX);
+    }
     sharedState.fill(0);
+    if (sharedState.length > EPOCH_INDEX) {
+        Atomics.store(sharedState, EPOCH_INDEX, epoch + 1);
+    }
     if (sharedState.length > TARGET_FRAMES_INDEX) {
       Atomics.store(sharedState, TARGET_FRAMES_INDEX, STEADY_STATE_TARGET_FRAMES);
     }
@@ -2031,6 +2051,9 @@ function createPlaybackWorkerController({
           Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
           Atomics.store(sharedState, READ_INDEX, 0);
           Atomics.store(sharedState, WRITE_INDEX, 0);
+          if (sharedState.length > EPOCH_INDEX) {
+            Atomics.add(sharedState, EPOCH_INDEX, 1);
+          }
 
           // Notify slot 7 so any still-running loop iteration wakes immediately
           // to see the new FRAMES_AVAILABLE=0. stopRefillLoop() above bumps

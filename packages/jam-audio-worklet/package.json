@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/audio_bridge.js",
   "scripts": {
-    "test": "node --check src/audio_bridge.js && node --check src/audio_processor.js"
+    "test": "find src -name '*.js' ! -name '*.test.js' -exec node --check {} \\; && node --test src/*.test.js"
   },
   "keywords": [
     "audio",
