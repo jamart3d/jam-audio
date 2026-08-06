@@ -14,6 +14,7 @@ const PEAKING_Q = 1.4;
 export function createEqChain(audioContext) {
   if (typeof audioContext.createBiquadFilter !== 'function') {
     return BAND_FREQUENCIES.map(() => ({
+      __jamdiscEqStub: true,
       type: '',
       frequency: { value: 0 },
       Q: { value: 0 },
@@ -63,4 +64,10 @@ export function applyBand(eqFilterNodes, bandIndex, gainDb) {
 export function applyBands(eqFilterNodes, gains) {
   if (!eqFilterNodes) return;
   gains.forEach((db, i) => applyBand(eqFilterNodes, i, db));
+}
+
+export function resolveAnalysisTapNode(processorNode, eqFilterNodes, gainNode) {
+  const tail = eqFilterNodes?.[eqFilterNodes.length - 1] ?? null;
+  if (tail && tail.__jamdiscEqStub !== true) return tail;
+  return processorNode ?? gainNode ?? null;
 }

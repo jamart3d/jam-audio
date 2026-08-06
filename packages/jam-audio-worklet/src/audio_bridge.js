@@ -17,6 +17,7 @@ import {
   applyBand,
   applyBands,
   clampGain,
+  resolveAnalysisTapNode,
 } from './audio_bridge_eq.js';
 
 // protocol:begin
@@ -48,9 +49,9 @@ export function createJamAudioBridge({
   enableBoundedUrlAnchorExperiment: enableBoundedUrlAnchorExperimentParam,
 }) {
   const CHANNELS = channels;
-  const DECLICK_DURATION_S = (declickDurationMs ?? window._jamdiscDeclickDurationMs ?? 15) / 1000;
+  const DECLICK_DURATION_S = (declickDurationMs ?? (typeof window !== 'undefined' ? window._jamdiscDeclickDurationMs : null) ?? 15) / 1000;
   const SNAPSHOT_INTERVAL_MS = 250;
-  const enableBoundedUrlAnchorExperiment = enableBoundedUrlAnchorExperimentParam ?? (window._jamdiscEnableBoundedUrlAnchorExperiment === true);
+  const enableBoundedUrlAnchorExperiment = enableBoundedUrlAnchorExperimentParam ?? ((typeof window !== 'undefined') && window._jamdiscEnableBoundedUrlAnchorExperiment === true);
 
   let wasmReadyPromise;
   let audioContext;
@@ -224,7 +225,7 @@ export function createJamAudioBridge({
   };
 
 
-  const isAndroidTransport = /Android/i.test(navigator.userAgent ?? '');
+  const isAndroidTransport = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent ?? '');
 
   async function rampGainToValue(targetValue, durationSeconds) {
     if (!audioContext || !gainNode) return;
@@ -2510,7 +2511,14 @@ export function createJamAudioBridge({
     applyBands(eqFilterNodes, pendingEqGains);
   }
 
+  function getVisualizerAudioTap() {
+    if (!audioContext || audioContext.state === 'closed') return null;
+    const sourceNode = resolveAnalysisTapNode(processorNode, eqFilterNodes, gainNode);
+    return sourceNode ? { audioContext, sourceNode } : null;
+  }
+
   const bridgeApi = {
+    getVisualizerAudioTap,
     playTrack,
     playTrackStreaming,
     playTrackBounded,
