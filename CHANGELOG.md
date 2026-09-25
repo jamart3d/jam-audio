@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1] - 2026-09-24
+
+### Added
+- Exposed a post-EQ visualizer audio tap through the worklet bridge's `getVisualizerAudioTap()` API.
+
+### Fixed
+- Guarded access to `window` and `navigator` when browser globals are unavailable.
+
 ## [0.5.0] - 2026-07-20
 
 ### Added
