@@ -8,6 +8,7 @@ import {
   applyBand,
   applyBands,
   clampGain,
+  resolveAnalysisTapNode,
 } from './audio_bridge_eq.js';
 
 function makeMockAudioContext() {
@@ -100,4 +101,18 @@ test('wireEqChain connects nodes in sequence and last to gainNode', () => {
   const gain  = { _n: 'gain' };
   wireEqChain(chain, gain);
   assert.deepEqual(log, [['a','b'], ['b','c'], ['c','gain']]);
+});
+
+test('analysis tap uses the last real post-EQ node', () => {
+  const processor = { id: 'processor' };
+  const gain = { id: 'gain' };
+  const filters = Array.from({ length: 5 }, (_, index) => ({ id: `eq-${index}` }));
+  assert.equal(resolveAnalysisTapNode(processor, filters, gain), filters[4]);
+});
+
+test('analysis tap bypasses tagged EQ stubs', () => {
+  const processor = { id: 'processor' };
+  const stubs = Array.from({ length: 5 }, () => ({ __jamdiscEqStub: true }));
+  assert.equal(resolveAnalysisTapNode(processor, stubs, { id: 'gain' }), processor);
+  assert.equal(resolveAnalysisTapNode(null, stubs, { id: 'gain' }).id, 'gain');
 });
