@@ -5,6 +5,7 @@ import {
   pushHistoryPoint,
 } from './audio_diagnostics_state.js';
 import { createBridgeSessionState } from './audio_bridge_session.js';
+import { createActivationController } from './audio_bridge_activation.js';
 import {
   clampVolume,
   sendPreloadCommand,
@@ -84,11 +85,12 @@ export function createJamAudioBridge({
   let onPreloadPendingCallback = null;
   /** @type {(() => void) | null} */
   let onPlaybackStartedCallback = null;
-  // True when the worker has buffered enough to play but the AudioContext is
-  // still suspended (Android non-installed PWA deeplink). The Dart "started"
-  // callback is deferred until gesture-resume so the UI shows the play button
-  // (paused) rather than the pause button (playing) while no audio comes out.
-  let pendingPlaybackStartedOnResume = false;
+  // When the worker has buffered enough to play but the AudioContext is not
+  // running (Android non-installed PWA deeplink), the Dart "started" callback
+  // is deferred so the UI shows the play button (paused) rather than the pause
+  // button (playing) while no audio comes out. The deferred start is a latch
+  // owned by `activation` (see audio_bridge_activation.js); it publishes once,
+  // only for the current intent, activation generation, context and session.
   let needsPlaybackStartedDeclick = false;
   /** @type {(() => void) | null} */
   let onPlaybackSuspendedCallback = null;
@@ -180,11 +182,46 @@ export function createJamAudioBridge({
 
   function enqueueLatestPlaybackSession(action) {
     const sessionGeneration = ++playbackSessionGeneration;
+    // An accepted play request: intent true and a new activation generation,
+    // synchronously, before any await in the queued action.
+    activation.beginRequest();
     return enqueuePlaybackSession(sessionGeneration, action);
   }
 
   function isCurrentPlaybackSession(sessionGeneration) {
     return sessionGeneration === playbackSessionGeneration;
+  }
+
+  const activation = createActivationController({
+    getContext: () => audioContext ?? null,
+    getEventTarget: () => (
+      typeof document !== 'undefined' && typeof document.addEventListener === 'function'
+        ? document
+        : null
+    ),
+    playAnchor: () => {
+      if (silentAudioEl && silentAudioEl.paused) {
+        const attempt = silentAudioEl.play();
+        if (attempt && typeof attempt.catch === 'function') attempt.catch(() => {});
+      }
+    },
+    isSessionCurrent: isCurrentPlaybackSession,
+    publishStarted: () => publishPlaybackStarted(),
+    emit: (type, details) => emitDiagnosticsEvent({
+      type: `activation-${type}`,
+      label: `Audio activation: ${type}`,
+      timestampMs: nowMs(),
+      severity: 'info',
+      details,
+    }),
+  });
+
+  function unlockAudioFromGesture() {
+    activation.unlockAudioFromGesture();
+  }
+
+  function setPlaybackIntent(shouldPlay) {
+    activation.setPlaybackIntent(Boolean(shouldPlay));
   }
 
   const sessionState = createBridgeSessionState({
@@ -827,17 +864,21 @@ export function createJamAudioBridge({
   async function ensureAudioGraph() {
     if (!audioContext) {
       setStartupPhase('initializing audio graph');
-      audioContext = new AudioContext();
-      if (typeof audioContext.addEventListener === 'function') {
-        audioContext.addEventListener('statechange', () => {
-          const state = audioContext.state;
+      const createdContext = new AudioContext();
+      audioContext = createdContext;
+      if (typeof createdContext.addEventListener === 'function') {
+        createdContext.addEventListener('statechange', () => {
+          const state = createdContext.state;
+          // Reconcile against the context captured at creation: a reset nulls
+          // `audioContext`, and a stale context must never publish a start.
+          activation.onContextStateChange(createdContext);
           emitDiagnosticsEvent({
             type: 'audiocontext-state-changed',
             label: `AudioContext state: ${state}`,
             timestampMs: nowMs(),
             severity: 'info',
             state,
-            currentTime: audioContext.currentTime,
+            currentTime: createdContext.currentTime,
             gainNodeValue: gainNode?.gain?.value ?? null,
           });
 
@@ -850,7 +891,7 @@ export function createJamAudioBridge({
             return;
           }
           if (state === 'suspended') {
-            if (pendingPlaybackStartedOnResume) {
+            if (activation.hasPendingStart()) {
               if (typeof onPlaybackSuspendedCallback === 'function') {
                 onPlaybackSuspendedCallback();
               }
@@ -865,8 +906,11 @@ export function createJamAudioBridge({
         label: 'Audio context created',
         timestampMs: nowMs(),
         severity: 'info',
-        sampleRate: audioContext.sampleRate,
+        sampleRate: createdContext.sampleRate,
       });
+      // The context now exists: arm the click fallback if a startup intent is
+      // already pending and the context starts suspended.
+      activation.refresh();
     }
 
 
@@ -1026,6 +1070,7 @@ export function createJamAudioBridge({
       }
       pendingWorkerRequests.clear();
       setWorkerState('error');
+      activation.invalidate('worker-error');
       emitDiagnosticsEvent({
         type: 'playback-worker-error',
         label: 'Playback worker error',
@@ -1111,33 +1156,40 @@ export function createJamAudioBridge({
       return;
     }
 
-    if (audioContext?.state === 'suspended') {
-      // Buffer is ready but the AudioContext is suspended (autoplay
+    // Latch this session's worker-ready. Started/unmute publish only through
+    // activation.reconcile(): current intent, unchanged activation generation,
+    // same context, context running and this session still current.
+    activation.noteWorkerReady({ sessionGeneration, context: audioContext ?? null });
+    if (audioContext?.state !== 'running') {
+      // Buffer is ready but the AudioContext is not running (autoplay
       // blocked: Android Chrome without an installed PWA, or desktop
       // Chrome with a low Media Engagement Index — see
       // reports/logs/log113.txt). Signal Dart to show the play button so
-      // the UI reflects that audio is buffered but not yet audible.
-      // gesture-resume fires onPlaybackStartedCallback on the first user
-      // interaction, transitioning the UI from play button → pause button
-      // as audio begins. A running context (installed PWA, high MEI, or
-      // gesture-initiated play) takes the else branch and starts
-      // immediately.
-      pendingPlaybackStartedOnResume = true;
+      // the UI reflects that audio is buffered but not yet audible. This is
+      // the existing "buffered readiness" signal. The deferred start is
+      // published by activation.reconcile() once a trusted gesture (or the
+      // browser) brings the context to running.
       if (typeof onPlaybackSuspendedCallback === 'function') onPlaybackSuspendedCallback();
       markPlaybackState('paused');
-    } else {
-      if (needsPlaybackStartedDeclick && gainNode) {
-        // Deferred from playTrack(): apply declick now that the ring buffer is
-        // populated. Gain is at 0 (transport-gain-zero in beginPlaybackSession
-        // set it, and no premature ramp ran). Ramp 0→currentVolume over
-        // DECLICK_DURATION_S so the first audio frame fades in rather than
-        // hard-starting at full gain.
-        needsPlaybackStartedDeclick = false;
-        scheduleDeclickRampToCurrentVolume('playback-started-startup');
-      }
-      if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
-      markPlaybackState('playing');
+      setStartupPhase('playing');
+      activation.refresh();
+      return;
     }
+    activation.reconcile();
+  }
+
+  function publishPlaybackStarted() {
+    if (needsPlaybackStartedDeclick && gainNode) {
+      // Deferred from playTrack(): apply declick now that the ring buffer is
+      // populated. Gain is at 0 (transport-gain-zero in beginPlaybackSession
+      // set it, and no premature ramp ran). Ramp 0→currentVolume over
+      // DECLICK_DURATION_S so the first audio frame fades in rather than
+      // hard-starting at full gain.
+      needsPlaybackStartedDeclick = false;
+      scheduleDeclickRampToCurrentVolume('playback-started-startup');
+    }
+    if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
+    markPlaybackState('playing');
     setStartupPhase('playing');
   }
 
@@ -1248,6 +1300,7 @@ export function createJamAudioBridge({
           return;
         }
         diagnosticsState.transitionGapMs = null;
+        activation.invalidate('playback-error');
         markPlaybackState('error');
         setStartupPhase('error');
         if (typeof onPlaybackErrorCallback === 'function') {
@@ -1387,6 +1440,7 @@ export function createJamAudioBridge({
     // cause startPlayback() to detect a requestToken mismatch and silently abort.
     // Diagnostics are preserved via .then(); the AudioContext resumes as soon as
     // the browser allows (first user gesture).
+    const initResumeGeneration = activation.generation();
     audioContext.resume().then(() => {
       const durationMs = roundMs(performance.now() - resumeStartedAt);
       recordStartupTiming('audioContextResume', durationMs);
@@ -1397,63 +1451,23 @@ export function createJamAudioBridge({
         severity: 'info',
         durationMs,
       });
-      if (!needsPlaybackStartedDeclick) {
+      // A late settlement may unlock the context but must not unmute for a
+      // request that was cancelled or replaced while the resume was pending.
+      if (!needsPlaybackStartedDeclick &&
+          activation.hasIntent() &&
+          activation.isCurrentGeneration(initResumeGeneration)) {
         scheduleDeclickRampToCurrentVolume('initAudio-startup');
       }
     }).catch(() => {});
 
     // Fallback for when the AudioContext is still suspended after initAudio().
     // This happens on Chrome browser (non-installed PWA) where MEI is too low
-    // to grant autoplay. On an INSTALLED Android PWA, Chrome grants
-    // unrestricted autoplay and the context is already running by this point —
-    // this block is a no-op. For non-installed users, register a one-time
-    // capture-phase listener so the context resumes on the very first
-    // interaction; the worker will have already filled the ring buffer by then,
-    // so audio starts with no perceptible delay. Do NOT remove this block —
-    // it is the only audio path for Chrome-browser (non-installed) deeplink
-    // users. Do NOT add a "tap to play" UI overlay — use this silent fallback.
-    if (audioContext.state === 'suspended') {
-      console.log('[deeplink-diag] initAudio: context suspended, registering gesture-resume listener');
-      const resumeOnGesture = () => {
-        document.removeEventListener('click', resumeOnGesture, true);
-        document.removeEventListener('touchstart', resumeOnGesture, true);
-        document.removeEventListener('keydown', resumeOnGesture, true);
-        if (!audioContext || audioContext.state !== 'suspended') return;
-        console.log('[deeplink-diag] gesture-resume: gesture fired, calling audioContext.resume()');
-        audioContext.resume().then(() => {
-          console.log('[deeplink-diag] gesture-resume: audioContext.state=', audioContext.state);
-          // Ramp gain from 0 → currentVolume over 15 ms to avoid the pop that
-          // occurs when the context resumes into a non-zero first audio frame.
-          // The ramp is imperceptible as a fade but eliminates the DC step.
-          if (gainNode) {
-            gainNode.gain.cancelScheduledValues(audioContext.currentTime);
-            gainNode.gain.setValueAtTime(0, audioContext.currentTime);
-            gainNode.gain.linearRampToValueAtTime(
-              currentVolume,
-              audioContext.currentTime + 0.015,
-            );
-          }
-          // If the worker buffered audio while the context was suspended, the
-          // Dart "started" callback was deferred. Fire it now so the UI
-          // transitions from play button → pause button as audio begins.
-          if (pendingPlaybackStartedOnResume) {
-            pendingPlaybackStartedOnResume = false;
-            if (typeof onPlaybackStartedCallback === 'function') onPlaybackStartedCallback();
-            markPlaybackState('playing');
-          }
-          emitDiagnosticsEvent({
-            type: 'audio-context-gesture-resumed',
-            label: 'Audio context resumed via first gesture',
-            timestampMs: nowMs(),
-            severity: 'info',
-          });
-          if (silentAudioEl && silentAudioEl.paused) silentAudioEl.play().catch(() => {});
-        }).catch(() => {});
-      };
-      document.addEventListener('click', resumeOnGesture, true);
-      document.addEventListener('touchstart', resumeOnGesture, true);
-      document.addEventListener('keydown', resumeOnGesture, true);
-    }
+    // to grant autoplay. Arm the single trusted-click fallback (idempotent; it
+    // is also refreshed when the context is created and when worker-ready
+    // arrives suspended) while a startup play intent is pending. touchstart and
+    // keydown grant no user activation and are not used. Do NOT add a "tap to
+    // play" UI overlay — use this silent fallback.
+    activation.refresh();
   }
 
   async function beginPlaybackSession({
@@ -1513,7 +1527,7 @@ export function createJamAudioBridge({
       return false;
     }
 
-    pendingPlaybackStartedOnResume = false;
+    activation.clearPendingStart();
     needsPlaybackStartedDeclick = false;
     transportMuted = true;
     transportMuteReason = 'track-replace';
@@ -1571,6 +1585,7 @@ export function createJamAudioBridge({
         wireWorkletPortOnce();
       } catch (error) {
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        activation.invalidate('startup-error');
         markPlaybackState('error');
         setStartupPhase('error');
         emitDiagnosticsEvent({
@@ -1641,6 +1656,7 @@ export function createJamAudioBridge({
         wireWorkletPortOnce();
       } catch (error) {
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        activation.invalidate('startup-error');
         markPlaybackState('error');
         setStartupPhase('error');
         emitDiagnosticsEvent({
@@ -1712,6 +1728,7 @@ export function createJamAudioBridge({
         wireWorkletPortOnce();
       } catch (error) {
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
+        activation.invalidate('startup-error');
         markPlaybackState('error');
         setStartupPhase('error');
         emitDiagnosticsEvent({
@@ -1785,6 +1802,8 @@ export function createJamAudioBridge({
   }
 
   async function pause() {
+    // Invalidate any pending startup activation before any await or early return.
+    activation.invalidate('pause');
     if (!audioContext) return;
 
     appOwnedPauseInFlight = true;
@@ -1832,6 +1851,11 @@ export function createJamAudioBridge({
 
   async function resume() {
     if (!audioContext) return;
+
+    // Request the context resume synchronously, inside the caller's event
+    // stack and before the first await: a suspended context otherwise leaves
+    // Play dead. No-op on a running context (keep-warm unchanged).
+    unlockAudioFromGesture();
 
     clearAudioInterruptionLatch('resume');
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
@@ -1925,6 +1949,7 @@ export function createJamAudioBridge({
       } = options;
       if (invalidatePlaybackSession) {
         playbackSessionGeneration += 1;
+        activation.invalidate('stop');
       }
 
       // Declick: ramp gain to zero before cutting audio to avoid a pop.
@@ -1989,6 +2014,8 @@ export function createJamAudioBridge({
   }
 
   async function forceAudioContextReset() {
+    // The old context's pending resume/click fallback must not outlive it.
+    activation.invalidate('context-reset');
     appOwnedResetInFlight = true;
     try {
       emitDiagnosticsEvent({
@@ -2365,6 +2392,7 @@ export function createJamAudioBridge({
   }
 
   async function prepareForReload() {
+    activation.invalidate('teardown');
     appOwnedReloadInFlight = true;
     try {
       emitDiagnosticsEvent({
@@ -2431,7 +2459,10 @@ export function createJamAudioBridge({
 
   function registerTeardownListeners() {
     if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
-    const handleTeardown = () => scheduleSynchronousDeclickToZero();
+    const handleTeardown = () => {
+      activation.invalidate('teardown');
+      scheduleSynchronousDeclickToZero();
+    };
     window.addEventListener('pagehide', handleTeardown, { capture: true });
     window.addEventListener('beforeunload', handleTeardown, { capture: true });
   }
@@ -2575,6 +2606,8 @@ export function createJamAudioBridge({
     setNextTrackMeta,
     setSessionQueue,
     getPlaybackSessionSnapshot,
+    unlockAudioFromGesture,
+    setPlaybackIntent,
     initAudio,
     initEngine: async () => { await ensureWasm(); },
     __test__: {
