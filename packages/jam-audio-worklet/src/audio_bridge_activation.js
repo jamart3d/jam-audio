@@ -28,6 +28,9 @@ export function createActivationController({
   let generation = 0;
   let armedTarget = null;
   let latch = null;
+  // True once the current request's start was published. A later Pause -> Play
+  // is a resume, not a startup, so it must not re-arm the click fallback.
+  let startPublished = false;
 
   function onClick(event) {
     if (!event || event.isTrusted !== true) return;
@@ -70,7 +73,7 @@ export function createActivationController({
     if (shouldPlay) {
       if (!intent) {
         intent = true;
-        pending = true;
+        pending = !startPublished;
         generation += 1;
       }
       refresh();
@@ -86,6 +89,7 @@ export function createActivationController({
     pending = true;
     generation += 1;
     latch = null;
+    startPublished = false;
     refresh();
   }
 
@@ -148,6 +152,7 @@ export function createActivationController({
     if (!isSessionCurrent(latch.sessionGeneration)) return false;
     latch = null;
     pending = false;
+    startPublished = true;
     disarm();
     publishStarted();
     return true;

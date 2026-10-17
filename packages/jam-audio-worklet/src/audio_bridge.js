@@ -1858,7 +1858,11 @@ export function createJamAudioBridge({
     unlockAudioFromGesture();
 
     clearAudioInterruptionLatch('resume');
-    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    // Only claim playing to the OS widget when the context actually runs; a
+    // still-suspended context is published later by activation.reconcile().
+    if (audioContext.state === 'running' && 'mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'playing';
+    }
     isAppOwnedResumeInFlight = true;
     try {
       if (isAndroidTransport) {
@@ -1902,7 +1906,7 @@ export function createJamAudioBridge({
       isAppOwnedResumeInFlight = false;
     }
 
-    markPlaybackState('playing');
+    if (audioContext?.state === 'running') markPlaybackState('playing');
     if (playbackWorker) {
       emitDiagnosticsEvent({
         type: 'worker-resume-nudge',

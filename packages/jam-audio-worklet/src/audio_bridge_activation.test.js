@@ -212,3 +212,47 @@ test('beginRequest sets intent and keeps listener armed for the replacement requ
   assert.equal(env.controller.isCurrentGeneration(g), false);
   assert.equal(env.listeners.length, 1);
 });
+
+test('Pause then Play after a completed start does not leave a pending startup armed', () => {
+  const env = makeEnv();
+  env.controller.setPlaybackIntent(true);
+  env.controller.noteWorkerReady({ sessionGeneration: 1, context: env.ctx });
+  env.ctx.state = 'running';
+  env.controller.onContextStateChange(env.ctx);
+  assert.equal(env.published, 1);
+  env.controller.setPlaybackIntent(false);
+  env.controller.setPlaybackIntent(true);
+  env.ctx.state = 'suspended';
+  env.controller.onContextStateChange(env.ctx);
+  assert.equal(env.listeners.length, 0);
+  env.click();
+  assert.equal(env.ctx.resumeCalls, 0);
+});
+
+test('Dart-first sequence still works: intent, then request, then worker-ready, then unlock', () => {
+  const env = makeEnv();
+  env.controller.setPlaybackIntent(true);
+  assert.equal(env.listeners.length, 1, 'armed before the request on a fresh startup');
+  env.controller.beginRequest();
+  env.controller.noteWorkerReady({ sessionGeneration: 1, context: env.ctx });
+  env.click();
+  assert.equal(env.ctx.resumeCalls, 1);
+  env.ctx.state = 'running';
+  env.controller.onContextStateChange(env.ctx);
+  assert.equal(env.published, 1);
+  assert.equal(env.listeners.length, 0);
+});
+
+test('Dart-first after a prior completed start is armed by the request itself', () => {
+  const env = makeEnv();
+  env.controller.beginRequest();
+  env.controller.noteWorkerReady({ sessionGeneration: 1, context: env.ctx });
+  env.ctx.state = 'running';
+  env.controller.reconcile();
+  assert.equal(env.published, 1);
+  env.controller.setPlaybackIntent(false);
+  env.ctx.state = 'suspended';
+  env.controller.setPlaybackIntent(true);
+  env.controller.beginRequest();
+  assert.equal(env.listeners.length, 1);
+});

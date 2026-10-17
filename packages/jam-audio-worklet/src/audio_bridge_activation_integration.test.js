@@ -418,6 +418,7 @@ test('combined Play, Pause, Stop dispatch with a queued resume settlement cannot
   assert.deepEqual(h.ctx().rampTargets.filter((v) => v > 0), []);
 }));
 
+// Pinned: a Pause between worker-ready and publish followed by Play stays dead (F8). Dart gates pause() on playing, so this window is unreachable from the app.
 test('re-Play after a cancelled generation does not revive the stale worker-ready latch', (t) => withHarness(t, async (h) => {
   await h.startPlay();
   h.bridge.setPlaybackIntent(false);
@@ -461,4 +462,80 @@ test('immediately-running autoplay still publishes started and ramps up once', (
   await flush();
   assert.equal(h.started, 1);
   assert.equal(h.suspended, 0);
+}));
+
+test('statechange to running publishes started once while the resume promise never settles', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  const before = h.ctx().resumeCalls;
+  h.clicks(true);
+  assert.equal(h.ctx().resumeCalls, before + 1);
+  assert.equal(h.started, 0);
+  // Browser flips the state but the resume() promise never settles.
+  h.ctx().setState('running');
+  await flush();
+  assert.equal(h.started, 1, 'published from the statechange wiring alone');
+  assert.equal(h.clickListeners(), 0);
+  h.ctx().setState('running');
+  await flush();
+  assert.equal(h.started, 1, 'repeated statechange does not republish');
+}));
+
+test('statechange to running does not publish after intent is cancelled', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  h.bridge.setPlaybackIntent(false);
+  h.ctx().setState('running');
+  await flush();
+  assert.equal(h.started, 0);
+}));
+
+test('statechange on a stale context after reset does not publish', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  const oldCtx = h.ctx();
+  await h.bridge.forceAudioContextReset();
+  oldCtx.setState('running');
+  await flush();
+  assert.equal(h.started, 0);
+}));
+
+test('resume() on a still-suspended context does not tell the OS media widget it is playing', (t) => withHarness(t, async (h) => {
+  globalThis.navigator.mediaSession = { playbackState: 'none' };
+  try {
+    await h.startPlay();
+    await h.bridge.pause();
+    assert.equal(globalThis.navigator.mediaSession.playbackState, 'paused');
+    await h.bridge.resume();
+    assert.equal(h.ctx().state, 'suspended');
+    assert.notEqual(globalThis.navigator.mediaSession.playbackState, 'playing');
+  } finally {
+    delete globalThis.navigator.mediaSession;
+  }
+}));
+
+test('resume() on a running context still marks the media widget playing', (t) => withHarness(t, async (h) => {
+  globalThis.navigator.mediaSession = { playbackState: 'none' };
+  try {
+    await h.startPlay({ ready: false });
+    h.ctx().setState('running');
+    await h.bridge.pause();
+    await h.bridge.resume();
+    assert.equal(globalThis.navigator.mediaSession.playbackState, 'playing');
+  } finally {
+    delete globalThis.navigator.mediaSession;
+  }
+}));
+
+test('Pause then Play after a completed start does not re-arm the click fallback on a later suspend', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  h.clicks(true);
+  h.ctx().allowResume();
+  await flush();
+  assert.equal(h.started, 1);
+  await h.bridge.pause();
+  h.bridge.setPlaybackIntent(true);
+  h.ctx().setState('suspended');
+  await flush();
+  assert.equal(h.clickListeners(), 0);
+  const before = h.ctx().resumeCalls;
+  h.clicks(true);
+  assert.equal(h.ctx().resumeCalls, before, 'an unrelated click must not resume audio');
 }));
