@@ -13,9 +13,10 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function makeHarness() {
+function makeHarness({ boundedAnchor = false, userAgent = 'node-test' } = {}) {
   const h = {
     contexts: [],
+    gains: [],
     workers: [],
     audios: [],
     docAdds: [],
@@ -66,6 +67,7 @@ function makeHarness() {
         setValueAtTime(v) { gain.value = v; },
         linearRampToValueAtTime(v) { gain.value = v; ctx.rampTargets.push(v); },
       };
+      h.gains.push(gain);
       return { gain, connect() {}, disconnect() {} };
     }
     createBiquadFilter() {
@@ -84,11 +86,13 @@ function makeHarness() {
     constructor() {
       this.listeners = [];
       this.sessions = [];
+      this.commands = [];
       h.workers.push(this);
     }
     addEventListener(type, fn) { if (type === 'message') this.listeners.push(fn); }
     emit(data) { for (const fn of this.listeners) fn({ data }); }
     postMessage(msg) {
+      this.commands.push(msg);
       if (typeof msg.requestId !== 'number' || msg.requestId < 0) return;
       if (Number.isInteger(msg.sessionGeneration)) this.sessions.push(msg.sessionGeneration);
       Promise.resolve().then(() => this.emit({ type: 'response', requestId: msg.requestId, payload: {} }));
@@ -99,14 +103,28 @@ function makeHarness() {
   }
 
   class FakeAudio {
-    constructor() {
+    constructor(src) {
+      this.src = src;
       this.paused = true;
       this.playCalls = 0;
       this.style = {};
+      this.listeners = [];
+      this._muted = false;
+      this.unmutedTrackSources = [];
       h.audios.push(this);
     }
-    addEventListener() {}
-    removeEventListener() {}
+    get muted() { return this._muted; }
+    set muted(value) {
+      this._muted = value;
+      if (!value && this.src !== 'audio/silent.wav') this.unmutedTrackSources.push(this.src);
+    }
+    addEventListener(type, fn) { this.listeners.push({ type, fn }); }
+    removeEventListener(type, fn) {
+      this.listeners = this.listeners.filter((entry) => entry.type !== type || entry.fn !== fn);
+    }
+    fire(type) {
+      for (const entry of [...this.listeners]) if (entry.type === type) entry.fn({ type });
+    }
     play() { this.paused = false; this.playCalls += 1; return Promise.resolve(); }
     pause() { this.paused = true; }
     load() {}
@@ -139,7 +157,7 @@ function makeHarness() {
   const globals = {
     window: win,
     document,
-    navigator: { userAgent: 'node-test' },
+    navigator: { userAgent },
     AudioContext: FakeAudioContext,
     AudioWorkletNode: FakeAudioWorkletNode,
     Worker: FakeWorker,
@@ -166,6 +184,7 @@ function makeHarness() {
     processorModuleUrl: 'processor.js',
     playbackWorkerModuleUrl: 'worker.js',
     namespace: '',
+    enableBoundedUrlAnchorExperiment: boundedAnchor,
   });
   h.bridge.setOnPlaybackStarted(() => { h.started += 1; });
   h.bridge.setOnPlaybackSuspended(() => { h.suspended += 1; });
@@ -193,8 +212,8 @@ function makeHarness() {
   return h;
 }
 
-async function withHarness(t, fn) {
-  const h = makeHarness();
+async function withHarness(t, fn, options = {}) {
+  const h = makeHarness(options);
   try {
     await fn(h);
     await flush();
@@ -268,15 +287,15 @@ test('touchstart and keydown no longer register or unlock', (t) => withHarness(t
   assert.equal(h.ctx().resumeCalls, calls);
 }));
 
-test('click fallback registration is single across eager init and startup', (t) => withHarness(t, async (h) => {
+test('eager init and startup never install a document click fallback', (t) => withHarness(t, async (h) => {
   await h.bridge.initAudio();
   await h.startPlay({ ready: false });
   await h.bridge.initAudio();
-  assert.equal(h.clickListeners(), 1);
-  assert.equal(h.docAdds.filter((a) => a.type === 'click').length, 1);
+  assert.equal(h.clickListeners(), 0);
+  assert.equal(h.docAdds.filter((a) => a.type === 'click').length, 0);
 }));
 
-test('trusted click unlocks; untrusted click does not; started publishes once after running', async (t) => withHarness(t, async (h) => {
+test('document clicks do nothing; explicit Play starts once after running', async (t) => withHarness(t, async (h) => {
   await h.startPlay();
   assert.equal(h.started, 0);
   assert.ok(h.suspended >= 1, 'suspended callback reports buffered readiness');
@@ -284,6 +303,8 @@ test('trusted click unlocks; untrusted click does not; started publishes once af
   h.clicks(false);
   assert.equal(h.ctx().resumeCalls, before);
   h.clicks(true);
+  assert.equal(h.ctx().resumeCalls, before);
+  h.bridge.unlockAudioFromGesture();
   assert.equal(h.ctx().resumeCalls, before + 1);
   assert.equal(h.started, 0, 'nothing published during dispatch');
   h.ctx().allowResume();
@@ -292,29 +313,29 @@ test('trusted click unlocks; untrusted click does not; started publishes once af
   assert.equal(h.clickListeners(), 0);
 }));
 
-test('rejected first attempt keeps listener; second click succeeds', (t) => withHarness(t, async (h) => {
+test('rejected explicit Play retries without a document listener', (t) => withHarness(t, async (h) => {
   await h.startPlay();
-  h.clicks();
+  h.bridge.unlockAudioFromGesture();
   h.ctx().rejectResume();
   await flush();
-  assert.equal(h.clickListeners(), 1);
+  assert.equal(h.clickListeners(), 0);
   assert.equal(h.started, 0);
   const before = h.ctx().resumeCalls;
-  h.clicks();
+  h.bridge.unlockAudioFromGesture();
   assert.equal(h.ctx().resumeCalls, before + 1);
   h.ctx().allowResume();
   await flush();
   assert.equal(h.started, 1);
 }));
 
-test('duplicate click delivery publishes started once', (t) => withHarness(t, async (h) => {
+test('duplicate explicit Play delivery publishes started once', (t) => withHarness(t, async (h) => {
   await h.startPlay();
-  h.clicks();
-  h.clicks();
+  h.bridge.unlockAudioFromGesture();
+  h.bridge.unlockAudioFromGesture();
   h.ctx().allowResume(h.ctx().outcomes.length - 2);
   h.ctx().outcomes.at(-1).resolve();
   await flush();
-  h.clicks();
+  h.bridge.unlockAudioFromGesture();
   await flush();
   assert.equal(h.started, 1);
 }));
@@ -337,7 +358,7 @@ test('context running before worker-ready publishes nothing, then once on the cu
 
 test('Pause while resume is pending: late settlement unlocks but cannot unmute or publish', (t) => withHarness(t, async (h) => {
   await h.startPlay();
-  h.clicks();
+  h.bridge.unlockAudioFromGesture();
   const pausing = h.bridge.pause();
   h.ctx().allowResume();
   await pausing;
@@ -348,7 +369,7 @@ test('Pause while resume is pending: late settlement unlocks but cannot unmute o
 
 test('Stop while resume is pending cannot publish started', (t) => withHarness(t, async (h) => {
   await h.startPlay();
-  h.clicks();
+  h.bridge.unlockAudioFromGesture();
   const stopping = h.bridge.stop();
   h.ctx().allowResume();
   await stopping;
@@ -386,7 +407,7 @@ test('superseded request: first session ready cannot start, second can', (t) => 
 test('context reset invalidates: settlement on the old context cannot publish and listener is removed', (t) => withHarness(t, async (h) => {
   await h.startPlay();
   const old = h.ctx();
-  h.clicks();
+  h.bridge.unlockAudioFromGesture();
   const resetting = h.bridge.forceAudioContextReset();
   old.allowResume();
   await resetting;
@@ -395,9 +416,9 @@ test('context reset invalidates: settlement on the old context cannot publish an
   assert.equal(h.clickListeners(), 0);
 }));
 
-test('page teardown removes the click fallback and blocks late start', (t) => withHarness(t, async (h) => {
+test('page teardown has no click fallback and blocks late start', (t) => withHarness(t, async (h) => {
   await h.startPlay();
-  assert.equal(h.clickListeners(), 1);
+  assert.equal(h.clickListeners(), 0);
   for (const l of h.winListeners.filter((x) => x.type === 'pagehide')) l.fn({ type: 'pagehide' });
   assert.equal(h.clickListeners(), 0);
   h.ctx().allowResume();
@@ -407,8 +428,8 @@ test('page teardown removes the click fallback and blocks late start', (t) => wi
 
 test('combined Play, Pause, Stop dispatch with a queued resume settlement cannot start or unmute', (t) => withHarness(t, async (h) => {
   await h.startPlay();
-  // One gesture: capture fallback (Play) then Flutter Pause then Stop handlers.
-  h.clicks();
+  // One dispatch: explicit Play followed by Pause and Stop handlers.
+  h.bridge.unlockAudioFromGesture();
   const pausing = h.bridge.pause();
   const stopping = h.bridge.stop();
   h.ctx().allowResume();
@@ -467,7 +488,7 @@ test('immediately-running autoplay still publishes started and ramps up once', (
 test('statechange to running publishes started once while the resume promise never settles', (t) => withHarness(t, async (h) => {
   await h.startPlay();
   const before = h.ctx().resumeCalls;
-  h.clicks(true);
+  h.bridge.unlockAudioFromGesture();
   assert.equal(h.ctx().resumeCalls, before + 1);
   assert.equal(h.started, 0);
   // Browser flips the state but the resume() promise never settles.
@@ -526,7 +547,7 @@ test('resume() on a running context still marks the media widget playing', (t) =
 
 test('Pause then Play after a completed start does not re-arm the click fallback on a later suspend', (t) => withHarness(t, async (h) => {
   await h.startPlay();
-  h.clicks(true);
+  h.bridge.unlockAudioFromGesture();
   h.ctx().allowResume();
   await flush();
   assert.equal(h.started, 1);
@@ -538,4 +559,347 @@ test('Pause then Play after a completed start does not re-arm the click fallback
   const before = h.ctx().resumeCalls;
   h.clicks(true);
   assert.equal(h.ctx().resumeCalls, before, 'an unrelated click must not resume audio');
+}));
+
+test('held startup stays silent after an unrelated click and native running', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  const before = h.ctx().resumeCalls;
+  h.clicks(false);
+  h.clicks(true);
+  assert.equal(h.ctx().resumeCalls, before);
+  h.ctx().setState('running');
+  await flush();
+  assert.equal(h.started, 0);
+  assert.ok(h.gains.every((gain) => gain.value === 0));
+  assert.deepEqual(h.ctx().rampTargets.filter((value) => value > 0), []);
+}));
+
+test('held volume preference is applied only after explicit Play', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  h.bridge.setVolume(0.37);
+  assert.ok(h.gains.every((gain) => gain.value === 0));
+  h.ctx().setState('running');
+  h.bridge.setVolume(0.63);
+  await flush();
+  assert.equal(h.started, 0);
+  assert.ok(h.gains.every((gain) => gain.value === 0));
+  h.bridge.unlockAudioFromGesture();
+  await flush();
+  assert.equal(h.started, 1);
+  assert.deepEqual(h.ctx().rampTargets.filter((value) => value > 0), [0.63]);
+}));
+
+test('held lifecycle health and anchor events do not request resume', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  const before = h.ctx().resumeCalls;
+  h.fire('visibilitychange');
+  await h.bridge.ensureMediaAlive();
+  h.audios[0].fire('play');
+  await h.bridge.resume();
+  await flush();
+  assert.equal(h.ctx().resumeCalls, before);
+  assert.equal(h.started, 0);
+  assert.ok(h.gains.every((gain) => gain.value === 0));
+  assert.deepEqual(h.ctx().rampTargets.filter((value) => value > 0), []);
+}));
+
+test('explicit Play on an already running held context publishes after dispatch', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  h.ctx().setState('running');
+  await flush();
+  assert.equal(h.started, 0);
+  const before = h.ctx().resumeCalls;
+  h.bridge.unlockAudioFromGesture();
+  assert.equal(h.started, 0);
+  await flush();
+  assert.equal(h.started, 1);
+  assert.equal(h.ctx().resumeCalls, before);
+}));
+
+test('held replacement on running context still needs new Play', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  h.ctx().setState('running');
+  const before = h.suspended;
+  await h.bridge.playTrack(new Uint8Array([2]));
+  h.worker().readyForCurrentSession();
+  await flush();
+  assert.equal(h.started, 0);
+  assert.ok(h.suspended > before);
+  assert.ok(h.gains.every((gain) => gain.value === 0));
+  h.bridge.unlockAudioFromGesture();
+  await flush();
+  assert.equal(h.started, 1);
+}));
+
+test('held experimental track anchor stays muted until authorized start', (t) => withHarness(t, async (h) => {
+  await h.bridge.playTrackBounded('https://example.test/a.mp3', 1024);
+  h.worker().readyForCurrentSession();
+  await flush();
+  const anchor = h.audios[0];
+  assert.equal(anchor.src, 'https://example.test/a.mp3');
+  assert.equal(anchor.muted, true);
+  h.ctx().setState('running');
+  anchor.fire('play');
+  await h.bridge.ensureMediaAlive();
+  await flush();
+  assert.equal(anchor.muted, true);
+  assert.equal(h.started, 0);
+  h.bridge.unlockAudioFromGesture();
+  await flush();
+  assert.equal(h.started, 1);
+  assert.equal(anchor.muted, false);
+}, { boundedAnchor: true }));
+
+test('Stop during queued Play cannot publish or unmute an old anchor', (t) => withHarness(t, async (h) => {
+  await h.bridge.playTrackBounded('https://example.test/a.mp3', 1024);
+  h.worker().readyForCurrentSession();
+  await flush();
+  const anchor = h.audios[0];
+  anchor.unmutedTrackSources.length = 0;
+  h.bridge.unlockAudioFromGesture();
+  const stopped = h.bridge.stop();
+  h.ctx().setState('running');
+  for (const outcome of h.ctx().outcomes) outcome.resolve();
+  await stopped;
+  await flush();
+  assert.equal(h.started, 0);
+  assert.deepEqual(h.ctx().rampTargets.filter((value) => value > 0), []);
+  assert.deepEqual(anchor.unmutedTrackSources, []);
+}, { boundedAnchor: true }));
+
+for (const [platform, userAgent] of [
+  ['desktop', 'node-test'],
+  ['Android', 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/138.0.0.0 Mobile Safari/537.36'],
+]) {
+  test(`${platform} old resume cannot raise output after replacement becomes held`, async () => {
+    const h = makeHarness({ userAgent });
+    try {
+      await h.startPlay({ ready: false });
+      h.ctx().setState('running');
+      h.worker().readyForCurrentSession();
+      await flush();
+      assert.equal(h.started, 1);
+      await h.bridge.pause();
+      const anchor = h.audios[0];
+      const originalPlay = anchor.play;
+      const gate = deferred();
+      let entered = false;
+      anchor.play = () => { entered = true; return gate.promise; };
+      const oldResume = h.bridge.resume();
+      await flush();
+      assert.equal(entered, true, 'old resume is awaiting hidden-anchor play');
+      anchor.play = originalPlay;
+      await h.bridge.playTrack(new Uint8Array([9]));
+      h.ctx().setState('suspended');
+      h.worker().readyForCurrentSession();
+      await flush();
+      h.ctx().setState('running');
+      await flush();
+      assert.equal(h.started, 1, 'replacement is still held');
+      h.ctx().rampTargets.length = 0;
+      const unmuteCount = () => h.worker().commands.filter((msg) =>
+        (msg.command ?? msg.type) === 'transportUnmute').length;
+      const before = unmuteCount();
+      gate.resolve();
+      await oldResume;
+      await flush();
+      assert.equal(unmuteCount(), before, 'old continuation sends no further unmute');
+      assert.deepEqual(h.ctx().rampTargets.filter((value) => value > 0), []);
+      assert.ok(h.gains.every((gain) => gain.value === 0));
+      assert.equal(h.started, 1);
+      h.bridge.unlockAudioFromGesture();
+      await flush();
+      assert.equal(h.started, 2, 'only new explicit Play starts replacement');
+      assert.deepEqual(h.unhandled, []);
+    } finally {
+      h.restore();
+    }
+  });
+}
+
+test('default silent anchor is never muted by a hold', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  assert.equal(h.audios[0].muted, false);
+  assert.equal(h.started, 0);
+}));
+
+test('a context that runs after a pending init resume is not held', (t) => withHarness(t, async (h) => {
+  await h.startPlay({ ready: false });
+  assert.equal(h.ctx().state, 'suspended', 'init resume still pending');
+  h.ctx().setState('running');
+  h.worker().readyForCurrentSession();
+  await flush();
+  assert.equal(h.started, 1, 'normal autoplay needs no Play');
+  assert.equal(h.suspended, 0);
+}));
+
+test('worker-ready before the init resume attempt is not held once the context runs', (t) => withHarness(t, async (h) => {
+  // Kills the mutation "isBlockedSample ignores resumeAttemptedFor". A real worker only emits
+  // worker-ready after initAudio, so a fresh bridge cannot reach this state. A hard context
+  // reset leaves the playback worker alive while the next request builds a new context, so
+  // stall that second initAudio between context creation and its resume attempt.
+  await h.startPlay({ ready: false });
+  await h.bridge.forceAudioContextReset();
+  const gate = deferred();
+  const push = h.contexts.push.bind(h.contexts);
+  h.contexts.push = (ctx) => { ctx.audioWorklet.addModule = () => gate.promise; return push(ctx); };
+  h.bridge.setPlaybackIntent(true);
+  const playing = h.bridge.playTrack(new Uint8Array([4, 5, 6])); // session generation 2
+  await flush();
+  assert.equal(h.contexts.length, 2, 'replacement context exists');
+  assert.equal(h.ctx().resumeCalls, 0, 'init resume attempt not yet issued');
+  assert.equal(h.ctx().state, 'suspended');
+  h.worker().emit({ type: 'playback-started', sessionGeneration: 2 }); // worker-ready, pre-attempt
+  await flush();
+  assert.equal(h.started, 0, 'nothing publishes while the context is suspended');
+  h.ctx().setState('running'); // the browser allows autoplay before the app attempts a resume
+  await flush();
+  assert.equal(h.ctx().resumeCalls, 0, 'still before the init resume attempt');
+  assert.equal(h.started, 1, 'an un-attempted suspended sample latched no hold');
+  gate.resolve();
+  await playing;
+  await flush();
+  assert.equal(h.started, 1, 'started exactly once');
+}));
+
+test('an interrupted context is not held at worker-ready', (t) => withHarness(t, async (h) => {
+  await h.startPlay({ ready: false });
+  h.ctx().setState('interrupted');
+  h.worker().readyForCurrentSession();
+  await flush();
+  h.bridge.setVolume(0.5);
+  assert.ok(h.gains.some((gain) => gain.value === 0.5), 'volume applies; no hold');
+  h.ctx().setState('running');
+  await flush();
+  assert.equal(h.started, 1);
+}));
+
+test('pause while held releases the hold so volume applies again', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  h.bridge.setVolume(0.2);
+  assert.ok(h.gains.every((gain) => gain.value === 0));
+  await h.bridge.pause();
+  h.bridge.setVolume(0.4);
+  assert.ok(h.gains.some((gain) => gain.value === 0.4));
+}));
+
+test('stop after a held actual-track start restores silence before any unmute', (t) => withHarness(t, async (h) => {
+  await h.bridge.playTrackBounded('https://example.test/a.mp3', 1024);
+  h.worker().readyForCurrentSession();
+  await flush();
+  const anchor = h.audios[0];
+  assert.equal(anchor.muted, true);
+  await h.bridge.stop();
+  await flush();
+  assert.deepEqual(anchor.unmutedTrackSources, []);
+  assert.equal(anchor.muted, false);
+  assert.equal(anchor.src, 'audio/silent.wav');
+}, { boundedAnchor: true }));
+
+test('gesture replacement while held starts once with the awaits startPlayback makes before playTrack', (t) => withHarness(t, async (h) => {
+  await h.startPlay();                                  // held
+  // playQueue's gesture prefix (Dart order): declare intent, unlock, re-declare.
+  h.bridge.setPlaybackIntent(true);
+  h.bridge.unlockAudioFromGesture();
+  h.bridge.setPlaybackIntent(true);
+  h.ctx().setState('running');                          // the gesture's native resume succeeds
+  await flush();
+  // startPlayback awaits initAudio and setVolume before bridge playTrack creates the request.
+  await h.bridge.initAudio();
+  h.bridge.setVolume(0.5);
+  await flush();
+  assert.equal(h.started, 0, 'the old held request must not publish before its replacement exists');
+  assert.ok(h.gains.every((gain) => gain.value === 0), 'no output for the old request');
+  assert.deepEqual(h.ctx().rampTargets.filter((value) => value > 0), [], 'no positive ramp for the old request');
+  await h.bridge.playTrack(new Uint8Array([2]));
+  h.worker().readyForCurrentSession();
+  await flush();
+  assert.equal(h.started, 1, 'track tap/Next/Previous counted as Play: exactly one start, no second Play');
+  assert.deepEqual(h.ctx().rampTargets.filter((value) => value > 0), [0.5], 'one startup ramp to the stored volume');
+}));
+
+test('plain Play on a held request without a replacement still starts that request once', (t) => withHarness(t, async (h) => {
+  await h.startPlay();                                  // held
+  h.bridge.setPlaybackIntent(true);                     // real Dart order for Play: intent, then unlock
+  h.bridge.unlockAudioFromGesture();
+  h.ctx().setState('running');
+  await flush();
+  await h.bridge.initAudio();
+  await flush();
+  assert.equal(h.started, 1);
+  assert.deepEqual(h.unhandled, []);
+}));
+
+test('a play-intent re-declaration after the approval dispatch does not retarget the approval', (t) => withHarness(t, async (h) => {
+  await h.startPlay();                                  // held
+  h.bridge.setPlaybackIntent(true);
+  h.bridge.unlockAudioFromGesture();
+  await Promise.resolve();                              // the dispatch ended
+  await Promise.resolve();
+  h.bridge.setPlaybackIntent(true);                     // later task: unrelated declaration
+  h.ctx().setState('running');
+  await flush();
+  assert.equal(h.started, 1, 'the approved request still starts');
+}));
+
+test('automatic replacement while held needs Play', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  await h.bridge.playTrack(new Uint8Array([2]));
+  h.ctx().setState('running');
+  h.worker().readyForCurrentSession();
+  await flush();
+  assert.equal(h.started, 0);
+  h.bridge.unlockAudioFromGesture();
+  await flush();
+  assert.equal(h.started, 1);
+}));
+
+test('Media Session Play retargets a pending replacement before synchronous resume statechange', (t) => withHarness(t, async (h) => {
+  await h.startPlay(); // Request A is held
+  assert.equal(h.started, 0);
+
+  // Configure AudioContext resume() to synchronously fire statechange to 'running'
+  const ctx = h.ctx();
+  const origResume = ctx.resume.bind(ctx);
+  ctx.resume = () => {
+    ctx.setState('running');
+    return origResume();
+  };
+
+  const handlers = {};
+  globalThis.MediaMetadata = class {
+    constructor(init = {}) { Object.assign(this, init); }
+  };
+  globalThis.navigator.mediaSession = {
+    playbackState: 'none',
+    setActionHandler: (name, fn) => { handlers[name] = fn; },
+    setPositionState: () => {},
+  };
+
+  try {
+    // Set up provider callback mirroring pending replacement window
+    h.bridge.setOnPlay(() => {
+      h.bridge.setPlaybackIntent(true);
+      h.bridge.unlockAudioFromGesture(); // synchronously transitions ctx to running
+      h.bridge.setPlaybackIntent(true); // final retarget in same dispatch
+    });
+
+    // Media Session Play arrives during pending replacement window
+    h.bridge.updateMediaSession('title', 'artist', 'album', '');
+    handlers.play();
+
+    await flush();
+    assert.equal(h.started, 0, 'Request A publishes zero starts during the retarget window');
+    assert.deepEqual(ctx.rampTargets.filter((v) => v > 0), [], 'Request A receives no positive ramp');
+
+    // Release the barrier: replacement B begins request and becomes ready
+    await h.bridge.playTrack(new Uint8Array([2]));
+    h.worker().readyForCurrentSession();
+    await flush();
+    assert.equal(h.started, 1, 'Replacement B starts exactly once');
+    assert.deepEqual(ctx.rampTargets.filter((v) => v > 0), [1], 'Replacement B receives positive ramp');
+  } finally {
+    delete globalThis.navigator.mediaSession;
+    delete globalThis.MediaMetadata;
+  }
 }));

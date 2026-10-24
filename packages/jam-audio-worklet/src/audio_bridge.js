@@ -192,13 +192,45 @@ export function createJamAudioBridge({
     return sessionGeneration === playbackSessionGeneration;
   }
 
+  // Blocked-start output hold. The default silent anchor is never muted (the
+  // Android notification route needs it); only an actual-track anchor is.
+  let activationAnchorMute = null;
+  let anchorHoldsActualTrack = false;
+  let heldZeroGainNode = null;
+  let resumeAttemptedFor = null;
+  function holdActivationOutput() {
+    // Idempotent: one forced zero per gain node and hold episode, so the Play
+    // press does not add a second zero-then-ramp sequence.
+    if (audioContext && gainNode && audioContext.state !== 'closed' &&
+        heldZeroGainNode !== gainNode) {
+      forceGainToZero('activation-waiting-for-play');
+      heldZeroGainNode = gainNode;
+    }
+    if (silentAudioEl && anchorHoldsActualTrack) {
+      if (!activationAnchorMute || activationAnchorMute.element !== silentAudioEl) {
+        activationAnchorMute = { element: silentAudioEl, muted: silentAudioEl.muted };
+      }
+      silentAudioEl.muted = true;
+    }
+  }
+  function restoreActivationAnchorMute() {
+    if (activationAnchorMute?.element === silentAudioEl) {
+      silentAudioEl.muted = activationAnchorMute.muted;
+    }
+    activationAnchorMute = null;
+  }
+  // Controller release hook: published start, or any cancel path. A canceled
+  // actual-track anchor stays muted until restoreSilentAnchor() swaps in silence.
+  function releaseActivationOutput(published) {
+    heldZeroGainNode = null;
+    if (published || !anchorHoldsActualTrack) restoreActivationAnchorMute();
+  }
   const activation = createActivationController({
     getContext: () => audioContext ?? null,
-    getEventTarget: () => (
-      typeof document !== 'undefined' && typeof document.addEventListener === 'function'
-        ? document
-        : null
-    ),
+    holdOutput: holdActivationOutput,
+    releaseOutput: releaseActivationOutput,
+    // Blocked only once the app's resume attempt for this context was issued.
+    isBlockedSample: (ctx) => ctx?.state === 'suspended' && resumeAttemptedFor === ctx,
     playAnchor: () => {
       if (silentAudioEl && silentAudioEl.paused) {
         const attempt = silentAudioEl.play();
@@ -217,6 +249,7 @@ export function createJamAudioBridge({
   });
 
   function unlockAudioFromGesture() {
+    activation.authorizePlay();
     activation.unlockAudioFromGesture();
   }
 
@@ -297,6 +330,10 @@ export function createJamAudioBridge({
 
   function scheduleDeclickRampToCurrentVolume(reason) {
     if (!audioContext || !gainNode) return;
+    if (activation.isPlayRequired()) {
+      holdActivationOutput();
+      return;
+    }
     const now = audioContext.currentTime;
     gainNode.gain.cancelScheduledValues(now);
     gainNode.gain.setValueAtTime(0, now);
@@ -332,6 +369,7 @@ export function createJamAudioBridge({
     performAction,
     fadeIn = false,
     skipInitialRamp = false,
+    canFadeIn = () => true,
   }) {
     emitDiagnosticsEvent({
       type: 'transport-transition-start',
@@ -360,10 +398,12 @@ export function createJamAudioBridge({
       console.warn(`[Android transition] performAction failed (${transitionKind}):`, e);
     }
 
+    if (fadeIn && !canFadeIn()) return;
     if (fadeIn) {
       if (playbackWorker) {
         await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
       }
+      if (!canFadeIn()) return;
       transportMuted = false;
       transportMuteReason = null;
       resumeUnmuteSent = true;
@@ -377,6 +417,8 @@ export function createJamAudioBridge({
     silentAudioEl.loop = true;
     silentAudioEl.src = silentWavUrl;
     silentAudioEl.load();
+    anchorHoldsActualTrack = false;
+    restoreActivationAnchorMute();
     silentAudioEl.play().catch(() => {});
   }
 
@@ -398,6 +440,10 @@ export function createJamAudioBridge({
     document.body.appendChild(silentAudioEl);
 
     silentPlayHandler = () => {
+      if (activation.isPlayRequired()) {
+        holdActivationOutput();
+        return;
+      }
       if (mediaSessionResumeRequested) {
         mediaSessionResumeRequested = false;
         if (audioContext && audioContext.state === 'suspended') {
@@ -525,6 +571,9 @@ export function createJamAudioBridge({
     }
 
     if (enableBoundedUrlAnchorExperiment) {
+      anchorHoldsActualTrack = true;
+      if (activation.isPlayRequired()) holdActivationOutput();
+      else restoreActivationAnchorMute();
       silentAudioEl.loop = false;
       silentAudioEl.src = url;
       silentAudioEl.load();
@@ -908,8 +957,7 @@ export function createJamAudioBridge({
         severity: 'info',
         sampleRate: createdContext.sampleRate,
       });
-      // The context now exists: arm the click fallback if a startup intent is
-      // already pending and the context starts suspended.
+      // Refresh an inherited wait for Play now that the new graph exists.
       activation.refresh();
     }
 
@@ -1148,6 +1196,8 @@ export function createJamAudioBridge({
       return;
     }
 
+    activation.observeContext(audioContext ?? null);
+
     const unmuted = await unmuteTransportForPlaybackStarted(
       'playback-started',
       sessionGeneration,
@@ -1160,15 +1210,15 @@ export function createJamAudioBridge({
     // activation.reconcile(): current intent, unchanged activation generation,
     // same context, context running and this session still current.
     activation.noteWorkerReady({ sessionGeneration, context: audioContext ?? null });
-    if (audioContext?.state !== 'running') {
+    if (audioContext?.state !== 'running' || activation.isPlayRequired()) {
       // Buffer is ready but the AudioContext is not running (autoplay
       // blocked: Android Chrome without an installed PWA, or desktop
       // Chrome with a low Media Engagement Index — see
       // reports/logs/log113.txt). Signal Dart to show the play button so
       // the UI reflects that audio is buffered but not yet audible. This is
       // the existing "buffered readiness" signal. The deferred start is
-      // published by activation.reconcile() once a trusted gesture (or the
-      // browser) brings the context to running.
+      // published after explicit Play authorizes this blocked request and
+      // the browser context runs; other interactions leave output silent.
       if (typeof onPlaybackSuspendedCallback === 'function') onPlaybackSuspendedCallback();
       markPlaybackState('paused');
       setStartupPhase('playing');
@@ -1363,6 +1413,7 @@ export function createJamAudioBridge({
     // inside ensureAudioGraph), so the gate is bypassed and the full cold-start
     // path runs normally.
     if (audioContext?.state === 'running' && gainNode && processorNode) {
+      if (activation.isPlayRequired()) holdActivationOutput();
       emitDiagnosticsEvent({
         type: 'init-audio-skipped-already-running',
         label: 'initAudio skipped: audio graph already running',
@@ -1378,6 +1429,10 @@ export function createJamAudioBridge({
     await ensureWasm();
     await ensureAudioGraph();
     forceGainToZero('initAudio-before-silent-anchor');
+    if (activation.isPlayRequired()) {
+      holdActivationOutput();
+      return;
+    }
     if (audioContext?.state !== 'running') {
       // Race silentAudioEl.play() against a 3 s timeout so a stuck browser
       // media element is always observable in diagnostics.
@@ -1441,6 +1496,7 @@ export function createJamAudioBridge({
     // Diagnostics are preserved via .then(); the AudioContext resumes as soon as
     // the browser allows (first user gesture).
     const initResumeGeneration = activation.generation();
+    resumeAttemptedFor = audioContext;
     audioContext.resume().then(() => {
       const durationMs = roundMs(performance.now() - resumeStartedAt);
       recordStartupTiming('audioContextResume', durationMs);
@@ -1455,18 +1511,16 @@ export function createJamAudioBridge({
       // request that was cancelled or replaced while the resume was pending.
       if (!needsPlaybackStartedDeclick &&
           activation.hasIntent() &&
+          !activation.isPlayRequired() &&
           activation.isCurrentGeneration(initResumeGeneration)) {
         scheduleDeclickRampToCurrentVolume('initAudio-startup');
       }
     }).catch(() => {});
 
-    // Fallback for when the AudioContext is still suspended after initAudio().
-    // This happens on Chrome browser (non-installed PWA) where MEI is too low
-    // to grant autoplay. Arm the single trusted-click fallback (idempotent; it
-    // is also refreshed when the context is created and when worker-ready
-    // arrives suspended) while a startup play intent is pending. touchstart and
-    // keydown grant no user activation and are not used. Do NOT add a "tap to
-    // play" UI overlay — use this silent fallback.
+    // Preserve an inherited wait for explicit Play. No document input
+    // listener or additional overlay is installed. A worker-ready that came
+    // before this resume attempt is judged now.
+    activation.reassess();
     activation.refresh();
   }
 
@@ -1611,11 +1665,12 @@ export function createJamAudioBridge({
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
         await ensureAudioGraph();
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
-        if (audioContext && audioContext.state === 'suspended') {
+        if (!activation.isPlayRequired() && audioContext && audioContext.state === 'suspended') {
+          resumeAttemptedFor = audioContext;
           // Await resume so the AudioContext is running before the worklet starts.
           // On the paste-button path Chrome resolves this immediately (user gesture);
           // on the no-MEI deeplink path it never resolves, so cap at 300 ms and let
-          // the gesture-resume listener unblock the context after the user taps.
+          // the explicit Play path unlock a browser-blocked start.
           await Promise.race([
             audioContext.resume(),
             new Promise((r) => setTimeout(r, 300)),
@@ -1685,7 +1740,8 @@ export function createJamAudioBridge({
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
         await ensureAudioGraph();
         if (!isCurrentPlaybackSession(sessionGeneration)) return;
-        if (audioContext && audioContext.state === 'suspended') {
+        if (!activation.isPlayRequired() && audioContext && audioContext.state === 'suspended') {
+          resumeAttemptedFor = audioContext;
           await Promise.race([
             audioContext.resume(),
             new Promise((r) => setTimeout(r, 300)),
@@ -1855,7 +1911,17 @@ export function createJamAudioBridge({
     // Request the context resume synchronously, inside the caller's event
     // stack and before the first await: a suspended context otherwise leaves
     // Play dead. No-op on a running context (keep-warm unchanged).
-    unlockAudioFromGesture();
+    if (activation.isPlayRequired()) {
+      holdActivationOutput();
+      return;
+    }
+    activation.unlockAudioFromGesture();
+    const canFinishResume = () => !activation.isPlayRequired();
+    const staleResume = () => {
+      if (canFinishResume()) return false;
+      holdActivationOutput();
+      return true;
+    };
 
     clearAudioInterruptionLatch('resume');
     // Only claim playing to the OS widget when the context actually runs; a
@@ -1871,6 +1937,7 @@ export function createJamAudioBridge({
           preserveMediaSession: true,
           fadeIn: true,
           skipInitialRamp: true,
+          canFadeIn: canFinishResume,
           performAction: async () => {
             // Keep-warm: audioContext is never suspended after pause(), so no
             // audioContext resume call is needed. Gain is unfrozen by the fadeIn
@@ -1878,6 +1945,7 @@ export function createJamAudioBridge({
             if (silentAudioEl) await silentAudioEl.play().catch(() => {});
           },
         });
+        if (staleResume()) return;
       } else {
         // Keep-warm: context was never suspended, so no audioContext.resume() needed.
         // transportMute was called during pause (STOP_INDEX=1 froze the worklet).
@@ -1889,12 +1957,14 @@ export function createJamAudioBridge({
         if (playbackWorker) {
           await sendPlaybackWorkerCommand('transportUnmute').catch(() => {});
         }
+        if (staleResume()) return;
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.cancelScheduledValues(now);
           gainNode.gain.setValueAtTime(0, now);
         }
         if (silentAudioEl) await silentAudioEl.play().catch(() => {});
+        if (staleResume()) return;
         if (gainNode) {
           const now = audioContext.currentTime;
           gainNode.gain.linearRampToValueAtTime(currentVolume, now + DECLICK_DURATION_S);
@@ -1906,6 +1976,7 @@ export function createJamAudioBridge({
       isAppOwnedResumeInFlight = false;
     }
 
+    if (staleResume()) return;
     if (audioContext?.state === 'running') markPlaybackState('playing');
     if (playbackWorker) {
       emitDiagnosticsEvent({
@@ -2018,8 +2089,15 @@ export function createJamAudioBridge({
   }
 
   async function forceAudioContextReset() {
-    // The old context's pending resume/click fallback must not outlive it.
+    // The old context's pending resume cannot authorize its replacement.
     activation.invalidate('context-reset');
+    if (anchorHoldsActualTrack && silentAudioEl) {
+      silentAudioEl.pause();
+      silentAudioEl.src = silentWavUrl;
+      silentAudioEl.load();
+      anchorHoldsActualTrack = false;
+      restoreActivationAnchorMute();
+    }
     appOwnedResetInFlight = true;
     try {
       emitDiagnosticsEvent({
@@ -2080,6 +2158,10 @@ export function createJamAudioBridge({
 
   function setVolume(value) {
     currentVolume = clampVolume(value);
+    if (activation.isPlayRequired()) {
+      holdActivationOutput();
+      return;
+    }
     if (gainNode) {
       if (audioContext && audioContext.state === 'running') {
         const now = audioContext.currentTime;
@@ -2099,6 +2181,10 @@ export function createJamAudioBridge({
 
   function updatePlaybackState(state, options = {}) {
     const { preserveMediaSession = false } = options;
+    if (activation.isPlayRequired()) {
+      holdActivationOutput();
+      if (state === 'playing') state = 'paused';
+    }
     if ('mediaSession' in navigator) {
       if (state === 'loading') return;
       let mapped = 'none';
@@ -2190,6 +2276,8 @@ export function createJamAudioBridge({
         audioContextState: audioContext?.state ?? 'none',
       });
       runMediaAction('play', () => {
+        const blockedStart = activation.isPlayRequired();
+        activation.authorizePlay();
         mediaSessionResumeRequested = true;
         if (silentAudioEl) {
           silentAudioEl.play().catch(() => {});
@@ -2197,7 +2285,8 @@ export function createJamAudioBridge({
         if (typeof onPlayCallback === 'function') onPlayCallback();
         else {
           console.warn(`[${namespace}] onPlayCallback not registered, falling back to low-level resume()`);
-          resume();
+          if (blockedStart) activation.unlockAudioFromGesture();
+          else resume();
         }
       });
     });
@@ -2257,6 +2346,14 @@ export function createJamAudioBridge({
 
   async function ensureMediaAlive() {
     ensureSilentAudio();
+    if (activation.isPlayRequired()) {
+      holdActivationOutput();
+      return {
+        hiddenMediaPlaying: Boolean(silentAudioEl && !silentAudioEl.paused),
+        audioContextState: audioContext?.state ?? 'missing',
+        hiddenMediaError: null,
+      };
+    }
     let hiddenMediaPlaying = false;
     let hiddenMediaError = null;
     let audioContextState = audioContext?.state ?? 'missing';
@@ -2279,7 +2376,7 @@ export function createJamAudioBridge({
 
     // Fire-and-forget: same as initAudio() — awaiting resume() hangs indefinitely
     // on Android Chrome until a user gesture, which would block the health monitor.
-    if (audioContext && audioContext.state === 'suspended') {
+    if (!activation.isPlayRequired() && audioContext && audioContext.state === 'suspended') {
       audioContext.resume().catch((err) => {
         emitDiagnosticsEvent({
           type: 'audio-context-ensure-resume-failed',
@@ -2481,7 +2578,7 @@ export function createJamAudioBridge({
         setTimeout(() => {
           saveSessionMetadataToLocalStorage();
         }, 50);
-        if (visible && audioContext && audioContext.state === 'suspended') {
+        if (visible && !activation.isPlayRequired() && audioContext && audioContext.state === 'suspended') {
           audioContext.resume().catch(() => {});
         }
         emitDiagnosticsEvent({
