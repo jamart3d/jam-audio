@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.2] - 2026-11-15
+
+### Changed
+- Require explicit Play authorization for browser-blocked audio starts instead of allowing unrelated document gestures to release pending output.
+
+### Fixed
+- Resume the audio context synchronously from explicit playback gestures and guard startup publication against stale request generations and replaced audio contexts.
+- Keep Media Session playback state truthful while resume remains suspended and prevent completed or cancelled starts from re-arming stale activation state.
+- Added regression coverage for activation gesture timing, cancellation, context replacement, stale settlements, held output, and Media Session state.
+
 ## [0.5.1] - 2026-09-24
 
 ### Added
