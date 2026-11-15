@@ -23,15 +23,13 @@ The root `CHANGELOG.md` is the release log for the repo.
    - `packages/jam-audio-engine/Cargo.toml`
    - `packages/jam-audio-flutter/Cargo.toml`
    - `packages/jam-audio-worklet/package.json`
-4. Run targeted validation:
+4. Run the canonical local release verification:
 
 ```bash
-node --check packages/jam-audio-worklet/src/audio_bridge.js
-node --check packages/jam-audio-worklet/src/audio_processor.js
-npm --prefix packages/jam-audio-worklet test
-cargo check --manifest-path packages/jam-audio-engine/Cargo.toml
-cargo check --manifest-path packages/jam-audio-flutter/Cargo.toml
+VERIFY_BASE_REF=<previous release commit or tag> scripts/verify-release.sh
 ```
+
+`VERIFY_BASE_REF` defaults to the latest `v*` tag; with no tag and no explicit ref the verifier fails rather than skipping the release-range check. `VERIFY_BASE_REF=none` skips it explicitly and is flagged with a `WARNING` in the summary. Use `--keep-logs` (or `KEEP_LOGS=1`) to keep complete group logs, and `--list` to see the configured groups. The script owns the exact verification commands and runs independent groups concurrently. It validates formatting, versions, protocol output, whitespace (working tree and release range), package contents, worklet behavior, and Rust checks/tests. It does not cover real-device/browser validation, registry authentication, tagging, pushing, or publication.
 
 5. Review the final release diff:
 
@@ -44,7 +42,7 @@ git diff
 6. Commit the release:
 
 ```bash
-git add CHANGELOG.md packages/jam-audio-engine/Cargo.toml packages/jam-audio-flutter/Cargo.toml packages/jam-audio-worklet/package.json
+git add CHANGELOG.md Cargo.lock packages/jam-audio-engine/Cargo.toml packages/jam-audio-flutter/Cargo.toml packages/jam-audio-worklet/package.json
 git commit -m "Release X.Y.Z"
 ```
 
@@ -62,6 +60,8 @@ git push origin vX.Y.Z
 ```
 
 ## Registry Publishing Dry-Run
+
+The canonical verifier performs offline package-content inspection only. Before publication, run these registry-facing dry-runs with the intended npm identity and network access; they are not covered by `scripts/verify-release.sh`.
 
 For scoped npm packages (`@jamart3d/jam-audio-worklet`, `@jamart3d/jam-audio-engine-wasm`):
 

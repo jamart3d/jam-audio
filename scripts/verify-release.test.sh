@@ -115,4 +115,8 @@ set -e
 test "$status" -eq 2
 grep -q 'Missing Rust target: wasm32-unknown-unknown' "$TEST_DIR/preflight.out"
 
+grep -q 'scripts/verify-release.sh' "$ROOT/RELEASING.md"
+test "$(grep -c 'cargo clippy' "$ROOT/RELEASING.md" || true)" -eq 0
+test "$(grep -c 'npm pack --dry-run' "$ROOT/RELEASING.md" || true)" -eq 0
+
 printf 'verify-release tests passed\n'
