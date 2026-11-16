@@ -377,3 +377,42 @@ test('P: repeated Play presses (intent, unlock, intent) after a held start whose
   assert.equal(h.started, 1, 'Play must publish the held start');
   assert.equal(lastGain(h), 1, 'gain must be restored');
 }));
+
+// Hypothesis (unverified in a real browser): the hidden anchor's play() promise never
+// settles after backgrounding (autoplay policy / suspended media element). resume()
+// awaits silentAudioEl.play() before scheduling the gain ramp, so the gain stays at 0
+// with the transport already unmuted and the worker running, and resume() never returns.
+// These tests assert the HYPOTHESIZED defective state, so they pass if the defect is
+// real; they are todo until the owner decides on a fix, after which they should be
+// inverted to assert the ramp is not held up.
+// Desktop transport unmutes the worker before awaiting the anchor; Android transport mutes first and
+// only unmutes after performAction, so it holds the transport muted instead (different state).
+for (const [label, userAgent, expectUnmuted] of [['desktop transport', 'node-test', true], ['Android transport', 'Mozilla/5.0 (Linux; Android 14) Chrome/120', false]]) {
+  test(`H7: keep-warm resume with a never-settling anchor play() leaves gain 0 and never resolves (${label})`, { todo: 'Hypothesis: anchor play() holds up the gain ramp. No fix approved.' }, (t) => withHarness(t, async (h) => {
+    await h.startPlay();
+    h.bridge.unlockAudioFromGesture();
+    h.ctx().allowResume();
+    await flush();
+    assert.equal(h.started, 1, 'precondition: published start');
+    await h.bridge.pause();
+    assert.equal(h.ctx().state, 'running', 'precondition: keep-warm');
+    const anchor = h.audios[0];
+    let anchorPlayCalls = 0;
+    anchor.play = () => { anchorPlayCalls += 1; return new Promise(() => {}); };
+
+    let settled = false;
+    const resuming = h.bridge.resume().then(() => { settled = true; }, () => { settled = true; });
+    await flush(10);
+    const health = await h.bridge.getWorkerHealthStatus();
+    console.log('H7', label, JSON.stringify({
+      anchorPlayCalls, settled, gain: lastGain(h), resumeUnmuteSent: health.resumeUnmuteSent,
+      transportMuted: health.transportMuted, positiveRamps: h.ctx().rampTargets.filter((v) => v > 0).length,
+    }));
+    assert.ok(anchorPlayCalls >= 1, 'resume() must have awaited the anchor play()');
+    assert.equal(lastGain(h), 0, 'gain stays 0');
+    assert.equal(health.resumeUnmuteSent, expectUnmuted);
+    assert.equal(health.transportMuted, !expectUnmuted);
+    assert.equal(settled, false, 'resume() never resolves');
+    void resuming;
+  }, { userAgent }));
+}
