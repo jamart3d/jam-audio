@@ -327,7 +327,7 @@ async function heldThenPausedWhileSuspended(h) {
   assert.equal(h.ctx().state, 'suspended', 'precondition: context still suspended');
 }
 
-test('R2: Play after a pause that cancelled a held start (blocked path, no resume) publishes and restores gain', (t) => withHarness(t, async (h) => {
+test('R2: Play after a pause that cancelled a held start (blocked path, no resume) publishes and restores gain', { todo: 'F8 window: no fix approved yet; owner says the Dart marker is cleared on status change, so R2/R3 premises may not match the owner symptom' }, (t) => withHarness(t, async (h) => {
   await heldThenPausedWhileSuspended(h);
   h.bridge.setPlaybackIntent(true);
   h.bridge.unlockAudioFromGesture();
@@ -339,7 +339,7 @@ test('R2: Play after a pause that cancelled a held start (blocked path, no resum
   assert.equal(lastGain(h), 1, 'gain must be restored');
 }));
 
-test('R3: Play after a pause that cancelled a held start (unblocked path, with resume) publishes and restores gain', (t) => withHarness(t, async (h) => {
+test('R3: Play after a pause that cancelled a held start (unblocked path, with resume) publishes and restores gain', { todo: 'F8 window: no fix approved yet; owner says the Dart marker is cleared on status change, so R2/R3 premises may not match the owner symptom' }, (t) => withHarness(t, async (h) => {
   await heldThenPausedWhileSuspended(h);
   h.bridge.setPlaybackIntent(true);
   h.bridge.unlockAudioFromGesture();
@@ -350,4 +350,30 @@ test('R3: Play after a pause that cancelled a held start (unblocked path, with r
   const health = await h.bridge.getWorkerHealthStatus();
   console.log('R3 state', JSON.stringify({ started: h.started, gain: lastGain(h), transportMuted: health.transportMuted, resumeUnmuteSent: health.resumeUnmuteSent }));
   assert.equal(h.started, 1, 'Play must publish the start');
+}));
+
+// Hypothesis (unverified against the real Dart flow): playback_provider.dart
+// resumeFromGesture(), while _activationWaitForPlay is set and
+// _pendingActivationReplacementToken is non-null, presses Play as
+// intent, unlock, intent in ONE dispatch. The second intent retargets the approval to a
+// replacement request. If that replacement never arrives (superseded, dropped, or the
+// token is never cleared), every press is retargeted again: context running, gain 0,
+// start unpublished, and Play does nothing. This matches the owner's console state.
+test('P: repeated Play presses (intent, unlock, intent) after a held start whose replacement never arrives still publish', { todo: 'Hypothesis; activation retarget design pinned by audio_bridge_activation.test.js:477. No fix approved.' }, (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  // play_random on a held start: intent, unlock, re-declare; replacement never reaches the bridge.
+  h.bridge.setPlaybackIntent(true);
+  h.bridge.unlockAudioFromGesture();
+  h.bridge.setPlaybackIntent(true);
+  h.ctx().allowResume();
+  await flush();
+  for (let press = 1; press <= 3; press += 1) {
+    h.bridge.setPlaybackIntent(true);
+    h.bridge.unlockAudioFromGesture();
+    h.bridge.setPlaybackIntent(true);
+    await flush();
+  }
+  console.log('P state', JSON.stringify({ started: h.started, gain: lastGain(h), ctx: h.ctx().state }));
+  assert.equal(h.started, 1, 'Play must publish the held start');
+  assert.equal(lastGain(h), 1, 'gain must be restored');
 }));
