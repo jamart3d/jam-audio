@@ -15,9 +15,6 @@
 **/pkg/
 
 # Local planning and audit artifacts
-docs/
-reports/
-plans/
 .worktrees/
 
 # OS/IDE

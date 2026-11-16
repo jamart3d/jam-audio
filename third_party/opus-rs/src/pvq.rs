@@ -231,7 +231,7 @@ pub fn cwrsi(n: u32, k: u32, mut i: u32, y: &mut [i32]) {
         }
         i -= celt_pvq_u_lookup(j1, k_cur as u32);
         let mag = k - k_cur; // pulses assigned to y[j]
-        y[j] = (mag + s) ^ s; // +mag if s=0, -mag if s=-1
+        y[n - 1 - j] = (mag + s) ^ s; // +mag if s=0, -mag if s=-1
         k = k_cur;
     }
 }

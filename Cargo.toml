@@ -12,6 +12,7 @@
 members = [
     "packages/jam-audio-engine",
     "packages/jam-audio-flutter",
+    "third_party/opus-rs",
 ]
 resolver = "2"
 

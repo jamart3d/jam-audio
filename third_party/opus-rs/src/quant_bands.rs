@@ -87,6 +87,75 @@ fn loss_distortion(
     dist.min(200.0)
 }
 
+#[inline]
+fn coarse_energy_prediction_step(
+    old_energy: f32,
+    prev: f32,
+    coef: f32,
+    beta: f32,
+    qi: i32,
+) -> (f32, f32) {
+    let q = qi as f32;
+    let predicted = coef * old_energy.max(-9.0) + prev + q;
+    let next_prev = prev + q - beta * q;
+    (predicted, next_prev)
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct CoarseEnergyBandTrace {
+    pub band: usize,
+    pub channel: usize,
+    pub qi: i32,
+    pub predicted_old_e: f32,
+    pub next_prev: f32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnergyTraceStage {
+    Coarse,
+    Fine,
+    Finalise,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct EnergyStageTrace {
+    pub stage: EnergyTraceStage,
+    pub band: usize,
+    pub channel: usize,
+    pub encoder_old_e: f32,
+    pub decoder_old_e: f32,
+    pub encoder_error: f32,
+    pub decoder_error: Option<f32>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct EnergyRoundtripTrace {
+    pub stages: Vec<EnergyStageTrace>,
+    pub first_divergence: Option<EnergyStageTrace>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct QuantEnergyDistortionEntry {
+    pub band: usize,
+    pub channel: usize,
+    pub original: f32,
+    pub quantized: f32,
+    pub abs_error: f32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct QuantEnergyDistortionTrace {
+    pub coarse: Vec<QuantEnergyDistortionEntry>,
+    pub fine: Vec<QuantEnergyDistortionEntry>,
+    pub finalise: Vec<QuantEnergyDistortionEntry>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn quant_coarse_energy_impl(
     m: &CeltMode,
@@ -117,14 +186,14 @@ fn quant_coarse_energy_impl(
     for i in start..end {
         for c in 0..channels {
             let x = e_bands[c * m.nb_ebands + i];
-            let old_e_val = old_e_bands[c * m.nb_ebands + i];
-            let old_e = old_e_val.max(-9.0);
-            let f = x - coef * old_e - prev[c];
+            let old_e = old_e_bands[c * m.nb_ebands + i];
+            let clamped_old_e = old_e.max(-9.0);
+            let f = x - coef * clamped_old_e - prev[c];
 
             let mut qi = (f + 0.5).floor() as i32;
             let qi0 = qi;
 
-            let decay_bound = old_e_val.max(-28.0) - max_decay;
+            let decay_bound = old_e.max(-28.0) - max_decay;
             if qi < 0 && x < decay_bound {
                 qi += ((decay_bound - x) as i32).max(0);
                 if qi > 0 {
@@ -169,9 +238,10 @@ fn quant_coarse_energy_impl(
 
             let q = qi as f32;
             error[c * m.nb_ebands + i] = f - q;
-            let tmp = coef * old_e + prev[c] + q;
-            old_e_bands[c * m.nb_ebands + i] = tmp;
-            prev[c] = prev[c] + q - beta * q;
+            let (predicted, next_prev) =
+                coarse_energy_prediction_step(old_e, prev[c], coef, beta, qi);
+            old_e_bands[c * m.nb_ebands + i] = predicted;
+            prev[c] = next_prev;
         }
     }
 
@@ -371,14 +441,11 @@ pub fn unquant_coarse_energy(
                 qi = -1;
             }
 
-            // Clamp in-place, matching C: oldEBands[i] = MAXG(-GCONST(9.f), oldEBands[i])
-            old_e_bands[c * m.nb_ebands + i] = old_e_bands[c * m.nb_ebands + i].max(-9.0);
             let old_e = old_e_bands[c * m.nb_ebands + i];
-
-            let q = qi as f32;
-            let tmp = coef * old_e + prev[c] + q;
-            old_e_bands[c * m.nb_ebands + i] = tmp;
-            prev[c] = prev[c] + q - beta * q;
+            let (predicted, next_prev) =
+                coarse_energy_prediction_step(old_e, prev[c], coef, beta, qi);
+            old_e_bands[c * m.nb_ebands + i] = predicted;
+            prev[c] = next_prev;
         }
     }
 }
@@ -507,6 +574,483 @@ pub fn unquant_energy_finalise(
     }
 }
 
+#[doc(hidden)]
+pub fn trace_quant_energy_distortion_for_test(
+    m: &CeltMode,
+    start: usize,
+    end: usize,
+    band_log_e: &[f32],
+    channels: usize,
+    lm: usize,
+    n_bytes: usize,
+) -> QuantEnergyDistortionTrace {
+    use crate::rate::clt_compute_allocation;
+
+    let total_bits = n_bytes * 8;
+    let total_bits_i32 = total_bits as i32;
+    let mut error = vec![0.0f32; m.nb_ebands * channels];
+    let mut old_e_bands = vec![-28.0f32; m.nb_ebands * channels];
+    let mut enc = RangeCoder::new_encoder(n_bytes as u32);
+
+    enc.encode_bit_logp(false, 1);
+    enc.encode_bit_logp(false, 3);
+
+    quant_coarse_energy(
+        m,
+        start,
+        end,
+        band_log_e,
+        &mut old_e_bands,
+        (total_bits << 3) as u32,
+        &mut error,
+        &mut enc,
+        channels,
+        lm,
+        false,
+        total_bits,
+    );
+
+    let coarse = collect_quant_energy_distortion(m, start, end, band_log_e, &old_e_bands, channels);
+
+    let offsets = vec![0i32; end];
+    let mut cap = vec![0i32; end];
+    for i in 0..end {
+        cap[i] =
+            (m.cache.caps[end * (2 * lm + channels - 1) + i] as i32 + 64) * channels as i32 * 2;
+    }
+    let alloc_trim = 6;
+    enc.encode_icdf(alloc_trim, &crate::modes::TRIM_ICDF, 7);
+
+    let mut intensity = 0i32;
+    let mut dual_stereo = 0i32;
+    let mut balance = 0;
+    let mut pulses = vec![0i32; end];
+    let mut ebits = vec![0i32; end];
+    let mut fine_priority = vec![0i32; end];
+    let _coded_bands = clt_compute_allocation(
+        m,
+        start,
+        end,
+        &offsets,
+        &cap,
+        alloc_trim,
+        &mut intensity,
+        &mut dual_stereo,
+        total_bits_i32 << 3,
+        &mut balance,
+        &mut pulses,
+        &mut ebits,
+        &mut fine_priority,
+        channels as i32,
+        lm as i32,
+        &mut enc,
+        true,
+        0,
+        end as i32 - 1,
+    );
+
+    quant_fine_energy(
+        m,
+        start,
+        end,
+        &mut old_e_bands,
+        &mut error,
+        &ebits,
+        &mut enc,
+        channels,
+    );
+
+    let fine = collect_quant_energy_distortion(m, start, end, band_log_e, &old_e_bands, channels);
+
+    quant_energy_finalise(
+        m,
+        start,
+        end,
+        &mut old_e_bands,
+        &mut error,
+        &ebits,
+        &fine_priority,
+        (total_bits_i32 - enc.tell()) << 3,
+        &mut enc,
+        channels,
+    );
+
+    let finalise =
+        collect_quant_energy_distortion(m, start, end, band_log_e, &old_e_bands, channels);
+
+    QuantEnergyDistortionTrace {
+        coarse,
+        fine,
+        finalise,
+    }
+}
+
+fn collect_quant_energy_distortion(
+    m: &CeltMode,
+    start: usize,
+    end: usize,
+    band_log_e: &[f32],
+    quantized: &[f32],
+    channels: usize,
+) -> Vec<QuantEnergyDistortionEntry> {
+    let mut out = Vec::with_capacity((end - start) * channels);
+    for band in start..end {
+        for channel in 0..channels {
+            let idx = channel * m.nb_ebands + band;
+            out.push(QuantEnergyDistortionEntry {
+                band,
+                channel,
+                original: band_log_e[idx],
+                quantized: quantized[idx],
+                abs_error: (band_log_e[idx] - quantized[idx]).abs(),
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub fn trace_quant_coarse_energy_for_test(
+    m: &CeltMode,
+    start: usize,
+    end: usize,
+    e_bands: &[f32],
+    initial_old_e_bands: &[f32],
+    budget: u32,
+    tell_start: i32,
+    channels: usize,
+    lm: usize,
+    intra: bool,
+    max_decay: f32,
+    lfe: bool,
+) -> (Vec<CoarseEnergyBandTrace>, Vec<u8>) {
+    let prob_model = &E_PROB_MODEL[lm][if intra { 1 } else { 0 }];
+    let coef = if intra { 0.0 } else { PRED_COEF[lm] };
+    let beta = if intra { BETA_INTRA } else { BETA_COEF[lm] };
+    let mut old_e_bands = initial_old_e_bands.to_vec();
+    let mut error = vec![0.0f32; old_e_bands.len()];
+    let mut prev = [0.0f32; 2];
+    let mut enc = RangeCoder::new_encoder(160);
+    let mut trace = Vec::new();
+
+    if tell_start + 3 <= budget as i32 {
+        enc.encode_bit_logp(intra, 3);
+    }
+
+    for i in start..end {
+        for c in 0..channels {
+            let x = e_bands[c * m.nb_ebands + i];
+            let old_e = old_e_bands[c * m.nb_ebands + i];
+            let clamped_old_e = old_e.max(-9.0);
+            let f = x - coef * clamped_old_e - prev[c];
+            let mut qi = (f + 0.5).floor() as i32;
+
+            let decay_bound = old_e.max(-28.0) - max_decay;
+            if qi < 0 && x < decay_bound {
+                qi += ((decay_bound - x) as i32).max(0);
+                if qi > 0 {
+                    qi = 0;
+                }
+            }
+
+            let tell = enc.tell();
+            let bits_left = budget as i32 - tell - 3 * channels as i32 * (end - i) as i32;
+            if i != start && bits_left < 30 {
+                if bits_left < 24 {
+                    qi = qi.min(1);
+                }
+                if bits_left < 16 {
+                    qi = qi.max(-1);
+                }
+            }
+            if lfe && i >= 2 {
+                qi = qi.min(0);
+            }
+
+            if tell + 15 <= budget as i32 {
+                let prob_idx = 2 * i.min(20);
+                let fs = (prob_model[prob_idx] as u32) << 7;
+                let decay = (prob_model[prob_idx + 1] as i32) << 6;
+                enc.laplace_encode(&mut qi, fs, decay);
+            } else if tell + 2 <= budget as i32 {
+                qi = qi.clamp(-1, 1);
+                enc.encode_icdf(
+                    (2 * qi) ^ (if qi < 0 { -1 } else { 0 }),
+                    &SMALL_ENERGY_ICDF,
+                    2,
+                );
+            } else if tell < budget as i32 {
+                qi = qi.min(0);
+                enc.encode_bit_logp(qi != 0, 1);
+            } else {
+                qi = -1;
+            }
+
+            let q = qi as f32;
+            error[c * m.nb_ebands + i] = f - q;
+            let (predicted_old_e, next_prev) =
+                coarse_energy_prediction_step(old_e, prev[c], coef, beta, qi);
+            old_e_bands[c * m.nb_ebands + i] = predicted_old_e;
+            prev[c] = next_prev;
+            trace.push(CoarseEnergyBandTrace {
+                band: i,
+                channel: c,
+                qi,
+                predicted_old_e,
+                next_prev,
+            });
+        }
+    }
+
+    enc.done();
+    (trace, enc.buf.clone())
+}
+
+#[cfg(test)]
+pub fn trace_unquant_coarse_energy_for_test(
+    m: &CeltMode,
+    start: usize,
+    end: usize,
+    initial_old_e_bands: &[f32],
+    packet: &[u8],
+    channels: usize,
+    lm: usize,
+    intra: bool,
+) -> Vec<CoarseEnergyBandTrace> {
+    let prob_model = &E_PROB_MODEL[lm][if intra { 1 } else { 0 }];
+    let coef = if intra { 0.0 } else { PRED_COEF[lm] };
+    let beta = if intra { BETA_INTRA } else { BETA_COEF[lm] };
+    let mut old_e_bands = initial_old_e_bands.to_vec();
+    let mut prev = [0.0f32; 2];
+    let mut dec = RangeCoder::new_decoder(packet);
+    let budget = (dec.storage * 8) as i32;
+    let mut trace = Vec::new();
+
+    let _decoded_intra = dec.decode_bit_logp(3);
+
+    for i in start..end {
+        for c in 0..channels {
+            let qi;
+            let tell = dec.tell();
+            if budget - tell >= 15 {
+                let prob_idx = 2 * i.min(20);
+                let fs = (prob_model[prob_idx] as u32) << 7;
+                let decay = (prob_model[prob_idx + 1] as i32) << 6;
+                qi = dec.laplace_decode(fs, decay);
+            } else if budget - tell >= 2 {
+                let s = dec.decode_icdf(&SMALL_ENERGY_ICDF, 2);
+                qi = (s >> 1) ^ -(s & 1);
+            } else if budget - tell >= 1 {
+                qi = if dec.decode_bit_logp(1) { -1 } else { 0 };
+            } else {
+                qi = -1;
+            }
+
+            let old_e = old_e_bands[c * m.nb_ebands + i];
+            let (predicted_old_e, next_prev) =
+                coarse_energy_prediction_step(old_e, prev[c], coef, beta, qi);
+            old_e_bands[c * m.nb_ebands + i] = predicted_old_e;
+            prev[c] = next_prev;
+            trace.push(CoarseEnergyBandTrace {
+                band: i,
+                channel: c,
+                qi,
+                predicted_old_e,
+                next_prev,
+            });
+        }
+    }
+
+    trace
+}
+
+fn append_energy_stage_trace(
+    out: &mut Vec<EnergyStageTrace>,
+    stage: EnergyTraceStage,
+    encoder_old_e_bands: &[f32],
+    decoder_old_e_bands: &[f32],
+    encoder_error: &[f32],
+    decoder_error: Option<&[f32]>,
+    start: usize,
+    end: usize,
+    nb_ebands: usize,
+    channels: usize,
+) {
+    for i in start..end {
+        for c in 0..channels {
+            let idx = c * nb_ebands + i;
+            out.push(EnergyStageTrace {
+                stage: stage.clone(),
+                band: i,
+                channel: c,
+                encoder_old_e: encoder_old_e_bands[idx],
+                decoder_old_e: decoder_old_e_bands[idx],
+                encoder_error: encoder_error[idx],
+                decoder_error: decoder_error.map(|values| values[idx]),
+            });
+        }
+    }
+}
+
+fn first_energy_divergence(stages: &[EnergyStageTrace]) -> Option<EnergyStageTrace> {
+    stages
+        .iter()
+        .find(|entry| (entry.encoder_old_e - entry.decoder_old_e).abs() >= 1e-5)
+        .cloned()
+}
+
+#[doc(hidden)]
+pub fn trace_full_energy_roundtrip_for_test(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    e_bands: &[f32],
+    fine_quant: &[i32],
+    fine_priority: &[i32],
+    channels: usize,
+    lm: usize,
+) -> EnergyRoundtripTrace {
+    let mut encoder_old_e_bands = vec![0.0f32; mode.nb_ebands * channels];
+    let mut encoder_error = vec![0.0f32; mode.nb_ebands * channels];
+    let mut enc = RangeCoder::new_encoder(1000);
+
+    quant_coarse_energy(
+        mode,
+        start,
+        end,
+        e_bands,
+        &mut encoder_old_e_bands,
+        10000,
+        &mut encoder_error,
+        &mut enc,
+        channels,
+        lm,
+        false,
+        80,
+    );
+
+    let coarse_encoder_old_e = encoder_old_e_bands.clone();
+    let coarse_encoder_error = encoder_error.clone();
+
+    quant_fine_energy(
+        mode,
+        start,
+        end,
+        &mut encoder_old_e_bands,
+        &mut encoder_error,
+        fine_quant,
+        &mut enc,
+        channels,
+    );
+
+    let fine_encoder_old_e = encoder_old_e_bands.clone();
+    let fine_encoder_error = encoder_error.clone();
+
+    quant_energy_finalise(
+        mode,
+        start,
+        end,
+        &mut encoder_old_e_bands,
+        &mut encoder_error,
+        fine_quant,
+        fine_priority,
+        10,
+        &mut enc,
+        channels,
+    );
+
+    let final_encoder_old_e = encoder_old_e_bands.clone();
+    let final_encoder_error = encoder_error.clone();
+
+    enc.done();
+
+    let mut dec = RangeCoder::new_decoder(&enc.buf);
+    let intra = dec.decode_bit_logp(3);
+    let mut decoder_old_e_bands = vec![0.0f32; mode.nb_ebands * channels];
+    let decoder_error = vec![0.0f32; mode.nb_ebands * channels];
+
+    unquant_coarse_energy(
+        mode,
+        start,
+        end,
+        &mut decoder_old_e_bands,
+        intra,
+        &mut dec,
+        channels,
+        lm,
+    );
+    let coarse_decoder_old_e = decoder_old_e_bands.clone();
+
+    unquant_fine_energy(
+        mode,
+        start,
+        end,
+        &mut decoder_old_e_bands,
+        fine_quant,
+        &mut dec,
+        channels,
+    );
+    let fine_decoder_old_e = decoder_old_e_bands.clone();
+
+    unquant_energy_finalise(
+        mode,
+        start,
+        end,
+        &mut decoder_old_e_bands,
+        fine_quant,
+        fine_priority,
+        10,
+        &mut dec,
+        channels,
+    );
+    let final_decoder_old_e = decoder_old_e_bands.clone();
+
+    let mut stages = Vec::new();
+    append_energy_stage_trace(
+        &mut stages,
+        EnergyTraceStage::Coarse,
+        &coarse_encoder_old_e,
+        &coarse_decoder_old_e,
+        &coarse_encoder_error,
+        Some(&decoder_error),
+        start,
+        end,
+        mode.nb_ebands,
+        channels,
+    );
+    append_energy_stage_trace(
+        &mut stages,
+        EnergyTraceStage::Fine,
+        &fine_encoder_old_e,
+        &fine_decoder_old_e,
+        &fine_encoder_error,
+        Some(&decoder_error),
+        start,
+        end,
+        mode.nb_ebands,
+        channels,
+    );
+    append_energy_stage_trace(
+        &mut stages,
+        EnergyTraceStage::Finalise,
+        &final_encoder_old_e,
+        &final_decoder_old_e,
+        &final_encoder_error,
+        Some(&decoder_error),
+        start,
+        end,
+        mode.nb_ebands,
+        channels,
+    );
+
+    let first_divergence = first_energy_divergence(&stages);
+    EnergyRoundtripTrace {
+        stages,
+        first_divergence,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,5 +1169,106 @@ mod tests {
             }
             assert!((decoded_old_e_bands[i] - old_e_bands[i]).abs() < 1e-5);
         }
+    }
+
+    #[test]
+    fn test_coarse_energy_trace_matches_decoder_band_by_band() {
+        let mode = crate::modes::default_mode();
+        let channels = 1;
+        let lm = 3;
+        let start = 0;
+        let end = mode.nb_ebands;
+
+        let mut e_bands = vec![0.0f32; mode.nb_ebands];
+        for (i, v) in e_bands.iter_mut().enumerate() {
+            *v = 5.0 + (i as f32 * 0.35).sin() * 1.5;
+        }
+
+        let initial_old_e = vec![-28.0f32; mode.nb_ebands];
+        let budget = (160 * 8 * 8) as u32;
+        let tell_start = 2;
+        let intra = false;
+        let max_decay = 16.0f32;
+        let lfe = false;
+
+        let (enc_trace, packet) = trace_quant_coarse_energy_for_test(
+            mode,
+            start,
+            end,
+            &e_bands,
+            &initial_old_e,
+            budget,
+            tell_start,
+            channels,
+            lm,
+            intra,
+            max_decay,
+            lfe,
+        );
+
+        let dec_trace = trace_unquant_coarse_energy_for_test(
+            mode,
+            start,
+            end,
+            &initial_old_e,
+            &packet,
+            channels,
+            lm,
+            intra,
+        );
+
+        assert_eq!(enc_trace.len(), dec_trace.len());
+        for (enc, dec) in enc_trace.iter().zip(dec_trace.iter()) {
+            assert_eq!((enc.band, enc.channel), (dec.band, dec.channel));
+            assert_eq!(enc.qi, dec.qi, "qi mismatch at band {}", enc.band);
+            assert!(
+                (enc.predicted_old_e - dec.predicted_old_e).abs() < 1e-5,
+                "predicted old_e mismatch at band {}: enc={} dec={}",
+                enc.band,
+                enc.predicted_old_e,
+                dec.predicted_old_e
+            );
+            assert!(
+                (enc.next_prev - dec.next_prev).abs() < 1e-5,
+                "prev mismatch at band {}: enc={} dec={}",
+                enc.band,
+                enc.next_prev,
+                dec.next_prev
+            );
+        }
+    }
+
+    #[test]
+    fn test_full_energy_trace_matches_decoder_stage_by_stage() {
+        let mode = crate::modes::default_mode();
+        let channels = 1;
+        let lm = 3;
+        let start = 0;
+        let end = mode.nb_ebands;
+
+        let mut e_bands = vec![0.0f32; mode.nb_ebands];
+        for (i, v) in e_bands.iter_mut().enumerate() {
+            *v = 5.0 + (i as f32 * 0.35).sin() * 1.5;
+        }
+
+        let fine_quant: Vec<i32> = (0..mode.nb_ebands).map(|i| (i % 3) as i32).collect();
+        let fine_priority: Vec<i32> = (0..mode.nb_ebands).map(|i| (i % 2) as i32).collect();
+
+        let trace = trace_full_energy_roundtrip_for_test(
+            mode,
+            start,
+            end,
+            &e_bands,
+            &fine_quant,
+            &fine_priority,
+            channels,
+            lm,
+        );
+
+        assert!(
+            trace.first_divergence.is_none(),
+            "first divergence = {:?}",
+            trace.first_divergence
+        );
     }
 }

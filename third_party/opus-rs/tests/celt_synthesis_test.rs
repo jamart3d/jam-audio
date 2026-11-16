@@ -1,4 +1,7 @@
+mod quality_probe_common;
+
 use opus_rs::modes::default_mode;
+use quality_probe_common::{best_snr_with_delay, generate_sine_wave};
 
 #[test]
 fn celt_synthesis_chain_bypass() {
@@ -7,14 +10,8 @@ fn celt_synthesis_chain_bypass() {
     let overlap = mode.overlap; // 120
     let num_frames = 10;
 
-    let freq = 440.0;
-    let mut all_in = vec![0.0f32; frame_size * num_frames];
+    let all_in = generate_sine_wave(frame_size * num_frames, 48_000.0, 440.0, 0.4);
     let mut all_out = vec![0.0f32; frame_size * num_frames];
-
-    for i in 0..(frame_size * num_frames) {
-        let t = i as f32 / 48000.0;
-        all_in[i] = (2.0 * std::f32::consts::PI * freq * t).sin() * 0.4;
-    }
 
     // Simulate encoder's pre-emphasis + MDCT forward
     let syn_mem_size = 2048 + overlap;
@@ -111,31 +108,8 @@ fn celt_synthesis_chain_bypass() {
     // Check SNR with various delays
     let start_idx = 2 * frame_size;
     let end_idx = 9 * frame_size;
-    let mut best_snr: f32 = -100.0;
-    let mut best_delay = 0;
-    for delay in 0..(frame_size * 2) {
-        let mut s_e = 0.0f64;
-        let mut n_e = 0.0f64;
-        let mut count = 0;
-        for i in start_idx..end_idx {
-            if i + delay >= all_out.len() {
-                break;
-            }
-            let s = all_in[i] as f64;
-            let d = all_out[i + delay] as f64;
-            s_e += s * s;
-            n_e += (s - d) * (s - d);
-            count += 1;
-        }
-        if count < frame_size {
-            continue;
-        }
-        let snr = 10.0 * (s_e / (n_e + 1e-12)).log10() as f32;
-        if snr > best_snr {
-            best_snr = snr;
-            best_delay = delay;
-        }
-    }
+    let (best_snr, best_delay, _) =
+        best_snr_with_delay(&all_in, &all_out, start_idx, end_idx, frame_size * 2);
 
     eprintln!(
         "Synthesis chain bypass: Best SNR = {:.2} dB at delay {}",
@@ -156,8 +130,15 @@ fn celt_synthesis_chain_bypass() {
 /// This isolates whether the energy quantization alone causes the issue.
 #[test]
 fn celt_energy_roundtrip_only() {
-    use opus_rs::bands::{amp2log2, compute_band_energies, denormalise_bands, normalise_bands};
-    use opus_rs::quant_bands::{quant_coarse_energy, quant_energy_finalise, quant_fine_energy};
+    use opus_rs::bands::{
+        amp2log2, compute_band_energies, denormalise_bands, normalise_bands,
+        trace_band_roundtrip_for_test,
+    };
+    use opus_rs::celt::trace_celt_energy_allocation_for_test;
+    use opus_rs::quant_bands::{
+        quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
+        trace_full_energy_roundtrip_for_test, trace_quant_energy_distortion_for_test,
+    };
     use opus_rs::range_coder::RangeCoder;
     use opus_rs::rate::clt_compute_allocation;
 
@@ -169,14 +150,8 @@ fn celt_energy_roundtrip_only() {
     let num_frames = 10;
     let n_bytes = 160;
 
-    let freq_hz = 440.0;
-    let mut all_in = vec![0.0f32; frame_size * num_frames];
+    let all_in = generate_sine_wave(frame_size * num_frames, 48_000.0, 440.0, 0.4);
     let mut all_out = vec![0.0f32; frame_size * num_frames];
-
-    for i in 0..(frame_size * num_frames) {
-        let t = i as f32 / 48000.0;
-        all_in[i] = (2.0 * std::f32::consts::PI * freq_hz * t).sin() * 0.4;
-    }
 
     let syn_mem_size = 2048 + overlap;
     let mut syn_mem = vec![0.0f32; syn_mem_size];
@@ -239,17 +214,48 @@ fn celt_energy_roundtrip_only() {
 
         // Convert to log domain
         let mut band_log_e = vec![0.0f32; nb_ebands * channels];
-        amp2log2(
+        amp2log2(mode, 0, nb_ebands, &band_e, &mut band_log_e, channels);
+
+        let distortion = trace_quant_energy_distortion_for_test(
             mode,
+            0,
             nb_ebands,
-            nb_ebands,
-            &band_e,
-            &mut band_log_e,
+            &band_log_e,
             channels,
+            lm,
+            n_bytes,
+        );
+        let worst_final = distortion
+            .finalise
+            .iter()
+            .max_by(|a, b| a.abs_error.partial_cmp(&b.abs_error).unwrap())
+            .unwrap();
+        eprintln!("Worst quantized band distortion: {:?}", worst_final);
+
+        let allocation = trace_celt_energy_allocation_for_test(
+            mode,
+            0,
+            nb_ebands,
+            channels,
+            lm,
+            n_bytes,
+        );
+        assert!(
+            allocation.ebits[nb_ebands - 2] > 1 || allocation.ebits[nb_ebands - 1] > 1,
+            "high-distortion tail bands are starved: ebits={:?}",
+            allocation.ebits
+        );
+        eprintln!(
+            "Allocation snapshot: coded_bands={} balance={} ebits={:?} fine_priority={:?}",
+            allocation.coded_bands,
+            allocation.balance,
+            allocation.ebits,
+            allocation.fine_priority
         );
 
         // Encode coarse + fine energy
         let total_bits = n_bytes * 8;
+        let total_bits_i32 = total_bits as i32;
         let mut error = vec![0.0f32; nb_ebands * channels];
         let mut rc = RangeCoder::new_encoder(n_bytes as u32);
 
@@ -306,7 +312,7 @@ fn celt_energy_roundtrip_only() {
             alloc_trim,
             &mut intensity,
             &mut dual_stereo,
-            total_bits << 3,
+            total_bits_i32 << 3,
             &mut balance,
             &mut pulses,
             &mut ebits,
@@ -318,6 +324,26 @@ fn celt_energy_roundtrip_only() {
             0,
             nb_ebands as i32 - 1,
         );
+
+        let fine_priority_snapshot = fine_priority.clone();
+        let fine_quant_snapshot = ebits.clone();
+        let trace = trace_full_energy_roundtrip_for_test(
+            mode,
+            0,
+            nb_ebands,
+            &band_log_e,
+            &fine_quant_snapshot,
+            &fine_priority_snapshot,
+            channels,
+            lm,
+        );
+        eprintln!("Energy trace first divergence: {:?}", trace.first_divergence);
+        let band_trace = trace_band_roundtrip_for_test(mode, &freq_coeffs, channels, lm);
+        let worst_band = band_trace
+            .iter()
+            .max_by(|a, b| a.max_coeff_error.partial_cmp(&b.max_coeff_error).unwrap())
+            .unwrap();
+        eprintln!("Band roundtrip worst entry: {:?}", worst_band);
 
         quant_fine_energy(
             mode,
@@ -340,7 +366,7 @@ fn celt_energy_roundtrip_only() {
             &mut error,
             &ebits,
             &fine_priority,
-            (total_bits - rc.tell()) << 3,
+            (total_bits_i32 - rc.tell()) << 3,
             &mut rc,
             channels,
         );
@@ -389,31 +415,8 @@ fn celt_energy_roundtrip_only() {
     // Check SNR
     let start_idx = 2 * frame_size;
     let end_idx = 9 * frame_size;
-    let mut best_snr: f32 = -100.0;
-    let mut best_delay = 0;
-    for delay in 0..(frame_size * 2) {
-        let mut s_e = 0.0f64;
-        let mut n_e = 0.0f64;
-        let mut count = 0;
-        for i in start_idx..end_idx {
-            if i + delay >= all_out.len() {
-                break;
-            }
-            let s = all_in[i] as f64;
-            let d = all_out[i + delay] as f64;
-            s_e += s * s;
-            n_e += (s - d) * (s - d);
-            count += 1;
-        }
-        if count < frame_size {
-            continue;
-        }
-        let snr = 10.0 * (s_e / (n_e + 1e-12)).log10() as f32;
-        if snr > best_snr {
-            best_snr = snr;
-            best_delay = delay;
-        }
-    }
+    let (best_snr, best_delay, _) =
+        best_snr_with_delay(&all_in, &all_out, start_idx, end_idx, frame_size * 2);
 
     eprintln!(
         "Energy roundtrip only: Best SNR = {:.2} dB at delay {}",

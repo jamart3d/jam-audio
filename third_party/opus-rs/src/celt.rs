@@ -9,6 +9,7 @@ use crate::quant_bands::{
 };
 use crate::range_coder::RangeCoder;
 use crate::rate::{BITRES, clt_compute_allocation};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
@@ -88,6 +89,127 @@ const INV_TABLE: [u8; 128] = [
 ];
 
 const MAX_TRANSIENT_LEN: usize = 3000;
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct CeltEnergyAllocationTrace {
+    pub start_band: usize,
+    pub end_band: usize,
+    pub signal_bandwidth: i32,
+    pub coded_bands: i32,
+    pub balance: i32,
+    pub offsets: Vec<i32>,
+    pub cap: Vec<i32>,
+    pub pulses: Vec<i32>,
+    pub ebits: Vec<i32>,
+    pub fine_priority: Vec<i32>,
+    pub alloc_trim: i32,
+    pub total_boost: i32,
+    pub is_transient: bool,
+    pub anti_collapse_rsv: i32,
+    pub alloc_budget_bitres: i32,
+}
+
+static LAST_ENCODER_ALLOCATION_TRACE: OnceLock<Mutex<Option<CeltEnergyAllocationTrace>>> =
+    OnceLock::new();
+static LAST_DECODER_ALLOCATION_TRACE: OnceLock<Mutex<Option<CeltEnergyAllocationTrace>>> =
+    OnceLock::new();
+
+fn encoder_allocation_trace_slot() -> &'static Mutex<Option<CeltEnergyAllocationTrace>> {
+    LAST_ENCODER_ALLOCATION_TRACE.get_or_init(|| Mutex::new(None))
+}
+
+fn decoder_allocation_trace_slot() -> &'static Mutex<Option<CeltEnergyAllocationTrace>> {
+    LAST_DECODER_ALLOCATION_TRACE.get_or_init(|| Mutex::new(None))
+}
+
+#[doc(hidden)]
+pub fn take_last_encoder_allocation_trace_for_test() -> Option<CeltEnergyAllocationTrace> {
+    encoder_allocation_trace_slot().lock().unwrap().take()
+}
+
+#[doc(hidden)]
+pub fn take_last_decoder_allocation_trace_for_test() -> Option<CeltEnergyAllocationTrace> {
+    decoder_allocation_trace_slot().lock().unwrap().take()
+}
+
+#[doc(hidden)]
+pub fn trace_celt_energy_allocation_for_test(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    channels: usize,
+    lm: usize,
+    n_bytes: usize,
+) -> CeltEnergyAllocationTrace {
+    let total_bits = n_bytes as i32 * 8;
+    let mut rc = RangeCoder::new_encoder(n_bytes as u32);
+    rc.encode_bit_logp(false, 1);
+    rc.encode_bit_logp(false, 3);
+
+    let offsets = vec![0i32; end];
+    let mut cap = vec![0i32; end];
+    for i in 0..end {
+        let n = (mode.e_bands[i + 1] - mode.e_bands[i]) << lm;
+        cap[i] = ((mode.cache.caps[end * (2 * lm + channels - 1) + i] as i32 + 64)
+            * channels as i32
+            * n as i32)
+            >> 2;
+    }
+
+    let alloc_trim = 6;
+    let total_bits_bitres = total_bits << BITRES;
+    if rc.tell_frac() + (6 << BITRES) <= total_bits_bitres {
+        rc.encode_icdf(alloc_trim, &TRIM_ICDF, 7);
+    }
+
+    let mut intensity = 0i32;
+    let mut dual_stereo = 0i32;
+    let mut balance = 0;
+    let mut pulses = vec![0i32; end];
+    let mut ebits = vec![0i32; end];
+    let mut fine_priority = vec![0i32; end];
+
+    let coded_bands = clt_compute_allocation(
+        mode,
+        start,
+        end,
+        &offsets,
+        &cap,
+        alloc_trim,
+        &mut intensity,
+        &mut dual_stereo,
+        total_bits_bitres - rc.tell_frac() - 1,
+        &mut balance,
+        &mut pulses,
+        &mut ebits,
+        &mut fine_priority,
+        channels as i32,
+        lm as i32,
+        &mut rc,
+        true,
+        0,
+        end as i32 - 1,
+    );
+
+    CeltEnergyAllocationTrace {
+        start_band: start,
+        end_band: end,
+        signal_bandwidth: end as i32 - 1,
+        coded_bands,
+        balance,
+        offsets,
+        cap,
+        pulses,
+        ebits,
+        fine_priority,
+        alloc_trim,
+        total_boost: 0,
+        is_transient: false,
+        anti_collapse_rsv: 0,
+        alloc_budget_bitres: total_bits_bitres - rc.tell_frac() - 1,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisInfo {
@@ -1635,7 +1757,7 @@ impl CeltEncoder {
             complexity: 9,
             syn_mem: vec![0.0; syn_mem_size],
             enc_decode_mem: vec![0.0; syn_mem_size],
-            old_band_e: vec![0.0; nb_x_ch],
+            old_band_e: vec![-28.0; nb_x_ch],
             preemph_mem: vec![0.0; channels],
             tonal_average: 256,
             hf_average: 0,
@@ -1649,7 +1771,7 @@ impl CeltEncoder {
             prefilter_tapset: 0,
             old_band_e2: vec![0.0; nb_x_ch],
             old_band_e3: vec![0.0; nb_x_ch],
-            last_band_log_e: vec![0.0; nb_x_ch],
+            last_band_log_e: vec![-28.0; nb_x_ch],
             delayed_intra: 0.0,
 
             w_in_buf: vec![0.0; bufstride_x_ch],
@@ -1684,6 +1806,10 @@ impl CeltEncoder {
 
     pub fn encode(&mut self, pcm: &[f32], frame_size: usize, rc: &mut RangeCoder) {
         self.encode_impl(pcm, frame_size, rc, 0, None)
+    }
+
+    pub fn get_old_band_e(&self) -> &[f32] {
+        &self.old_band_e
     }
 
     pub fn encode_with_start_band(
@@ -1899,7 +2025,7 @@ impl CeltEncoder {
                 let qg = (gain1 / 0.09375 - 1.0 + 0.5).floor() as i32;
                 let qg = qg.clamp(0, 7);
                 let pi = (pitch_index + 1) as u32;
-                let octave = 31 - pi.leading_zeros();
+                let octave = 32 - pi.leading_zeros();
                 let octave = (octave as i32 - 5).max(0) as u32;
                 rc.enc_uint(octave, 6);
                 rc.enc_bits(pi - (16 << octave), 4 + octave);
@@ -2145,6 +2271,18 @@ impl CeltEncoder {
         let ebits = &mut self.w_ebits[..ebands_stereo];
         let mut balance = 0;
 
+        let anti_collapse_rsv = if is_transient && lm >= 2 {
+            let remaining = (total_bits << BITRES) - rc.tell_frac() - 1;
+            if remaining >= ((lm as i32 + 2) << BITRES) {
+                1i32 << BITRES
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let alloc_budget_bitres = (total_bits << BITRES) - rc.tell_frac() - 1 - anti_collapse_rsv;
         self.last_coded_bands = clt_compute_allocation(
             mode,
             start_band,
@@ -2154,7 +2292,7 @@ impl CeltEncoder {
             alloc_trim,
             &mut intensity,
             &mut dual_stereo_val,
-            (total_bits << BITRES) - rc.tell_frac() - 1,
+            alloc_budget_bitres,
             &mut balance,
             pulses,
             ebits,
@@ -2166,7 +2304,6 @@ impl CeltEncoder {
             0,
             nb_ebands as i32 - 1,
         );
-
         quant_fine_energy(
             mode,
             start_band,
@@ -2183,21 +2320,28 @@ impl CeltEncoder {
         let (x_split, y_split) = x.split_at_mut(frame_size);
         let y_opt = if channels == 2 { Some(y_split) } else { None };
 
-        let anti_collapse_rsv = if is_transient && lm >= 2 {
-            let remaining = (total_bits << BITRES) - rc.tell_frac() - 1;
-            if remaining >= ((lm as i32 + 2) << BITRES) {
-                1i32 << BITRES
-            } else {
-                0
-            }
-        } else {
-            0
-        };
+        *encoder_allocation_trace_slot().lock().unwrap() = Some(CeltEnergyAllocationTrace {
+            start_band,
+            end_band: nb_ebands,
+            signal_bandwidth: nb_ebands as i32 - 1,
+            coded_bands: self.last_coded_bands,
+            balance,
+            offsets: offsets.to_vec(),
+            cap: cap.to_vec(),
+            pulses: pulses.to_vec(),
+            ebits: ebits.to_vec(),
+            fine_priority: fine_priority.to_vec(),
+            alloc_trim,
+            total_boost,
+            is_transient,
+            anti_collapse_rsv,
+            alloc_budget_bitres,
+        });
 
         let mut dual_stereo = dual_stereo_val != 0;
 
         let theta_rdo = channels == 2 && !dual_stereo && self.complexity >= 8;
-        let resynth = theta_rdo;
+        let resynth = true;
 
         quant_all_bands(
             true,
@@ -2399,6 +2543,10 @@ impl CeltDecoder {
 
     pub fn decode(&mut self, compressed: &[u8], frame_size: usize, pcm: &mut [f32]) -> usize {
         self.decode_impl(compressed, frame_size, pcm, 0, self.mode.nb_ebands)
+    }
+
+    pub fn get_old_band_e(&self) -> &[f32] {
+        &self.old_band_e
     }
 
     pub fn decode_with_start_band(
@@ -2638,6 +2786,24 @@ impl CeltDecoder {
             0,
             end_band as i32 - 1,
         );
+
+        *decoder_allocation_trace_slot().lock().unwrap() = Some(CeltEnergyAllocationTrace {
+            start_band,
+            end_band,
+            signal_bandwidth: end_band as i32 - 1,
+            coded_bands,
+            balance,
+            offsets: offsets.to_vec(),
+            cap: cap.to_vec(),
+            pulses: pulses.to_vec(),
+            ebits: ebits.to_vec(),
+            fine_priority: fine_priority.to_vec(),
+            alloc_trim,
+            total_boost: 0,
+            is_transient,
+            anti_collapse_rsv,
+            alloc_budget_bitres: alloc_bits,
+        });
 
         unquant_fine_energy(
             mode,
@@ -2913,5 +3079,19 @@ impl CeltDecoder {
         self.rng = rc.rng;
 
         frame_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trace_celt_energy_allocation_for_test;
+
+    #[test]
+    fn test_celt_allocation_trace_returns_nonempty_ebits() {
+        let mode = crate::modes::default_mode();
+        let trace = trace_celt_energy_allocation_for_test(&mode, 0, mode.nb_ebands, 1, 3, 160);
+        assert_eq!(trace.ebits.len(), mode.nb_ebands);
+        assert_eq!(trace.fine_priority.len(), mode.nb_ebands);
+        assert!(trace.coded_bands > 0, "coded_bands should be positive");
     }
 }
