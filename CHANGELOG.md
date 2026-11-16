@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Keep-warm `resume()` no longer waits on the hidden silent anchor's `play()` (commit 9aa5aca). After pause and backgrounding that promise can stay pending, which left the output gain at 0 and `resume()` unsettled; the anchor is now started without blocking the gain ramp on both the desktop keep-warm branch and the Android transport action.
+- Added a one-shot, non-blocking anchor recovery: if the anchor's `play()` has not settled after about 250 ms, the bridge emits an `anchor-play-timeout` diagnostics event (with `readyState`, `networkState`, `currentTime`, `paused`, `holdsActualTrack`) and retries once with `load()` then `play()`. `load()` is skipped when the anchor carries the actual track.
+- Status: unverified in the field. Covered by harness tests only; pending confirmation on the Jamdisc staging build.
+
 ## [0.5.3] - 2026-11-15
 
 ### Fixed
