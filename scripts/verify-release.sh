@@ -26,7 +26,7 @@ add_production_groups() {
   add_group worklet 'npm --prefix packages/jam-audio-worklet test'
   add_group rust 'cargo clippy --all-targets -- -D warnings && cargo check --manifest-path packages/jam-audio-engine/Cargo.toml --target wasm32-unknown-unknown && cargo check --manifest-path packages/jam-audio-flutter/Cargo.toml && cargo test --manifest-path packages/jam-audio-engine/Cargo.toml'
   add_group static 'cargo fmt --check && node protocol/generate.mjs --check && node scripts/check_versions.mjs && git diff --check HEAD && check_release_range_whitespace'
-  add_group package '(cd packages/jam-audio-worklet && npm pack --dry-run --json --offline --ignore-scripts --cache "$NPM_CACHE_DIR") | node scripts/check_pack.mjs src/audio_bridge_activation.js src/audio_bridge_media_session.js'
+  add_group package 'pack_json=$(cd packages/jam-audio-worklet && npm pack --dry-run --json --offline --ignore-scripts --cache "$NPM_CACHE_DIR") && printf "%s" "$pack_json" | node scripts/check_pack.mjs src/audio_bridge_activation.js src/audio_bridge_media_session.js && printf "%s" "$pack_json" | node scripts/check_pack_imports.mjs packages/jam-audio-worklet'
 }
 
 add_production_groups

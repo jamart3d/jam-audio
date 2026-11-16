@@ -23,7 +23,7 @@ import { computeBufferPolicy } from './buffer_policy.js';
 import {
   createBaseWorkerDiagnostics,
   createSharedPlaybackWorkerControllerCore,
-} from '../shared/playback_worker_controller_core.js';
+} from './playback_worker_controller_core.js';
 import {
   createWorkletPortState,
   currentPlayerFrom,
