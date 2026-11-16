@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-16
+
 ### Fixed
 - Refill loop stop handling: stopping the refill loop no longer passes the waitasync/port loop's internal session number to `clearIntervalFn` (which could cancel an unrelated worker timer with the same id), and now actually retires a running waitasync or port loop instead of leaving it servicing worklet refill requests. Neither was observed causing a field problem; both were found by code reading and probe tests.
 
