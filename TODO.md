@@ -18,8 +18,8 @@
 ## Maintainability
 
 - [ ] **Decide Public Package Distribution**
-  - Determine whether `jam-audio-engine`, `jam_audio_flutter`, and `jam_audio_worklet` should be published to `crates.io` and `npm` or remain git-only for now.
-  - If publishing, define package names, registry ownership, publish checklist, and minimum README/package metadata requirements.
+  - Done as of v0.5.2: scoped npm metadata (`@jamart3d/jam-audio-worklet`, `@jamart3d/jam-audio-engine-wasm`) and the `scripts/verify-release.sh` lockstep-version and pack-content gates.
+  - Remaining: registry publication timing and `crates.io` policy.
 - [ ] **Consolidate Test Data**
   - Consider moving `packages/jam-audio-engine/testdata/opus_sample.opus` to a central `tests/fixtures` directory if more packages need to share audio samples.
 - [ ] **Expand JSDoc Coverage**

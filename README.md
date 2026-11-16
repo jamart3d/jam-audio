@@ -11,7 +11,7 @@ Browser and Flutter media APIs offer convenience but limited control. For music 
 - **Gapless playback** — seamless transitions between tracks with no audible gap
 - **Streaming decode** — audio is decoded incrementally as it arrives, not buffered in full
 - **Wasm-first engine** — the Rust core compiles to a single `.wasm` artifact consumed directly by the browser
-- **Flutter bridge** — the same engine exposed to Flutter via `flutter_rust_bridge` for mobile and desktop
+- **Flutter metadata bridge** — audio metadata and embedded artwork extraction exposed to Flutter Web via flutter_rust_bridge
 - **Low-latency worklet** — a dedicated `AudioWorklet` processor keeps the audio thread isolated from the main thread
 - **PWA Persistence** — integrated heartbeat and anchor diagnostic mechanism to maintain Media Session notifications on mobile platforms (Android)
 - **Runtime diagnostics** — bridge snapshots and lifecycle events expose AudioContext state, playback health, handoff timing, and visibility changes for production troubleshooting
@@ -45,9 +45,9 @@ wasm-pack build --target web --release
 
 ## Roadmap
 
-- Update `build.sh` to sync artifacts directly to the `jamdisc` sibling repo
-- Review remaining `expect` calls in `ring_buffer.rs` for typed error conversion
-- Continue Mode B playback tuning before reconsidering threaded-wasm Mode C work
+- Gather real-world Mode B playback telemetry (long sessions, background/screen-off, network variation, gapless transitions) before evaluating multithreaded Wasm (Mode C)
+- Continue modularizing `audio_bridge.js` and `audio_playback_worker_controller.js` into focused sub-modules
+- Complete pure-Rust Wasm Opus (`opus-rs`) CELT/MDCT quality parity (`track-4-codec-quality`)
 
 ## Release Process
 
