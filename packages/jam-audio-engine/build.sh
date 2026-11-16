@@ -34,28 +34,24 @@ if [ -f "$PKG_JSON" ]; then
     ' "$PKG_JSON"
 fi
 
-# 2. Sync artifacts to the web app when a target directory is configured or present
+# 2. Verify artifacts, then optionally sync them to the web app (opt-in)
 PKG_DIR="$SCRIPT_DIR/pkg"
 if [ ! -f "$PKG_DIR/jam_audio_engine_bg.wasm" ] || [ ! -f "$PKG_DIR/jam_audio_engine.js" ]; then
     echo "Error: Expected build artifacts were not created."
     exit 1
 fi
 
-DEFAULT_WEB_DIR="$SCRIPT_DIR/../../../jamdisc/apps/jamdisc_web/web"
+# Opt-in only: sync the built Wasm into a Jamdisc web app when JAMDISC_WEB_PKG_DIR names
+# the destination (for example <jamdisc>/apps/jamdisc_web/web/pkg). Jamdisc's own
+# build/deploy scripts copy these artifacts themselves, so the default is to leave
+# every directory outside this package untouched.
 if [ -n "${JAMDISC_WEB_PKG_DIR:-}" ]; then
     WEB_PKG_DIR="$JAMDISC_WEB_PKG_DIR"
-elif [ -d "$DEFAULT_WEB_DIR" ]; then
-    WEB_PKG_DIR="$DEFAULT_WEB_DIR/pkg"
-else
-    WEB_PKG_DIR=""
-fi
-
-if [ -n "$WEB_PKG_DIR" ]; then
     echo "Syncing artifacts to $WEB_PKG_DIR..."
     mkdir -p "$WEB_PKG_DIR"
     cp "$PKG_DIR/jam_audio_engine_bg.wasm" "$WEB_PKG_DIR/"
     cp "$PKG_DIR/jam_audio_engine.js" "$WEB_PKG_DIR/"
     echo "Build and sync complete."
 else
-    echo "Build complete. Skipping web app sync (no jamdisc checkout found; set JAMDISC_WEB_PKG_DIR to override)."
+    echo "Build complete. Skipping web app sync (set JAMDISC_WEB_PKG_DIR to a destination directory to opt in)."
 fi

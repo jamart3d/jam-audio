@@ -119,10 +119,13 @@ grep -q 'scripts/verify-release.sh' "$ROOT/RELEASING.md"
 test "$(grep -c 'cargo clippy' "$ROOT/RELEASING.md" || true)" -eq 0
 test "$(grep -c 'npm pack --dry-run' "$ROOT/RELEASING.md" || true)" -eq 0
 
-# --- build.sh safe sibling sync tests
+# --- build.sh opt-in web app sync tests
 bash -n "$ROOT/packages/jam-audio-engine/build.sh"
 if grep -q '\.\./\.\./apps/jamdisc_web/web/pkg' "$ROOT/packages/jam-audio-engine/build.sh"; then
   echo "FAIL: build.sh still references the broken sibling path"; exit 1
+fi
+if grep -q 'jamdisc/apps\|DEFAULT_WEB_DIR' "$ROOT/packages/jam-audio-engine/build.sh"; then
+  echo "FAIL: build.sh still auto-detects a sibling jamdisc checkout"; exit 1
 fi
 
 ENGINE_TEST_ROOT="$TEST_DIR/engine_sandbox"
@@ -149,7 +152,7 @@ if ! grep -q "Syncing artifacts to $CUSTOM_PKG" "$TEST_DIR/case-a.out"; then
   echo "FAIL: Case A did not sync to custom dir"; exit 1
 fi
 
-# Case B: no override and no sibling jamdisc checkout -> skip message, no ../../apps created
+# Case B: no override -> skip message, nothing created outside the package
 rm -rf "$CUSTOM_PKG"
 PATH="$TEST_DIR/engine-bin:$PATH" \
   "$ENGINE_TEST_ROOT/repo/packages/jam-audio-engine/build.sh" > "$TEST_DIR/case-b.out"
@@ -160,15 +163,16 @@ if [ -d "$ENGINE_TEST_ROOT/apps" ] || [ -d "$ENGINE_TEST_ROOT/repo/apps" ]; then
   echo "FAIL: Case B created stray apps directory"; exit 1
 fi
 
-# Case C: sibling checkout present in temp tree -> synced to its web/pkg
+# Case C: a sibling jamdisc checkout exists but the env var is unset -> NOT synced (opt-in only)
 SIBLING_WEB="$ENGINE_TEST_ROOT/jamdisc/apps/jamdisc_web/web"
 mkdir -p "$SIBLING_WEB"
 PATH="$TEST_DIR/engine-bin:$PATH" \
   "$ENGINE_TEST_ROOT/repo/packages/jam-audio-engine/build.sh" > "$TEST_DIR/case-c.out"
-test -f "$SIBLING_WEB/pkg/jam_audio_engine_bg.wasm"
-test -f "$SIBLING_WEB/pkg/jam_audio_engine.js"
-if ! grep -q "jamdisc/apps/jamdisc_web/web/pkg" "$TEST_DIR/case-c.out"; then
-  echo "FAIL: Case C did not sync to sibling pkg dir"; exit 1
+if [ -e "$SIBLING_WEB/pkg" ]; then
+  echo "FAIL: Case C synced into a sibling jamdisc checkout without JAMDISC_WEB_PKG_DIR"; exit 1
+fi
+if ! grep -q 'Skipping web app sync' "$TEST_DIR/case-c.out"; then
+  echo "FAIL: Case C did not output skipping message"; exit 1
 fi
 
 printf 'verify-release tests passed\n'

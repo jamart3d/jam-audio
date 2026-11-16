@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- `packages/jam-audio-engine/build.sh` now syncs the built Wasm into a Jamdisc web app only when `JAMDISC_WEB_PKG_DIR` is set (its value is the destination directory). The sibling `../../../jamdisc` auto-detect added in 0.5.3 is removed; Jamdisc's own build and deploy scripts copy these artifacts themselves.
+
 ## [0.5.4] - 2026-11-15
 
 ### Fixed
