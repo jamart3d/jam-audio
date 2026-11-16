@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.3] - 2026-11-15
+
+### Fixed
+- Packed `playback_worker_controller_core.js` inside `src/` so the published worklet package can load `audio_playback_worker_controller.js` (0.5.2 imported an unpacked `shared/` module and failed with `ERR_MODULE_NOT_FOUND`).
+- Made `packages/jam-audio-engine/build.sh` web-app artifact sync safe: it honors `JAMDISC_WEB_PKG_DIR`, auto-detects a sibling `jamdisc` checkout, and otherwise skips instead of creating stray directories.
+
+### Changed
+- Replaced raw shared-state slot literals in `audio_processor.js` with the generated protocol constants and enforced it in `protocol_safety.test.js`.
+- Extracted the Media Session and heartbeat controller from `audio_bridge.js` into `audio_bridge_media_session.js` with dedicated unit tests; public bridge behavior is unchanged.
+- Aligned `README.md` and `TODO.md` with the 0.5.2 architecture and release tooling.
+
+### Added
+- `scripts/check_pack_imports.mjs`, wired into `scripts/verify-release.sh`, fails the package check when a packed module imports a file that is not packed.
+- Release verification now requires `src/audio_bridge_media_session.js` in the packed worklet.
+
 ## [0.5.2] - 2026-11-15
 
 ### Changed
