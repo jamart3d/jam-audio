@@ -1,7 +1,7 @@
-// Characterization tests for the refill driver loops in
-// audio_playback_worker_controller.js (waitasync, port, degraded interval). They pin the
-// CURRENT behavior, including two known defects, so the loops can be extracted without
-// behavior change. Fixing the defects is a separate, approved change.
+// Tests for the refill driver loops in audio_playback_worker_controller.js (waitasync,
+// port, degraded interval). Written as characterization tests before the loops were
+// extracted; the two formerly pinned defects (loop token passed to clearIntervalFn, stop
+// not retiring a waitasync loop) are now fixed and asserted as fixed below.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPlaybackWorkerController } from './audio_playback_worker_controller.js';
@@ -78,18 +78,28 @@ test('waitasync driver is selected once per controller lifetime and announced', 
   h.controller.stop();
 });
 
-test('KNOWN DEFECT (pinned): the waitasync session sentinel is passed to clearIntervalFn on stop', async () => {
+test('stop() under the waitasync driver passes nothing to clearIntervalFn (no interval exists)', async () => {
   const h = make();
   h.controller.playTrack(new Uint8Array([1]), buffers());
   await flush();
-  assert.deepEqual(h.cleared, [], 'nothing cleared while running');
   h.controller.stop();
-  assert.equal(h.cleared.length, 1);
-  assert.ok(Number.isInteger(h.cleared[0]) && h.cleared[0] < 1000, 'a small loop session number, not a real interval id');
+  assert.deepEqual(h.cleared, [], 'the loop token is never handed to clearIntervalFn');
   assert.equal(h.intervals.length, 0, 'no interval was ever created under waitasync');
 });
 
-test('KNOWN DEFECT (pinned): stopRefillLoop does not stop a waitasync loop', async () => {
+test('an unrelated pending timer is not cancelled by stop() even when its id equals the loop number', async () => {
+  // Timer ids share one pool in a browser worker. Model it: pending timer ids 1..9.
+  const pending = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  const h = make({ clearIntervalFn: (id) => pending.delete(id) });
+  h.controller.playTrack(new Uint8Array([1]), buffers());
+  await flush();
+  h.controller.playTrack(new Uint8Array([2]), buffers());
+  await flush();
+  h.controller.stop();
+  assert.equal(pending.size, 9, 'all unrelated timers survive');
+});
+
+test('stopRefillLoop retires a waitasync loop: pauseRefill() then a worklet refill request is not served', async () => {
   const h = make();
   const b = buffers();
   h.controller.playTrack(new Uint8Array([1]), b);
@@ -103,9 +113,11 @@ test('KNOWN DEFECT (pinned): stopRefillLoop does not stop a waitasync loop', asy
   Atomics.add(state, 7, 1);
   Atomics.notify(state, 7, 1);                              // worklet refill request
   await flush(20);
-  assert.ok(h.decodes() > before, 'the loop still refilled after pauseRefill()');
-  h.controller.playTrack(new Uint8Array([2]), buffers()); // resetPlaybackState bumps the epoch and retires the old loop
-  await flush();
+  assert.equal(h.decodes(), before, 'the stopped loop did not refill');
+  // transportUnmute restarts the loop through kickRefillLoopIfNeeded.
+  h.controller.transportUnmute();
+  await flush(10);
+  assert.ok(h.decodes() > before, 'refill resumes after an explicit restart');
   h.controller.stop();
 });
 

@@ -5,10 +5,12 @@ import { nudgeWaitAsyncState, startPortLoop } from './playback_worker_controller
 // can be reassigned by the controller (shared state, diagnostics, worklet port) is read
 // through a getter on every use, never captured.
 //
-// Behavior is intentionally identical to the inline code it replaced, including two
-// known defects pinned by audio_playback_worker_controller_refill_characterization.test.js:
-// the loop token doubles as the value passed to clearIntervalFn, and stopping the timer
-// does not retire a running waitasync loop (only invalidate() does).
+// State is split so that nothing but a real interval id ever reaches clearIntervalFn:
+//   - sessionEpoch: the controller-wide playback epoch (also compared by fetch callbacks).
+//     Bumped by start() and invalidate(), never by stop().
+//   - loopGeneration: retires waitasync/port loops. Bumped by start(), invalidate() and
+//     stop(), so stopping really stops a running loop.
+//   - token: marks a loop active for waitasync/port; intervalId: the setInterval id.
 function createRefillLoop({
   getSharedState,
   getDiagnostics,
@@ -24,10 +26,12 @@ function createRefillLoop({
   refillRequestIndex,
   refillIntervalMs,
 }) {
-  let timerId = null;
+  let token = null;
+  let intervalId = null;
   let driver = null; // 'waitasync' | 'port' | 'degraded-interval'; set once per worker lifetime
   let lastRefillTickMs = 0;
-  let currentSessionId = 0;
+  let sessionEpoch = 0;
+  let loopGeneration = 0;
 
   function selectDriver() {
     if (driver !== null) return driver; // already selected
@@ -55,29 +59,29 @@ function createRefillLoop({
 
   // Primary driver: Atomics.waitAsync
   // waitTimeoutMs is injected via controller options (default 1000ms production; 10ms in tests).
-  async function runWaitAsyncLoop(sessionId) {
-    while (currentSessionId === sessionId) {
+  async function runWaitAsyncLoop(generation) {
+    while (loopGeneration === generation) {
       if (!getSharedState()) break;
       // Capture expected BEFORE refill so a worklet notify during refill is
       // not lost: waitAsync will see not-equal and loop immediately.
       const expected = Atomics.load(getSharedState(), refillRequestIndex);
       refillRingBuffer();
-      if (currentSessionId !== sessionId) break; // session changed during refill
+      if (loopGeneration !== generation) break; // loop retired during refill
       const result = Atomics.waitAsync(getSharedState(), refillRequestIndex, expected, waitTimeoutMs);
       if (result.async) {
         await result.value; // 'ok' | 'timed-out' | 'not-equal' — all wake reasons are fine
       }
       // Any wake reason → loop, re-read, refill. Spurious wakes are harmless.
     }
-    if (timerId === sessionId) timerId = null;
+    if (token === generation) token = null;
   }
 
   // Fallback #1: MessagePort from worklet
-  function runPortLoop(sessionId) {
+  function runPortLoop(generation) {
     const success = startPortLoop({
       getWorkletPort,
       refillRingBuffer,
-      shouldKeepRunning: () => sessionId === currentSessionId,
+      shouldKeepRunning: () => generation === loopGeneration,
     });
     if (!success) {
       emitDiagnosticsEvent({
@@ -91,13 +95,13 @@ function createRefillLoop({
     }
     // Initial refill on loop start (covers startup case before worklet fires)
     refillRingBuffer();
-    timerId = sessionId;
+    token = generation;
   }
 
   // Fallback #2: degraded setInterval (throttle-prone, logs warning on each delayed tick)
   function runDegradedIntervalLoop() {
     lastRefillTickMs = performanceNow();
-    timerId = setIntervalFn(() => {
+    intervalId = setIntervalFn(() => {
       if (isRefillPending()) return;
       const currentTime = performanceNow();
       const gap = currentTime - lastRefillTickMs;
@@ -133,14 +137,18 @@ function createRefillLoop({
   return {
     selectDriver,
     start,
-    // Retires every running loop: they compare their captured session id on each wake.
-    invalidate() { currentSessionId += 1; },
-    sessionId: () => currentSessionId,
-    isActive: () => timerId !== null,
+    // New playback session: retires every loop and invalidates captured session ids.
+    invalidate() { sessionEpoch += 1; loopGeneration += 1; },
+    // Retires a running waitasync/port loop and marks the loop inactive. Does not touch
+    // the session epoch, so in-flight fetch callbacks stay valid. The interval timer is
+    // cleared by the shared core through the hooks below.
+    stop() { loopGeneration += 1; token = null; },
+    sessionId: () => sessionEpoch,
+    isActive: () => token !== null || intervalId !== null,
     driver: () => driver,
-    // Shared-core hooks (stopRefillLoop clears whatever timerId holds).
-    getTimerId: () => timerId,
-    setTimerId: (value) => { timerId = value; },
+    // Shared-core hooks: only a real setInterval id is ever exposed to clearIntervalFn.
+    getIntervalId: () => intervalId,
+    setIntervalId: (value) => { intervalId = value; },
     nudgeIfWaitAsync() {
       const sharedState = getSharedState();
       if (driver === 'waitasync' && sharedState) {
@@ -150,17 +158,18 @@ function createRefillLoop({
   };
 
   function start() {
-    // ALWAYS bump first (Finding 2): prior loops see stale sessionId on next wake and exit.
-    currentSessionId += 1;
-    const sessionId = currentSessionId;
-    stopRefillLoop(); // clear any interval timer / sentinel from previous loop
-    timerId = sessionId; // truthy sentinel — loop is active
+    sessionEpoch += 1;
+    // Clears any interval timer and retires loops from a previous start (Finding 2).
+    stopRefillLoop();
+    loopGeneration += 1;
+    const generation = loopGeneration;
+    token = generation; // loop is active
     const selected = selectDriver();
 
     if (selected === 'waitasync') {
-      runWaitAsyncLoop(sessionId);
+      runWaitAsyncLoop(generation);
     } else if (selected === 'port') {
-      runPortLoop(sessionId);
+      runPortLoop(generation);
     } else {
       runDegradedIntervalLoop();
     }

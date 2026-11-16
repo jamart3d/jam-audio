@@ -16,6 +16,7 @@ function make(overrides = {}) {
     stops: 0,
     events: [],
     intervals: [],
+    clearedIntervals: [],
     onRefill: null,
     ...overrides.ctx,
   };
@@ -24,7 +25,13 @@ function make(overrides = {}) {
     getDiagnostics: () => ctx.diagnostics,
     getWorkletPort: () => ctx.port,
     refillRingBuffer: () => { ctx.refills += 1; ctx.onRefill?.(); },
-    stopRefillLoop: () => { ctx.stops += 1; loop.setTimerId(null); },
+    // Mirrors the controller: the shared core clears a real interval id, then the loop retires.
+    stopRefillLoop: () => {
+      ctx.stops += 1;
+      if (loop.getIntervalId() != null) ctx.clearedIntervals.push(loop.getIntervalId());
+      loop.setIntervalId(null);
+      loop.stop();
+    },
     isRefillPending: () => ctx.refillPending,
     emitDiagnosticsEvent: (e) => ctx.events.push(e),
     nowMs: () => ctx.clock,
@@ -72,15 +79,15 @@ test('start() bumps the session, stops any previous timer, and marks the loop ac
     assert.equal(ctx.stops, 1);
     assert.equal(loop.isActive(), true);
     assert.equal(ctx.intervals.length, 1);
-    assert.equal(loop.getTimerId(), 9001, 'the interval id is held for the shared core to clear');
+    assert.equal(loop.getIntervalId(), 9001, 'the interval id is held for the shared core to clear');
   });
 });
 
-test('waitasync loop exits on invalidate() and clears its sentinel only while still current', async () => {
+test('waitasync loop exits on invalidate() and marks itself inactive only while still current', async () => {
   const { loop, ctx } = make();
   loop.start();
-  const token = loop.getTimerId();
-  assert.equal(token, loop.sessionId());
+  assert.equal(loop.isActive(), true);
+  assert.equal(loop.getIntervalId(), null, 'no interval id exists under waitasync');
   await flush();
   assert.ok(ctx.refills >= 1);
   loop.invalidate();
@@ -90,19 +97,41 @@ test('waitasync loop exits on invalidate() and clears its sentinel only while st
   const refillsAfterInvalidate = ctx.refills;
   await flush(10);
   assert.equal(ctx.refills, refillsAfterInvalidate, 'retired loop no longer refills');
-  assert.equal(loop.getTimerId(), null, 'retired loop cleared its own sentinel');
+  assert.equal(loop.isActive(), false, 'retired loop cleared its own token');
 
-  // A replacement loop started meanwhile keeps its sentinel when an older loop exits.
+  // A replacement loop started meanwhile stays active when an older loop exits.
   const second = make();
   second.loop.start();
   await flush();
-  const firstToken = second.loop.getTimerId();
   second.loop.start();
-  await flush();
-  assert.notEqual(second.loop.getTimerId(), firstToken);
-  assert.equal(second.loop.getTimerId(), second.loop.sessionId(), 'newer sentinel survives the older loop exiting');
+  await flush(10);
+  assert.equal(second.loop.isActive(), true, 'newer loop survives the older loop exiting');
   second.loop.invalidate();
   await flush();
+});
+
+test('stop() retires a running waitasync loop without touching the session epoch', async () => {
+  const { loop, ctx } = make();
+  loop.start();
+  await flush();
+  const epoch = loop.sessionId();
+  loop.stop();
+  assert.equal(loop.isActive(), false);
+  assert.equal(loop.sessionId(), epoch, 'fetch callbacks comparing the epoch stay valid');
+  const before = ctx.refills;
+  Atomics.add(ctx.sharedState, REFILL_REQUEST_INDEX, 1);
+  Atomics.notify(ctx.sharedState, REFILL_REQUEST_INDEX, 1);
+  await flush(20);
+  assert.equal(ctx.refills, before, 'a worklet refill request after stop() is not served');
+});
+
+test('stop() never exposes the loop token as an interval id', async () => {
+  const { loop, ctx } = make();
+  loop.start();
+  ctx.stops = 0;
+  assert.equal(loop.getIntervalId(), null);
+  loop.stop();
+  assert.deepEqual(ctx.clearedIntervals, []);
 });
 
 test('invalidate() during a refill stops the loop before it waits again', async () => {
@@ -124,6 +153,12 @@ test('port driver wires onmessage to refill and stops when the session is invali
     loop.invalidate();
     port.onmessage();
     assert.equal(ctx.refills, 2, 'stale port loop ignores wake messages');
+    const fresh = make({ ctx: { port: { onmessage: null } } });
+    fresh.loop.start();
+    const before = fresh.ctx.refills;
+    fresh.loop.stop();
+    fresh.ctx.port.onmessage();
+    assert.equal(fresh.ctx.refills, before, 'stop() also retires a port loop');
   });
 });
 

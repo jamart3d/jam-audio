@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Refill loop stop handling: stopping the refill loop no longer passes the waitasync/port loop's internal session number to `clearIntervalFn` (which could cancel an unrelated worker timer with the same id), and now actually retires a running waitasync or port loop instead of leaving it servicing worklet refill requests. Neither was observed causing a field problem; both were found by code reading and probe tests.
+
 ### Changed
 - Extracted the refill driver loops (waitasync, port, degraded interval) from `audio_playback_worker_controller.js` into `playback_worker_controller_refill_loop.js` with unit tests and characterization tests; runtime behavior is unchanged.
 - `packages/jam-audio-engine/build.sh` now syncs the built Wasm into a Jamdisc web app only when `JAMDISC_WEB_PKG_DIR` is set (its value is the destination directory). The sibling `../../../jamdisc` auto-detect added in 0.5.3 is removed; Jamdisc's own build and deploy scripts copy these artifacts themselves.

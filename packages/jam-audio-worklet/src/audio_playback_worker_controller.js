@@ -183,8 +183,8 @@ function createPlaybackWorkerController({
       sharedState,
       slots: { READ_INDEX, WRITE_INDEX, TOTAL_FRAMES_RENDERED_INDEX, HEARTBEAT_COUNT_INDEX },
     }),
-    getRefillTimerId: () => refillLoop.getTimerId(),
-    setRefillTimerId: (value) => refillLoop.setTimerId(value),
+    getRefillTimerId: () => refillLoop.getIntervalId(),
+    setRefillTimerId: (value) => refillLoop.setIntervalId(value),
   });
 
   const coreEmitDiagnosticsEvent = core.emitDiagnosticsEvent;
@@ -450,7 +450,8 @@ function createPlaybackWorkerController({
 
   const _coreStopRefillLoop = core.stopRefillLoop;
   function stopRefillLoop() {
-    _coreStopRefillLoop();
+    _coreStopRefillLoop(); // clears a real interval id only
+    refillLoop.stop();     // retires waitasync/port loops and marks the loop inactive
     if (sharedState && sharedState.length > REFILL_REQUEST_INDEX) {
       Atomics.notify(sharedState, REFILL_REQUEST_INDEX, 1);
     }
@@ -1923,8 +1924,8 @@ function createPlaybackWorkerController({
           Atomics.add(sharedState, EPOCH_INDEX, 1);
 
           // Notify slot 7 so any still-running loop iteration wakes immediately
-          // to see the new FRAMES_AVAILABLE=0. stopRefillLoop() above bumps
-          // currentSessionId, so the old loop will exit; this notify is a
+          // to see the new FRAMES_AVAILABLE=0. stopRefillLoop() above retires the
+          // old loop (it bumps the loop generation), so it exits; this notify is a
           // belt-and-suspenders wake in case the loop is mid-waitAsync.
           Atomics.add(sharedState, REFILL_REQUEST_INDEX, 1);
           Atomics.notify(sharedState, REFILL_REQUEST_INDEX, 1);
