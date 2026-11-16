@@ -244,6 +244,9 @@ async function heldStartThenKeepWarmPause(h) {
 // Play became required (context went suspended and the worker became ready for a
 // start that is still pending). After Play is satisfied with the context running,
 // the gain must ramp back to currentVolume and the start must be published.
+// NOTE: the interruption here is artificial. It needs a second worker-ready event to
+// make Play required mid-resume; without it the interruption never happens (verified).
+// A keep-warm resume does not make the worker re-emit ready, so this is a pin, not the bug.
 test('keep-warm resume interrupted by a Play requirement ramps gain back after explicit Play', (t) => withHarness(t, async (h) => {
   await heldStartThenKeepWarmPause(h);
   h.bridge.setPlaybackIntent(true);
@@ -292,8 +295,59 @@ test('Play on an already running context with no pending start still restores ga
   await flush();
 
   assert.equal(lastGain(h), 1, 'gain must be at currentVolume after Play on a running context');
-  assert.ok(h.started >= startedBefore, 'started callback must not regress');
+  assert.equal(h.started, startedBefore, 'no second start is published for an already published request');
   const health = await h.bridge.getWorkerHealthStatus();
   assert.equal(health.gainNodeValue, 1);
   assert.equal(health.transportMuted, false);
+}));
+
+// --- Realistic call sequences (mirror playback_provider.dart) ---------------------
+// In-app Play from pause: setPlaybackIntent(true), then unlockAudioFromGesture(),
+// and when audioActivationBlocked was set at press time, NO bridge.resume().
+
+test('R1: blocked Play press (intent, unlock, no resume) publishes once and restores gain', (t) => withHarness(t, async (h) => {
+  await h.startPlay();
+  assert.equal(h.started, 0, 'precondition: held');
+  h.bridge.setPlaybackIntent(true);
+  h.bridge.unlockAudioFromGesture();
+  h.ctx().allowResume();
+  await flush();
+  assert.equal(h.started, 1);
+  assert.equal(lastGain(h), 1);
+}));
+
+// F8 window. Existing test 're-Play after a cancelled generation does not revive the
+// stale worker-ready latch' pins started === 0 for this window and says Dart gates
+// pause() on playing. These tests ask whether the window is harmful when reached:
+// pause() cancels a held, unpublished start, then the app presses Play.
+async function heldThenPausedWhileSuspended(h) {
+  await h.startPlay();
+  assert.equal(h.started, 0, 'precondition: start held, worker ready, context suspended');
+  await h.bridge.pause();
+  assert.equal(h.ctx().state, 'suspended', 'precondition: context still suspended');
+}
+
+test('R2: Play after a pause that cancelled a held start (blocked path, no resume) publishes and restores gain', (t) => withHarness(t, async (h) => {
+  await heldThenPausedWhileSuspended(h);
+  h.bridge.setPlaybackIntent(true);
+  h.bridge.unlockAudioFromGesture();
+  h.ctx().allowResume();
+  await flush();
+  const health = await h.bridge.getWorkerHealthStatus();
+  console.log('R2 state', JSON.stringify({ started: h.started, gain: lastGain(h), transportMuted: health.transportMuted, resumeUnmuteSent: health.resumeUnmuteSent }));
+  assert.equal(h.started, 1, 'Play must publish the start');
+  assert.equal(lastGain(h), 1, 'gain must be restored');
+}));
+
+test('R3: Play after a pause that cancelled a held start (unblocked path, with resume) publishes and restores gain', (t) => withHarness(t, async (h) => {
+  await heldThenPausedWhileSuspended(h);
+  h.bridge.setPlaybackIntent(true);
+  h.bridge.unlockAudioFromGesture();
+  const resuming = h.bridge.resume();
+  h.ctx().allowResume();
+  await resuming;
+  await flush();
+  const health = await h.bridge.getWorkerHealthStatus();
+  console.log('R3 state', JSON.stringify({ started: h.started, gain: lastGain(h), transportMuted: health.transportMuted, resumeUnmuteSent: health.resumeUnmuteSent }));
+  assert.equal(h.started, 1, 'Play must publish the start');
 }));
