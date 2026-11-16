@@ -1887,6 +1887,48 @@ export function createJamAudioBridge({
     }
   }
 
+  // Keep-warm resume must never wait on the hidden anchor's play(): after the page
+  // is backgrounded the browser can leave that promise pending forever, and awaiting
+  // it held the gain ramp (gain stuck at 0, resume() never settling). Start it
+  // without blocking. A wall-clock race (setTimeout) is deliberately avoided on the
+  // resume path because timers throttle to 1s+ in hidden tabs (see rampGainToValue).
+  // The one-shot recovery below runs on a timer, so throttling only delays it.
+  const ANCHOR_PLAY_RECOVERY_MS = 250;
+  function startAnchorWithoutBlocking() {
+    const el = silentAudioEl;
+    if (!el) return;
+    let settled = false;
+    let attempt = null;
+    try { attempt = el.play(); } catch (_) { attempt = null; }
+    if (attempt && typeof attempt.then === 'function') {
+      attempt.then(() => { settled = true; }, () => { settled = true; });
+    } else {
+      settled = true;
+    }
+    if (settled) return;
+    const timer = setTimeout(() => {
+      if (settled || silentAudioEl !== el) return;
+      emitDiagnosticsEvent({
+        type: 'anchor-play-timeout',
+        label: 'Silent anchor play() did not settle; retrying once',
+        timestampMs: nowMs(),
+        severity: 'warning',
+        readyState: el.readyState ?? null,
+        networkState: el.networkState ?? null,
+        currentTime: el.currentTime ?? null,
+        paused: el.paused ?? null,
+        holdsActualTrack: anchorHoldsActualTrack,
+      });
+      try {
+        // Never reload an anchor that carries the actual track; only the silent wav.
+        if (!anchorHoldsActualTrack) el.load();
+        const retry = el.play();
+        if (retry && typeof retry.catch === 'function') retry.catch(() => {});
+      } catch (_) {}
+    }, ANCHOR_PLAY_RECOVERY_MS);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+  }
+
   async function resume() {
     if (!audioContext) return;
 
@@ -1924,7 +1966,7 @@ export function createJamAudioBridge({
             // Keep-warm: audioContext is never suspended after pause(), so no
             // audioContext resume call is needed. Gain is unfrozen by the fadeIn
             // path in runMutedAndroidTransportTransition (transportUnmute + ramp).
-            if (silentAudioEl) await silentAudioEl.play().catch(() => {});
+            startAnchorWithoutBlocking();
           },
         });
         if (staleResume()) return;
@@ -1945,7 +1987,7 @@ export function createJamAudioBridge({
           gainNode.gain.cancelScheduledValues(now);
           gainNode.gain.setValueAtTime(0, now);
         }
-        if (silentAudioEl) await silentAudioEl.play().catch(() => {});
+        startAnchorWithoutBlocking();
         if (staleResume()) return;
         if (gainNode) {
           const now = audioContext.currentTime;

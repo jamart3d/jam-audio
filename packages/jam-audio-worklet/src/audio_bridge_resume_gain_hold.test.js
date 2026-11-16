@@ -378,41 +378,93 @@ test('P: repeated Play presses (intent, unlock, intent) after a held start whose
   assert.equal(lastGain(h), 1, 'gain must be restored');
 }));
 
-// Hypothesis (unverified in a real browser): the hidden anchor's play() promise never
-// settles after backgrounding (autoplay policy / suspended media element). resume()
-// awaits silentAudioEl.play() before scheduling the gain ramp, so the gain stays at 0
-// with the transport already unmuted and the worker running, and resume() never returns.
-// These tests assert the HYPOTHESIZED defective state, so they pass if the defect is
-// real; they are todo until the owner decides on a fix, after which they should be
-// inverted to assert the ramp is not held up.
-// Desktop transport unmutes the worker before awaiting the anchor; Android transport mutes first and
-// only unmutes after performAction, so it holds the transport muted instead (different state).
-for (const [label, userAgent, expectUnmuted] of [['desktop transport', 'node-test', true], ['Android transport', 'Mozilla/5.0 (Linux; Android 14) Chrome/120', false]]) {
-  test(`H7: keep-warm resume with a never-settling anchor play() leaves gain 0 and never resolves (${label})`, { todo: 'Hypothesis: anchor play() holds up the gain ramp. No fix approved.' }, (t) => withHarness(t, async (h) => {
-    await h.startPlay();
-    h.bridge.unlockAudioFromGesture();
-    h.ctx().allowResume();
-    await flush();
-    assert.equal(h.started, 1, 'precondition: published start');
-    await h.bridge.pause();
-    assert.equal(h.ctx().state, 'running', 'precondition: keep-warm');
-    const anchor = h.audios[0];
-    let anchorPlayCalls = 0;
-    anchor.play = () => { anchorPlayCalls += 1; return new Promise(() => {}); };
+// Field bug: after pause + backgrounding the hidden anchor's play() promise can stay
+// pending forever (paused=false, readyState=1, currentTime=0). keep-warm resume()
+// used to await it before scheduling the gain ramp: gain stuck at 0, resume() never
+// settled. resume() must now start the anchor without waiting for it.
+// Desktop transport unmutes the worker before the anchor; Android transport mutes
+// first and unmutes after performAction. Both must ramp and resolve.
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    let settled = false;
-    const resuming = h.bridge.resume().then(() => { settled = true; }, () => { settled = true; });
-    await flush(10);
+async function publishedThenPausedWithAnchor(h, makePlay) {
+  await h.startPlay();
+  h.bridge.unlockAudioFromGesture();
+  h.ctx().allowResume();
+  await flush();
+  assert.equal(h.started, 1, 'precondition: published start');
+  await h.bridge.pause();
+  assert.equal(h.ctx().state, 'running', 'precondition: keep-warm');
+  const anchor = h.audios[0];
+  const record = { calls: 0, loads: 0, settle: null };
+  const originalLoad = anchor.load.bind(anchor);
+  anchor.load = () => { record.loads += 1; originalLoad(); };
+  anchor.play = makePlay(record);
+  return { anchor, record };
+}
+
+const neverSettling = (record) => () => { record.calls += 1; return new Promise(() => {}); };
+const lateSettling = (record) => () => {
+  record.calls += 1;
+  return new Promise((resolve) => { record.settle = resolve; });
+};
+
+for (const [label, userAgent] of [['desktop transport', 'node-test'], ['Android transport', 'Mozilla/5.0 (Linux; Android 14) Chrome/120']]) {
+  test(`H7: keep-warm resume with a never-settling anchor play() still ramps the gain and resolves (${label})`, (t) => withHarness(t, async (h) => {
+    const { record } = await publishedThenPausedWithAnchor(h, neverSettling);
+    const rampsBefore = positiveRamps(h).length;
+
+    const outcome = await Promise.race([
+      h.bridge.resume().then(() => 'resolved'),
+      wait(1500).then(() => 'hung'),
+    ]);
+    await flush();
     const health = await h.bridge.getWorkerHealthStatus();
-    console.log('H7', label, JSON.stringify({
-      anchorPlayCalls, settled, gain: lastGain(h), resumeUnmuteSent: health.resumeUnmuteSent,
-      transportMuted: health.transportMuted, positiveRamps: h.ctx().rampTargets.filter((v) => v > 0).length,
-    }));
-    assert.ok(anchorPlayCalls >= 1, 'resume() must have awaited the anchor play()');
-    assert.equal(lastGain(h), 0, 'gain stays 0');
-    assert.equal(health.resumeUnmuteSent, expectUnmuted);
-    assert.equal(health.transportMuted, !expectUnmuted);
-    assert.equal(settled, false, 'resume() never resolves');
-    void resuming;
+
+    assert.equal(outcome, 'resolved', 'resume() must not wait on the anchor');
+    assert.ok(record.calls >= 1, 'the anchor start was still requested');
+    assert.equal(lastGain(h), 1, 'gain ramps to currentVolume');
+    assert.equal(positiveRamps(h).length, rampsBefore + 1, 'exactly one ramp');
+    assert.equal(health.transportMuted, false);
+    assert.equal(health.resumeUnmuteSent, true);
+  }, { userAgent }));
+
+  test(`H7: anchor play() settling late causes no second ramp or unmute (${label})`, (t) => withHarness(t, async (h) => {
+    const { record } = await publishedThenPausedWithAnchor(h, lateSettling);
+    await h.bridge.resume();
+    await flush();
+    const rampsAfterResume = positiveRamps(h).length;
+    const unmutesAfterResume = h.worker().commands.filter((c) => c.type === 'transportUnmute' || c.command === 'transportUnmute').length;
+    const gainAfterResume = lastGain(h);
+
+    record.settle();
+    await flush();
+    await wait(350); // past the recovery window; a settled play() must disarm it
+
+    assert.equal(lastGain(h), gainAfterResume);
+    assert.equal(positiveRamps(h).length, rampsAfterResume, 'no double ramp');
+    assert.equal(
+      h.worker().commands.filter((c) => c.type === 'transportUnmute' || c.command === 'transportUnmute').length,
+      unmutesAfterResume,
+      'no second unmute',
+    );
+    assert.equal(record.loads, 0, 'recovery must not run once play() settled');
+    assert.equal(record.calls, 1, 'no recovery retry once play() settled');
   }, { userAgent }));
 }
+
+test('H7: a never-settling anchor gets exactly one non-blocking recovery (load + play) and a diagnostics event', (t) => withHarness(t, async (h) => {
+  const events = [];
+  h.bridge.setOnDiagnosticsEvent((raw) => events.push(typeof raw === 'string' ? JSON.parse(raw) : raw));
+  const { record } = await publishedThenPausedWithAnchor(h, neverSettling);
+  await h.bridge.resume();
+  await wait(400);
+  await flush();
+  assert.equal(record.loads, 1, 'one load() on the silent anchor');
+  assert.equal(record.calls, 2, 'original play() plus exactly one recovery play()');
+  await wait(400);
+  assert.equal(record.calls, 2, 'no repeated retries');
+  const timeoutEvents = events.filter((e) => e?.type === 'anchor-play-timeout');
+  assert.equal(timeoutEvents.length, 1, 'one anchor-play-timeout event');
+  assert.ok('holdsActualTrack' in timeoutEvents[0] && 'paused' in timeoutEvents[0], 'event carries anchor state');
+  assert.equal(lastGain(h), 1);
+}));
