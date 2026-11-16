@@ -202,8 +202,8 @@ function createPlaybackWorkerController({
         if (sharedState) {
           payload.readIndex = Atomics.load(sharedState, READ_INDEX);
           payload.writeIndex = Atomics.load(sharedState, WRITE_INDEX);
-          payload.framesRendered = sharedState.length > 5 ? Atomics.load(sharedState, 5) : null;
-          payload.workletHeartbeatCount = sharedState.length > 6 ? Atomics.load(sharedState, 6) : null;
+          payload.framesRendered = sharedState.length > TOTAL_FRAMES_RENDERED_INDEX ? Atomics.load(sharedState, TOTAL_FRAMES_RENDERED_INDEX) : null;
+          payload.workletHeartbeatCount = sharedState.length > HEARTBEAT_COUNT_INDEX ? Atomics.load(sharedState, HEARTBEAT_COUNT_INDEX) : null;
         } else {
           payload.readIndex = null;
           payload.writeIndex = null;
@@ -2190,8 +2190,8 @@ function createPlaybackWorkerController({
       if (sharedState) {
         health.readIndex = Atomics.load(sharedState, READ_INDEX);
         health.writeIndex = Atomics.load(sharedState, WRITE_INDEX);
-        health.framesRendered = sharedState.length > 5 ? Atomics.load(sharedState, 5) : null;
-        health.workletHeartbeatCount = sharedState.length > 6 ? Atomics.load(sharedState, 6) : null;
+        health.framesRendered = sharedState.length > TOTAL_FRAMES_RENDERED_INDEX ? Atomics.load(sharedState, TOTAL_FRAMES_RENDERED_INDEX) : null;
+        health.workletHeartbeatCount = sharedState.length > HEARTBEAT_COUNT_INDEX ? Atomics.load(sharedState, HEARTBEAT_COUNT_INDEX) : null;
       } else {
         health.readIndex = null;
         health.writeIndex = null;
@@ -2211,19 +2211,6 @@ function createPlaybackWorkerController({
       return { REFILL_REQUEST_INDEX, TARGET_FRAMES_INDEX };
     },
   };
-}
-
-function createWorkerDiagnostics(overrides = {}) {
-  return createBaseWorkerDiagnostics({
-    lowWaterMarkCount: 0,
-    recoveryModeActive: false,
-    activeBoundedWindowSize: 0,
-    retainedBytes: 0,
-    pendingSeekDistanceMs: 0,
-    fetchToDecodeLagMs: 0,
-    resumeAfterStallLatencyMs: 0,
-    ...overrides,
-  });
 }
 
 export { createPlaybackWorkerController };

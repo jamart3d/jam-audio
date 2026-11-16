@@ -409,16 +409,25 @@ test('10. Blocker verification: bridge snapshot and handoff diagnostics read und
   }
 });
 
-test('audio_processor.js uses named protocol constants instead of raw slot numbers', () => {
-  const source = fs.readFileSync(new URL('./audio_processor.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(
-    source,
-    /Atomics\.\w+\(\s*this\.state\s*,\s*\d+/,
-    'Found raw numeric slot index in Atomics call on this.state',
-  );
-  assert.doesNotMatch(
-    source,
-    /this\.state\.length\s*>\s*\d+/,
-    'Found raw numeric slot index in this.state.length guard',
-  );
+test('protocol consumers use named protocol constants instead of raw slot numbers', () => {
+  const dir = new URL('./', import.meta.url);
+  const consumers = fs
+    .readdirSync(dir)
+    .filter((name) => name.endsWith('.js') && !name.endsWith('.test.js'))
+    .filter((name) => fs.readFileSync(new URL(name, dir), 'utf8').includes('// protocol:begin'));
+  assert.ok(consumers.includes('audio_processor.js'), 'audio_processor.js must be scanned');
+  assert.ok(consumers.includes('audio_playback_worker_controller.js'), 'controller must be scanned');
+  for (const name of consumers) {
+    const source = fs.readFileSync(new URL(name, dir), 'utf8');
+    assert.doesNotMatch(
+      source,
+      /Atomics\.\w+\(\s*(?:this\.)?\w*[sS]tate\s*,\s*\d+/,
+      `${name}: raw numeric slot index in Atomics call on a state array`,
+    );
+    assert.doesNotMatch(
+      source,
+      /(?:this\.)?\w*[sS]tate\.length\s*>\s*\d+/,
+      `${name}: raw numeric slot index in a state.length guard`,
+    );
+  }
 });
