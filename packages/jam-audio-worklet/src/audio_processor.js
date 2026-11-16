@@ -110,9 +110,9 @@ class JamAudioProcessor extends AudioWorkletProcessor {
       if (!isEOS) {
         if (!this.isUnderrunning) {
           this.isUnderrunning = true;
-          Atomics.add(this.state, 9, 1); // UNDERRUN_EPISODES_INDEX
+          Atomics.add(this.state, UNDERRUN_EPISODES_INDEX, 1);
         }
-        Atomics.add(this.state, 10, left.length); // SILENT_FRAMES_INDEX
+        Atomics.add(this.state, SILENT_FRAMES_INDEX, left.length);
       } else {
         this.isUnderrunning = false;
       }
@@ -168,9 +168,9 @@ class JamAudioProcessor extends AudioWorkletProcessor {
     if (framesToProcess < left.length && !isEOS) {
        if (!this.isUnderrunning) {
           this.isUnderrunning = true;
-          Atomics.add(this.state, 9, 1);
+          Atomics.add(this.state, UNDERRUN_EPISODES_INDEX, 1);
        }
-       Atomics.add(this.state, 10, left.length - framesToProcess);
+       Atomics.add(this.state, SILENT_FRAMES_INDEX, left.length - framesToProcess);
     } else if (framesToProcess === left.length) {
        this.isUnderrunning = false;
     }
@@ -214,12 +214,12 @@ class JamAudioProcessor extends AudioWorkletProcessor {
       }
     }
 
-    if (this.state.length > 5) {
-      Atomics.store(this.state, 5, this.totalFramesRendered);
+    if (this.state.length > TOTAL_FRAMES_RENDERED_INDEX) {
+      Atomics.store(this.state, TOTAL_FRAMES_RENDERED_INDEX, this.totalFramesRendered);
     }
-    if (this.state.length > 6) {
+    if (this.state.length > HEARTBEAT_COUNT_INDEX) {
       this.heartbeatCount = (this.heartbeatCount || 0) + 1;
-      Atomics.store(this.state, 6, this.heartbeatCount);
+      Atomics.store(this.state, HEARTBEAT_COUNT_INDEX, this.heartbeatCount);
     }
 
     return true;

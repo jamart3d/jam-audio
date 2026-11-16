@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { createPlaybackWorkerController } from './audio_playback_worker_controller.js';
 import { createDiagnosticsState, buildSnapshot } from './audio_diagnostics_state.js';
 
@@ -407,3 +408,18 @@ test('10. Blocker verification: bridge snapshot and handoff diagnostics read und
     Atomics.waitAsync = originalWaitAsync;
   }
 });
+
+test('audio_processor.js uses named protocol constants instead of raw slot numbers', () => {
+  const source = fs.readFileSync(new URL('./audio_processor.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(
+    source,
+    /Atomics\.\w+\(\s*this\.state\s*,\s*\d+/,
+    'Found raw numeric slot index in Atomics call on this.state',
+  );
+  assert.doesNotMatch(
+    source,
+    /this\.state\.length\s*>\s*\d+/,
+    'Found raw numeric slot index in this.state.length guard',
+  );
+});
+
