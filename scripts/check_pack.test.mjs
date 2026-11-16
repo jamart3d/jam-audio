@@ -32,3 +32,19 @@ test('rejects unparseable input', () => {
   const r = spawnSync(process.execPath, [script], { input: 'not json', encoding: 'utf8' });
   assert.equal(r.status, 1);
 });
+
+test('enforces audio_bridge_media_session.js when required', () => {
+  const r = run(
+    ['package.json', 'src/audio_bridge.js', 'src/audio_bridge_activation.js', 'src/audio_bridge_media_session.js'],
+    ['src/audio_bridge_activation.js', 'src/audio_bridge_media_session.js'],
+  );
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /Package contents OK: 4 files/);
+
+  const missing = run(
+    ['package.json', 'src/audio_bridge.js', 'src/audio_bridge_activation.js'],
+    ['src/audio_bridge_activation.js', 'src/audio_bridge_media_session.js'],
+  );
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /missing required file: src\/audio_bridge_media_session\.js/);
+});

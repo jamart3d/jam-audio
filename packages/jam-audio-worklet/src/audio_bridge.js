@@ -6,6 +6,7 @@ import {
 } from './audio_diagnostics_state.js';
 import { createBridgeSessionState } from './audio_bridge_session.js';
 import { createActivationController } from './audio_bridge_activation.js';
+import { createBridgeMediaSessionController } from './audio_bridge_media_session.js';
 import {
   clampVolume,
   sendPreloadCommand,
@@ -72,10 +73,6 @@ export function createJamAudioBridge({
   let diagnosticsSnapshotTimerId;
   let diagnosticsSnapshotEnabled = false;
   let diagnosticsMode = 'minimal';
-  let heartbeatIntervalId;
-  let heartbeatLastKnownPositionSec = 0;
-  let heartbeatLastKnownDurationSec = 0;
-  let heartbeatPositionCapturedAtMs = 0;
 
   /** @type {((error: any) => void) | null} */
   let onPlaybackErrorCallback = null;
@@ -147,19 +144,11 @@ export function createJamAudioBridge({
   let silentPlayHandler = null;
   let isAppOwnedResumeInFlight = false;
   let mediaSessionResumeRequested = false;
-  let _nextTrackMeta = null;
   let lastPositionEventTs = 0;
 
   let transportMuted = false;
   let transportMuteReason = null;
   let resumeUnmuteSent = false;
-
-  // NOTIFICATION_KEEP_WHILE_PAUSED: set via localStorage to switch notification behavior while paused.
-  // false (Option A, default): silentAudioEl pauses on logical pause → notification disappears, no wrong icon.
-  // true (Option B): silentAudioEl stays playing → notification survives but shows wrong ⏸ icon.
-  // Toggle from console: localStorage.setItem('jamdisc_notif_keep_paused', 'true') then reload.
-  let NOTIFICATION_KEEP_WHILE_PAUSED =
-    (typeof localStorage !== 'undefined') && localStorage.getItem('jamdisc_notif_keep_paused') === 'true';
 
   let queueTrackIds = [];
   let activeTrackIndex = 0;
@@ -277,6 +266,43 @@ export function createJamAudioBridge({
   const clearSessionMetadataFromLocalStorage = () => {
     sessionState.clearSessionMetadataFromLocalStorage();
   };
+
+  const mediaSessionController = createBridgeMediaSessionController({
+    getNavigator: () => (typeof navigator !== 'undefined' ? navigator : undefined),
+    getWindow: () => (typeof window !== 'undefined' ? window : undefined),
+    getStorage: () => (typeof localStorage !== 'undefined' ? localStorage : null),
+    getPerformanceNow: () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()),
+    nowMs: () => nowMs(),
+    getMediaMetadataCtor: () => (typeof MediaMetadata !== 'undefined' ? MediaMetadata : undefined),
+    isPlayRequired: () => activation.isPlayRequired(),
+    holdActivationOutput: () => holdActivationOutput(),
+    authorizePlay: () => activation.authorizePlay(),
+    unlockAudioFromGesture: () => activation.unlockAudioFromGesture(),
+    ensureSilentAudio: () => ensureSilentAudio(),
+    getSilentAudioEl: () => silentAudioEl,
+    requestMediaSessionResume: () => { mediaSessionResumeRequested = true; },
+    getAudioContextState: () => audioContext?.state ?? 'none',
+    getCurrentPositionAndDurationMs: () => ({
+      currentPositionMs: diagnosticsState.playbackPositionMs ?? diagnosticsState.positionMs ?? 0,
+      durationMs: diagnosticsState.durationMs ?? Math.max(lastKnownBufferedDurationMs, 0),
+    }),
+    onActiveTrackTitleChanged: (title) => {
+      activeTrackTitle = title || '';
+      saveSessionMetadataToLocalStorage();
+    },
+    emitDiagnosticsEvent: (event) => emitDiagnosticsEvent(event),
+    runMediaAction: (action, fn) => runMediaAction(action, fn),
+    getOnPlay: () => onPlayCallback,
+    getOnPause: () => onPauseCallback,
+    getOnStop: () => onStopCallback,
+    getOnNext: () => onNextCallback,
+    getOnPrevious: () => onPreviousCallback,
+    getOnSeek: () => onSeekCallback,
+    fallbackResume: () => resume(),
+    fallbackPause: () => pause(),
+    fallbackStop: () => stop(),
+    namespace,
+  });
 
   const setSessionQueue = (trackIds, currentIndex) => {
     sessionState.setSessionQueue(trackIds, currentIndex);
@@ -728,36 +754,11 @@ export function createJamAudioBridge({
    * and further runtime logic changes in the bridge may not be effective.
    */
   function startHeartbeat() {
-    if (heartbeatIntervalId) return;
-    heartbeatIntervalId = window.setInterval(() => {
-      if ('mediaSession' in navigator && heartbeatLastKnownDurationSec > 0) {
-        try {
-          const elapsedSec = (performance.now() - heartbeatPositionCapturedAtMs) / 1000;
-          const position = Math.min(
-            heartbeatLastKnownPositionSec + elapsedSec,
-            heartbeatLastKnownDurationSec,
-          );
-          navigator.mediaSession.setPositionState({
-            duration: heartbeatLastKnownDurationSec,
-            playbackRate: 1.0,
-            position,
-          });
-        } catch {}
-      }
-      emitDiagnosticsEvent({
-        type: 'media-session-heartbeat',
-        label: 'Media session heartbeat',
-        timestampMs: nowMs(),
-        severity: 'info',
-      });
-    }, 5000);
+    mediaSessionController.startHeartbeat();
   }
 
   function stopHeartbeat() {
-    if (heartbeatIntervalId) {
-      window.clearInterval(heartbeatIntervalId);
-      heartbeatIntervalId = undefined;
-    }
+    mediaSessionController.stopHeartbeat();
   }
 
   function setStartupPhase(phase) {
@@ -1280,26 +1281,7 @@ export function createJamAudioBridge({
           activeTrackIndex = Math.min(activeTrackIndex + delta, queueTrackIds.length - 1);
           activeTrackId = queueTrackIds[activeTrackIndex];
         }
-        if (_nextTrackMeta !== null) {
-          activeTrackTitle = _nextTrackMeta.title || '';
-          saveSessionMetadataToLocalStorage();
-          if ('mediaSession' in navigator) {
-            navigator.mediaSession.metadata = new MediaMetadata({
-              title: _nextTrackMeta.title,
-              artist: _nextTrackMeta.artist,
-              album: _nextTrackMeta.album,
-              artwork: _nextTrackMeta.artworkUrl ? [
-                { src: _nextTrackMeta.artworkUrl, sizes: '96x96', type: 'image/jpeg' },
-                { src: _nextTrackMeta.artworkUrl, sizes: '192x192', type: 'image/jpeg' },
-                { src: _nextTrackMeta.artworkUrl, sizes: '512x512', type: 'image/jpeg' },
-              ] : [],
-            });
-          }
-          _nextTrackMeta = null;
-        } else {
-          activeTrackTitle = '';
-          saveSessionMetadataToLocalStorage();
-        }
+        mediaSessionController.applyNextTrackMeta();
         if (typeof onTrackChangedCallback === 'function') {
           onTrackChangedCallback({
             transitionPositionMs: data.transitionPositionMs ?? 0,
@@ -2180,168 +2162,23 @@ export function createJamAudioBridge({
   }
 
   function updatePlaybackState(state, options = {}) {
-    const { preserveMediaSession = false } = options;
-    if (activation.isPlayRequired()) {
-      holdActivationOutput();
-      if (state === 'playing') state = 'paused';
-    }
-    if ('mediaSession' in navigator) {
-      if (state === 'loading') return;
-      let mapped = 'none';
-      if (state === 'playing') mapped = 'playing';
-      else if (state === 'paused') mapped = 'paused';
-
-      if (mapped === 'playing' || mapped === 'paused') {
-        startHeartbeat();
-      } else if (!preserveMediaSession) {
-        stopHeartbeat();
-      }
-
-      if (!preserveMediaSession) navigator.mediaSession.playbackState = mapped;
-      if (mapped === 'playing') {
-        ensureSilentAudio();
-        if (silentAudioEl.paused) silentAudioEl.play().catch(() => {});
-      } else if (mapped === 'paused') {
-        ensureSilentAudio();
-        if (NOTIFICATION_KEEP_WHILE_PAUSED) {
-          if (silentAudioEl.paused) silentAudioEl.play().catch(() => {});
-        } else {
-          if (!silentAudioEl.paused) silentAudioEl.pause();
-        }
-      } else if (mapped === 'none') {
-        if (!preserveMediaSession && silentAudioEl && !silentAudioEl.paused) {
-          silentAudioEl.pause();
-          silentAudioEl.currentTime = 0;
-        }
-      }
-    }
+    mediaSessionController.updatePlaybackState(state, options);
   }
 
   function setNotificationKeepWhilePaused(value) {
-    NOTIFICATION_KEEP_WHILE_PAUSED = Boolean(value);
-    try {
-      if (value) {
-        localStorage.setItem('jamdisc_notif_keep_paused', 'true');
-      } else {
-        localStorage.removeItem('jamdisc_notif_keep_paused');
-      }
-    } catch (_) {}
+    mediaSessionController.setNotificationKeepWhilePaused(value);
   }
 
   function updatePositionState(durationSec, playbackRate, positionSec) {
-    if (!('mediaSession' in navigator)) return;
-    try {
-      const duration = Number(durationSec);
-      const rate = Number(playbackRate);
-      const position = Number(positionSec);
-      if (!Number.isFinite(duration) || duration <= 0) return;
-      if (!Number.isFinite(rate) || rate <= 0) return;
-      if (!Number.isFinite(position) || position < 0) return;
-      navigator.mediaSession.setPositionState({
-        duration,
-        playbackRate: rate,
-        position: Math.min(position, duration),
-      });
-      heartbeatLastKnownPositionSec = position;
-      heartbeatLastKnownDurationSec = duration;
-      heartbeatPositionCapturedAtMs = performance.now();
-    } catch {}
+    mediaSessionController.updatePositionState(durationSec, playbackRate, positionSec);
   }
 
   function setNextTrackMeta(title, artist, album, artworkUrl) {
-    _nextTrackMeta = { title: title || '', artist: artist || '', album: album || '', artworkUrl: artworkUrl || '' };
+    mediaSessionController.setNextTrackMeta(title, artist, album, artworkUrl);
   }
 
   function updateMediaSession(title, artist, album, artworkUrl) {
-    activeTrackTitle = title || '';
-    saveSessionMetadataToLocalStorage();
-    if (!('mediaSession' in navigator)) return;
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title,
-      artist,
-      album,
-      artwork: artworkUrl ? [
-        { src: artworkUrl, sizes: '96x96', type: 'image/jpeg' },
-        { src: artworkUrl, sizes: '192x192', type: 'image/jpeg' },
-        { src: artworkUrl, sizes: '512x512', type: 'image/jpeg' },
-      ] : [],
-    });
-
-    navigator.mediaSession.setActionHandler('play', () => {
-      emitDiagnosticsEvent({
-        type: 'media-session-play-handler-entered',
-        label: 'Media Session play action handler entered',
-        timestampMs: nowMs(),
-        severity: 'info',
-        audioContextState: audioContext?.state ?? 'none',
-      });
-      runMediaAction('play', () => {
-        const blockedStart = activation.isPlayRequired();
-        activation.authorizePlay();
-        mediaSessionResumeRequested = true;
-        if (silentAudioEl) {
-          silentAudioEl.play().catch(() => {});
-        }
-        if (typeof onPlayCallback === 'function') onPlayCallback();
-        else {
-          console.warn(`[${namespace}] onPlayCallback not registered, falling back to low-level resume()`);
-          if (blockedStart) activation.unlockAudioFromGesture();
-          else resume();
-        }
-      });
-    });
-    navigator.mediaSession.setActionHandler('pause', () => {
-      runMediaAction('pause', () => {
-        if (typeof onPauseCallback === 'function') onPauseCallback();
-        else {
-          console.warn(`[${namespace}] onPauseCallback not registered, falling back to low-level pause()`);
-          pause();
-        }
-      });
-    });
-    navigator.mediaSession.setActionHandler('stop', () => {
-      runMediaAction('stop', () => {
-        if (typeof onStopCallback === 'function') onStopCallback();
-        else stop();
-      });
-    });
-    navigator.mediaSession.setActionHandler('nexttrack', () => {
-      runMediaAction('nexttrack', () => {
-        if (typeof onNextCallback === 'function') onNextCallback();
-      });
-    });
-    navigator.mediaSession.setActionHandler('previoustrack', () => {
-      runMediaAction('previoustrack', () => {
-        if (typeof onPreviousCallback === 'function') onPreviousCallback();
-      });
-    });
-    navigator.mediaSession.setActionHandler('seekto', (details) => {
-      runMediaAction('seekto', () => {
-        if (typeof onSeekCallback === 'function' && details.seekTime != null) {
-          onSeekCallback(Math.round(details.seekTime * 1000));
-        }
-      });
-    });
-    navigator.mediaSession.setActionHandler('seekbackward', (details) => {
-      runMediaAction('seekbackward', () => {
-        if (typeof onSeekCallback !== 'function') return;
-        const currentPositionMs = diagnosticsState.playbackPositionMs ?? diagnosticsState.positionMs ?? 0;
-        const durationMs = diagnosticsState.durationMs ?? Math.max(lastKnownBufferedDurationMs, 0);
-        const offsetMs = (details.seekOffset || 10) * 1000;
-        const nextPositionMs = Math.round(currentPositionMs - offsetMs);
-        onSeekCallback(Math.min(Math.max(nextPositionMs, 0), durationMs || Infinity));
-      });
-    });
-    navigator.mediaSession.setActionHandler('seekforward', (details) => {
-      runMediaAction('seekforward', () => {
-        if (typeof onSeekCallback !== 'function') return;
-        const currentPositionMs = diagnosticsState.playbackPositionMs ?? diagnosticsState.positionMs ?? 0;
-        const durationMs = diagnosticsState.durationMs ?? Math.max(lastKnownBufferedDurationMs, 0);
-        const offsetMs = (details.seekOffset || 10) * 1000;
-        const nextPositionMs = Math.round(currentPositionMs + offsetMs);
-        onSeekCallback(Math.min(Math.max(nextPositionMs, 0), durationMs || Infinity));
-      });
-    });
+    mediaSessionController.updateMediaSession(title, artist, album, artworkUrl);
   }
 
   async function ensureMediaAlive() {
