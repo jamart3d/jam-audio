@@ -20,10 +20,14 @@
 // Wiring confirmed functional via node mock environment (S2 PASS).
 
 import { computeBufferPolicy } from './buffer_policy.js';
+import { createSharedPlaybackWorkerControllerCore } from './playback_worker_controller_core.js';
 import {
-  createBaseWorkerDiagnostics,
-  createSharedPlaybackWorkerControllerCore,
-} from './playback_worker_controller_core.js';
+  applyDecodeMetric,
+  buildExtraSyncPayload,
+  computeBufferFill,
+  createWorkerDiagnostics as createDiagnostics,
+  updateLowWaterMark,
+} from './playback_worker_controller_diagnostics.js';
 import {
   createWorkletPortState,
   currentPlayerFrom,
@@ -139,27 +143,10 @@ function createPlaybackWorkerController({
   let currentSessionId = 0;
   let activePlaybackSessionGeneration = null;
   function createWorkerDiagnostics(overrides = {}) {
-    const diag = createBaseWorkerDiagnostics({
-      lowWaterMarkCount: 0,
-      recoveryModeActive: false,
-      activeBoundedWindowSize: 0,
-      retainedBytes: 0,
-      pendingSeekDistanceMs: 0,
-      fetchToDecodeLagMs: 0,
-      resumeAfterStallLatencyMs: 0,
-      ...overrides,
+    return createDiagnostics(overrides, {
+      getSharedState: () => sharedState,
+      slots: { UNDERRUN_EPISODES_INDEX, SILENT_FRAMES_INDEX },
     });
-    Object.defineProperties(diag, {
-      underrunCount: {
-        get: () => sharedState ? Atomics.load(sharedState, UNDERRUN_EPISODES_INDEX) : 0,
-        set: () => {}
-      },
-      silentFrameCount: {
-        get: () => sharedState ? Atomics.load(sharedState, SILENT_FRAMES_INDEX) : 0,
-        set: () => {}
-      }
-    });
-    return diag;
   }
 
   let diagnostics = createWorkerDiagnostics();
@@ -178,41 +165,13 @@ function createPlaybackWorkerController({
     clearIntervalFn,
     getDiagnostics: () => diagnostics,
     getFrameCapacity: () => frameCapacity,
-    getExtraSyncPayload: () => {
-      const payload = {
-        lowWaterMarkCount: diagnostics.lowWaterMarkCount,
-        recoveryModeActive: diagnostics.recoveryModeActive,
-        activeBoundedWindowSize: diagnostics.activeBoundedWindowSize,
-        retainedBytes: diagnostics.retainedBytes,
-        pendingSeekDistanceMs: diagnostics.pendingSeekDistanceMs,
-        fetchToDecodeLagMs: diagnostics.fetchToDecodeLagMs,
-        resumeAfterStallLatencyMs: diagnostics.resumeAfterStallLatencyMs,
-      };
-      if (activePolicy) {
-        payload.latencyPolicy = {
-          profile: activePolicy.profile,
-          playbackStartFrames: activePolicy.playbackStartFrames,
-          steadyStateTargetFrames: activePolicy.steadyStateTargetFrames,
-          criticalThresholdFrames: activePolicy.criticalThresholdFrames,
-          startupDurationSec: activePolicy.startupDurationSec,
-          steadyDurationSec: activePolicy.steadyDurationSec,
-        };
-      }
-      if (diagnosticsMode === 'extended') {
-        if (sharedState) {
-          payload.readIndex = Atomics.load(sharedState, READ_INDEX);
-          payload.writeIndex = Atomics.load(sharedState, WRITE_INDEX);
-          payload.framesRendered = sharedState.length > TOTAL_FRAMES_RENDERED_INDEX ? Atomics.load(sharedState, TOTAL_FRAMES_RENDERED_INDEX) : null;
-          payload.workletHeartbeatCount = sharedState.length > HEARTBEAT_COUNT_INDEX ? Atomics.load(sharedState, HEARTBEAT_COUNT_INDEX) : null;
-        } else {
-          payload.readIndex = null;
-          payload.writeIndex = null;
-          payload.framesRendered = null;
-          payload.workletHeartbeatCount = null;
-        }
-      }
-      return payload;
-    },
+    getExtraSyncPayload: () => buildExtraSyncPayload({
+      diagnostics,
+      activePolicy,
+      diagnosticsMode,
+      sharedState,
+      slots: { READ_INDEX, WRITE_INDEX, TOTAL_FRAMES_RENDERED_INDEX, HEARTBEAT_COUNT_INDEX },
+    }),
     getRefillTimerId: () => refillTimerId,
     setRefillTimerId: (value) => {
       refillTimerId = value;
@@ -274,17 +233,12 @@ function createPlaybackWorkerController({
       ? Atomics.load(sharedState, FRAMES_AVAILABLE_INDEX)
       : 0;
     diagnostics.framesAvailable = framesAvailable;
-    diagnostics.bufferFillPercent =
-      frameCapacity > 0
-        ? Number(((framesAvailable / frameCapacity) * 100).toFixed(1))
-        : 0;
-
-    if (diagnostics.bufferFillPercent < 10 && !isBelowLowWaterMark) {
-      isBelowLowWaterMark = true;
-      diagnostics.lowWaterMarkCount += 1;
-    } else if (diagnostics.bufferFillPercent >= 15) {
-      isBelowLowWaterMark = false;
-    }
+    diagnostics.bufferFillPercent = computeBufferFill(framesAvailable, frameCapacity);
+    isBelowLowWaterMark = updateLowWaterMark(
+      diagnostics,
+      diagnostics.bufferFillPercent,
+      isBelowLowWaterMark,
+    );
 
     const isCritical = activePolicy ? framesAvailable < activePolicy.criticalThresholdFrames : false;
     if (isCritical !== diagnostics.recoveryModeActive) {
@@ -936,16 +890,7 @@ function createPlaybackWorkerController({
   }
 
   function updateDecodeMetrics(decodeDurationMs) {
-    diagnostics.lastDecodeMs = decodeDurationMs;
-    diagnostics.maxDecodeMs = Math.max(diagnostics.maxDecodeMs, decodeDurationMs);
-    diagnostics.refillCount += 1;
-    diagnostics.movingAverageDecodeMs = Number(
-      (
-        ((diagnostics.movingAverageDecodeMs * (diagnostics.refillCount - 1)) +
-          decodeDurationMs) /
-        diagnostics.refillCount
-      ).toFixed(2),
-    );
+    applyDecodeMetric(diagnostics, decodeDurationMs);
   }
 
   function emitPlaybackStarted() {
