@@ -34,10 +34,7 @@ import {
   playerHasEnded,
   playerPositionMs,
 } from './playback_worker_controller_runtime.js';
-import {
-  startPortLoop,
-  nudgeWaitAsyncState,
-} from './playback_worker_controller_refill.js';
+import { createRefillLoop } from './playback_worker_controller_refill_loop.js';
 
 
 // protocol:begin
@@ -112,10 +109,7 @@ function createPlaybackWorkerController({
   let streamingFinalized = false;
   let streamingBufferedDurationMs = 0;
   let startupCompleted = false;
-  let refillTimerId = null;
   let refillPending = false;
-  let refillDriver = null; // 'waitasync' | 'port' | 'degraded-interval'; set once per worker lifetime
-  let lastRefillTickMs = 0;
   let trackStartPositionMs = 0;
   let currentTrackEndPositionMs = 0;
   let currentTrackEndPositionKnown = false;
@@ -140,7 +134,6 @@ function createPlaybackWorkerController({
   let lastChunkReceivedAt = 0;
   let isStalled = false;
   let consecutiveZeroRefills = 0;
-  let currentSessionId = 0;
   let activePlaybackSessionGeneration = null;
   function createWorkerDiagnostics(overrides = {}) {
     return createDiagnostics(overrides, {
@@ -160,6 +153,24 @@ function createPlaybackWorkerController({
   let pendingGaplessSampleRate = 0;
   let activeSampleRate = 48000;
   let activePolicy = null;
+  // Loop state (session epoch, selected driver, timer id) lives in the refill loop module.
+  // Everything the controller can reassign is read through a getter on every use.
+  const refillLoop = createRefillLoop({
+    getSharedState: () => sharedState,
+    getDiagnostics: () => diagnostics,
+    getWorkletPort,
+    refillRingBuffer: () => refillRingBuffer(),
+    stopRefillLoop: () => stopRefillLoop(),
+    isRefillPending: () => refillPending,
+    emitDiagnosticsEvent: (event) => emitDiagnosticsEvent(event),
+    nowMs,
+    performanceNow,
+    setIntervalFn,
+    waitTimeoutMs,
+    refillRequestIndex: REFILL_REQUEST_INDEX,
+    refillIntervalMs: REFILL_INTERVAL_MS,
+  });
+
   const core = createSharedPlaybackWorkerControllerCore({
     emitMessage,
     clearIntervalFn,
@@ -172,10 +183,8 @@ function createPlaybackWorkerController({
       sharedState,
       slots: { READ_INDEX, WRITE_INDEX, TOTAL_FRAMES_RENDERED_INDEX, HEARTBEAT_COUNT_INDEX },
     }),
-    getRefillTimerId: () => refillTimerId,
-    setRefillTimerId: (value) => {
-      refillTimerId = value;
-    },
+    getRefillTimerId: () => refillLoop.getTimerId(),
+    setRefillTimerId: (value) => refillLoop.setTimerId(value),
   });
 
   const coreEmitDiagnosticsEvent = core.emitDiagnosticsEvent;
@@ -339,7 +348,7 @@ function createPlaybackWorkerController({
     lastSeamGeneration = 0;
     arithmeticBoundaryArmedAtMs = 0;
     activePlaybackSessionGeneration = null;
-    currentSessionId++;
+    refillLoop.invalidate();
   }
 
   function setCurrentTrackEndPosition(durationMs, isKnown = durationMs > 0) {
@@ -732,122 +741,6 @@ function createPlaybackWorkerController({
     return 'fired';
   }
 
-  function startRefillWaitLoop() {
-    // ALWAYS bump first (Finding 2): prior loops see stale sessionId on next wake and exit.
-    currentSessionId++;
-    const sessionId = currentSessionId;
-    stopRefillLoop(); // clear any interval timer / sentinel from previous loop
-    refillTimerId = sessionId; // truthy sentinel — loop is active
-    const driver = selectRefillDriver();
-
-    if (driver === 'waitasync') {
-      _runWaitAsyncLoop(sessionId);
-    } else if (driver === 'port') {
-      _runPortLoop(sessionId);
-    } else {
-      _runDegradedIntervalLoop();
-    }
-  }
-
-  // Primary driver: Atomics.waitAsync
-  // waitTimeoutMs is injected via controller options (default 1000ms production; 10ms in tests).
-  async function _runWaitAsyncLoop(sessionId) {
-    while (currentSessionId === sessionId) {
-      if (!sharedState) break;
-      // Capture expected BEFORE refill so a worklet notify during refill is
-      // not lost: waitAsync will see not-equal and loop immediately.
-      const expected = Atomics.load(sharedState, REFILL_REQUEST_INDEX);
-      refillRingBuffer();
-      if (currentSessionId !== sessionId) break; // session changed during refill
-      const result = Atomics.waitAsync(sharedState, REFILL_REQUEST_INDEX, expected, waitTimeoutMs);
-      if (result.async) {
-        await result.value; // 'ok' | 'timed-out' | 'not-equal' — all wake reasons are fine
-      }
-      // Any wake reason → loop, re-read, refill. Spurious wakes are harmless.
-    }
-    if (refillTimerId === sessionId) refillTimerId = null;
-  }
-
-  // Fallback #1: MessagePort from worklet
-  function _runPortLoop(sessionId) {
-    const success = startPortLoop({
-      getWorkletPort,
-      refillRingBuffer,
-      shouldKeepRunning: () => sessionId === currentSessionId,
-    });
-    if (!success) {
-      emitDiagnosticsEvent({
-        type: 'refill-driver-port-missing',
-        label: 'Port driver selected but workletPort is null — falling back to interval',
-        timestampMs: nowMs(),
-        severity: 'warning',
-      });
-      _runDegradedIntervalLoop();
-      return;
-    }
-    // Initial refill on loop start (covers startup case before worklet fires)
-    refillRingBuffer();
-    refillTimerId = sessionId;
-  }
-
-  // Fallback #2: degraded setInterval (throttle-prone, logs warning on each delayed tick)
-  function _runDegradedIntervalLoop() {
-    lastRefillTickMs = performanceNow();
-    refillTimerId = setIntervalFn(() => {
-      if (refillPending) return;
-      const currentTime = performanceNow();
-      const gap = currentTime - lastRefillTickMs;
-      lastRefillTickMs = currentTime;
-      diagnostics.lastRefillGapMs = Number(gap.toFixed(2));
-      diagnostics.maxRefillGapMs = Math.max(
-        diagnostics.maxRefillGapMs,
-        diagnostics.lastRefillGapMs,
-      );
-      if (gap > 25) {
-        emitDiagnosticsEvent({
-          type: 'refill-timer-delayed',
-          label: `refill delayed ${Math.round(gap)}ms`,
-          severity: 'warning',
-          timestampMs: nowMs(),
-          gapMs: Math.round(gap),
-        });
-        if (diagnostics.bufferFillPercent < 15) {
-          emitDiagnosticsEvent({
-            type: 'refill-delayed-headroom-low',
-            label: 'Refill delayed while headroom low',
-            severity: 'critical',
-            timestampMs: nowMs(),
-            bufferFillPercent: diagnostics.bufferFillPercent,
-          });
-        }
-      }
-      refillRingBuffer();
-    }, REFILL_INTERVAL_MS);
-  }
-
-  function selectRefillDriver() {
-    if (refillDriver !== null) return refillDriver; // already selected
-    // BOUNDS GUARD (Finding 1): if the SAB is small (legacy 5-slot fixture), slot 7 is
-    // out of range. waitAsync on an out-of-bounds index would throw RangeError. Fall back
-    // to legacy interval so existing tests continue to pass without change.
-    const sabHasSlot7 = sharedState && sharedState.length > REFILL_REQUEST_INDEX;
-    if (typeof Atomics.waitAsync === 'function' && sabHasSlot7) {
-      refillDriver = 'waitasync';
-    } else if (getWorkletPort() !== null) {
-      refillDriver = 'port';
-    } else {
-      refillDriver = 'degraded-interval';
-    }
-    emitDiagnosticsEvent({
-      type: 'refill-driver-selected',
-      label: `Refill driver selected: ${refillDriver}`,
-      timestampMs: nowMs(),
-      severity: refillDriver === 'degraded-interval' ? 'warning' : 'info',
-      driver: refillDriver,
-    });
-    return refillDriver;
-  }
-
   function bindSharedBuffers({ pcmBuffer, stateBuffer, frameCapacity: nextCapacity, sampleRate: nextSampleRate = 48000, protocolVersion, protocolSlots }) {
     const stateLen = stateBuffer.byteLength / Int32Array.BYTES_PER_ELEMENT;
     if (protocolVersion !== PROTOCOL_VERSION || protocolSlots !== PROTOCOL_SLOTS || stateLen !== PROTOCOL_SLOTS) {
@@ -864,7 +757,7 @@ function createPlaybackWorkerController({
     Atomics.store(sharedState, TARGET_FRAMES_INDEX, activePolicy.steadyStateTargetFrames);
     Atomics.store(sharedState, REFILL_REQUEST_INDEX, 0); // reset generation counter
     updateBufferMetrics();
-    selectRefillDriver();
+    refillLoop.selectDriver();
   }
 
   function noteRefillComplete() {
@@ -1026,7 +919,7 @@ function createPlaybackWorkerController({
     const activePlayer = currentPlayer();
     const hadSharedState = sharedState !== null;
     const hadActivePlayer = activePlayer !== null;
-    const refillLoopActiveBefore = refillTimerId !== null;
+    const refillLoopActiveBefore = refillLoop.isActive();
     const endOfStreamBefore = sharedState
       ? Atomics.load(sharedState, END_OF_STREAM_INDEX)
       : null;
@@ -1061,7 +954,7 @@ function createPlaybackWorkerController({
         preloadHoldActive = false;
         preloadHoldUntilMs = 0;
         if (sharedState) Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
-        startRefillWaitLoop();
+        refillLoop.start();
         emitDiagnosticsEvent({
           type: 'gapless-fallback-recovery',
           reason: 'premature-eos-unlock',
@@ -1096,8 +989,8 @@ function createPlaybackWorkerController({
     let action = 'flag-cleared-only';
     if (canRecover && sharedState) {
       Atomics.store(sharedState, END_OF_STREAM_INDEX, 0);
-      if (refillTimerId === null) {
-        startRefillWaitLoop();
+      if (!refillLoop.isActive()) {
+        refillLoop.start();
         action = 'refill-restarted';
         pendingGaplessFallbackRecoveryConfirmation = true;
       } else {
@@ -1195,7 +1088,7 @@ function createPlaybackWorkerController({
           } else {
             // Handoff succeeded — restart refill loop for the new track.
             stopRefillLoop();
-            startRefillWaitLoop();
+            refillLoop.start();
           }
           return;
         }
@@ -1629,10 +1522,10 @@ function createPlaybackWorkerController({
     if (!activePlayer || !sharedSamples || !sharedState) {
       return;
     }
-    if (refillTimerId == null) {
-      startRefillWaitLoop();
-    } else if (refillDriver === 'waitasync' && sharedState) {
-      nudgeWaitAsyncState(sharedState, REFILL_REQUEST_INDEX);
+    if (!refillLoop.isActive()) {
+      refillLoop.start();
+    } else {
+      refillLoop.nudgeIfWaitAsync();
     }
     refillRingBuffer();
   }
@@ -1674,7 +1567,7 @@ function createPlaybackWorkerController({
           decoderCreate: Number((performanceNow() - startedAt).toFixed(2)),
         },
       });
-      startRefillWaitLoop();
+      refillLoop.start();
       refillRingBuffer();
     },
 
@@ -1682,7 +1575,7 @@ function createPlaybackWorkerController({
       stopRefillLoop();
       resetPlaybackState();
       activePlaybackSessionGeneration = sessionGeneration;
-      const sessionId = currentSessionId;
+      const sessionId = refillLoop.sessionId();
       const maxWindowMb = 64;
       diagnostics = createWorkerDiagnostics({
         workerState: 'running',
@@ -1756,7 +1649,7 @@ function createPlaybackWorkerController({
 
       fetchController = createRangeFetchController(url, {
         onChunk: (chunk) => {
-          if (sessionId !== currentSessionId) return;
+          if (sessionId !== refillLoop.sessionId()) return;
           const isFirstChunk = lastChunkReceivedAt === 0;
           lastChunkReceivedAt = performanceNow();
           if (isFirstChunk && fetchStartAt > 0) {
@@ -1787,7 +1680,7 @@ function createPlaybackWorkerController({
           }
         },
         onComplete: () => {
-          if (sessionId !== currentSessionId) return;
+          if (sessionId !== refillLoop.sessionId()) return;
           if (windowedPlayer) {
             windowedPlayer.finalizeStream();
             streamingFinalized = true;
@@ -1795,7 +1688,7 @@ function createPlaybackWorkerController({
           }
         },
         onError: (err) => {
-          if (sessionId !== currentSessionId) return;
+          if (sessionId !== refillLoop.sessionId()) return;
           diagnostics.transitionGapMs = null;
           emitPlaybackError(err.message || 'fetch error');
         }
@@ -2050,7 +1943,7 @@ function createPlaybackWorkerController({
           severity: 'info',
         });
       }
-      startRefillWaitLoop();
+      refillLoop.start();
     },
 
     setBufferedDurationMs(value) {

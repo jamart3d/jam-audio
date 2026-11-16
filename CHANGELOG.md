@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- Extracted the refill driver loops (waitasync, port, degraded interval) from `audio_playback_worker_controller.js` into `playback_worker_controller_refill_loop.js` with unit tests and characterization tests; runtime behavior is unchanged.
 - `packages/jam-audio-engine/build.sh` now syncs the built Wasm into a Jamdisc web app only when `JAMDISC_WEB_PKG_DIR` is set (its value is the destination directory). The sibling `../../../jamdisc` auto-detect added in 0.5.3 is removed; Jamdisc's own build and deploy scripts copy these artifacts themselves.
 
 ## [0.5.4] - 2026-11-15
